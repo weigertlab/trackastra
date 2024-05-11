@@ -15,7 +15,7 @@ pip install git+https://github.com/weigertlab/trackastra.git
 For tracking with an integer linear program:
 ```bash
 conda install -c conda-forge -c gurobi -c funkelab ilpy
-pip install trackastra[ilp]
+pip install "trackastra[ilp] @ git+https://github.com/weigertlab/trackastra.git"
 ```
 
 ## Usage
