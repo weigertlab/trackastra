@@ -1,0 +1,20 @@
+batch_size: 8
+crop_size:
+- 256
+- 256
+detection_folders:
+- TRA
+dropout: 0.01
+example_images: False  # Slow
+input_train:
+- data/ctc/Fluo-N2DL-HeLa/02
+input_val:
+- data/ctc/Fluo-N2DL-HeLa/01
+max_tokens: 2048
+name: example
+ndim: 2
+num_decoder_layers: 5
+num_encoder_layers: 5
+outdir: runs
+distributed: False
+window: 6
