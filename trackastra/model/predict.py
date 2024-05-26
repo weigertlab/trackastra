@@ -58,6 +58,7 @@ def predict_windows(
     delta_t: int = 1,
     edge_threshold: float = 0.05,
     spatial_dim: int = 3,
+    progbar_class=tqdm
 ) -> dict:
     """_summary_.
 
@@ -100,7 +101,7 @@ def predict_windows(
         (max_id, max_id), dtype=np.float32
     )
 
-    for t in tqdm(
+    for t in progbar_class(
         range(len(windows)),
         desc="Computing associations",
     ):

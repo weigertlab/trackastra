@@ -2,6 +2,7 @@ import torch
 import napari
 import numpy as np
 from napari.layers import Image, Labels
+from napari.utils import progress
 from typing import List
 from magicgui import magicgui
 import argparse 
@@ -11,7 +12,7 @@ from pathlib import Path
 from trackastra.utils import normalize
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
-
+ 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def create_widget(model_path:Path):
@@ -23,12 +24,13 @@ def create_widget(model_path:Path):
 
         model = Trackastra.load_from_folder(model_path, device=device)
         
-        track_graph = model.track(img, mask, mode="greedy")  # or mode="ilp"
+        track_graph = model.track(img, mask, mode="greedy", progbar_class=progress)  # or mode="ilp"
 
         # Visualise in napari
         napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
         _, masks_tracked = graph_to_ctc(track_graph,mask,outdir=None)
-        return [(napari_tracks, dict(name='tracks'), "tracks"), (masks_tracked, dict(name='masks_tracked'), "labels")]
+        masks.visible = False
+        return [(napari_tracks, dict(name='tracks',tail_length=10), "tracks"), (masks_tracked, dict(name='masks_tracked', opacity=0.3), "labels")]
     
     return my_widget
 
@@ -46,14 +48,14 @@ if __name__ == "__main__":
     
     if args.img is not None:
         f_img = Path(args.img)
-        imgs = np.stack(tuple(tifffile.imread(f) for f in tqdm(tuple(sorted(f_img.glob("*.tif"))[:10]))))
+        imgs = np.stack(tuple(tifffile.imread(f) for f in tqdm(tuple(sorted(f_img.glob("*.tif"))))))
         viewer.add_image(imgs)
     else: 
         imgs = None 
         
     if args.mask is not None:
         f_mask = Path(args.mask)
-        masks = np.stack(tuple(tifffile.imread(f) for f in tqdm(tuple(sorted(f_mask.glob("*.tif"))[:10]))))
+        masks = np.stack(tuple(tifffile.imread(f) for f in tqdm(tuple(sorted(f_mask.glob("*.tif"))))))
         viewer.add_labels(masks)
 
     if args.model is not None:

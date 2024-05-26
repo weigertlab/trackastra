@@ -452,9 +452,11 @@ def get_features(
     features: Literal["none", "wrfeat"] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
+    progbar_class=tqdm,
 ) -> list[WRFeatures]:
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
+    logger.info(f"Extracting features from {len(detections)} detections")
     if n_workers > 0:
         features = joblib.Parallel(n_jobs=n_workers, backend='multiprocessing')(
             joblib.delayed(WRFeatures.from_mask_img)(
@@ -463,15 +465,16 @@ def get_features(
                 img=img[np.newaxis, ...],
                 t_start=t,
             )
-            for t, (mask, img) in tqdm(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
+            for t, (mask, img) in progbar_class(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
         )
     else:
+        logger.info("Using single process for feature extraction")
         features = tuple(WRFeatures.from_mask_img(
                 mask=mask[np.newaxis, ...],
                 img=img[np.newaxis, ...],
                 t_start=t,
             )
-            for t, (mask, img) in tqdm(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
+            for t, (mask, img) in progbar_class(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
         ) 
         
     return features
@@ -494,9 +497,10 @@ def _check_dimensions(x: np.ndarray, ndim: int):
 def build_windows(
     features: list[WRFeatures],
     window_size: int,
+    progbar_class=tqdm
 ) -> list[dict]:
     windows = []
-    for t1, t2 in tqdm(
+    for t1, t2 in progbar_class(
         zip(range(0, len(features)), range(window_size, len(features) + 1)),
         total=len(features) - window_size + 1,
         desc="Building windows",

@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import yaml
 import logging 
 import numpy as np
@@ -39,22 +40,26 @@ class Trackastra:
         return cls.load_from_folder(dir=Path(download_dir) / name, device=device)
 
     def _predict(
-        self, imgs: np.ndarray, masks: np.ndarray, edge_threshold: float = 0.05, n_workers: int = 8
+        self, imgs: np.ndarray, masks: np.ndarray, edge_threshold: float = 0.05, n_workers: int = 0,
+        progbar_class=tqdm,
     ):
         logger.info("Predicting weights for candidate graph")
         self.transformer.eval()
         
         features = get_features(
-            detections=masks, imgs=imgs, ndim=self.transformer.config["coord_dim"], n_workers=n_workers
+            detections=masks, imgs=imgs, ndim=self.transformer.config["coord_dim"], n_workers=n_workers, progbar_class=progbar_class
         )
-        windows = build_windows(features, window_size=self.transformer.config["window"])
+        logger.info("Building windows")
+        windows = build_windows(features, window_size=self.transformer.config["window"],progbar_class=progbar_class)
         
+        logger.info("Predicting windows")
         predictions = predict_windows(
             windows=windows,
             features=features,
             model=self.transformer,
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
+            progbar_class=progbar_class
         )
 
         return predictions
@@ -96,8 +101,9 @@ class Trackastra:
         imgs: np.ndarray,
         masks: np.ndarray,
         mode: Literal["greedy", "ilp"] = "greedy",
+        progbar_class=tqdm,
         **kwargs,
     ):
-        predictions = self._predict(imgs, masks)
+        predictions = self._predict(imgs, masks, progbar_class=progbar_class)
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         return track_graph
