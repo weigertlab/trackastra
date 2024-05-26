@@ -1,22 +1,35 @@
 # *Trackastra* - Tracking by Association with Transformers
 
-*Trackastra* links already segmented cells in a microscopy timelapse using a learnt transformer model that was trained on a diverse set of microscopy videos.
-<!-- TODO ## Overview, including an image/video -->
+Trackastra links already segmented cells in a microscopy timelapse using a learnt transformer model that was trained on a diverse set of microscopy videos.
 
-If you are using this code in your research, please cite
-> Benjamin Gallusser and Martin Weigert, *Trackastra - Transformer-based cell tracking for live-cell microscopy*, 2024 (in preparation).
+![Overview](overview.png)
+
+If you are using this code in your research, please cite our preprint
+> Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> arXiv, 2024
 
 
 ## Installation
+This repository contains the Python implementation of Trackastra.
+
+Please first set up a Python environment (with Python version 3.9 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
+
+Trackastra can then be installed using `pip` directly from this repository:
 ```bash
 pip install git+https://github.com/weigertlab/trackastra.git
 ```
 
-For tracking with an integer linear program:
+For tracking with an integer linear program (ILP):
 ```bash
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp] @ git+https://github.com/weigertlab/trackastra.git"
 ```
+
+Notes:
+- For the optional ILP linking, this will install [`motile`](https://funkelab.github.io/motile/index.html) and binaries for two discrete optimizers:
+
+      1. The [Gurobi Optimizer](https://www.gurobi.com/). This is a commercial solver, which requires a valid license. Academic licenses are provided for free, see [here](https://www.gurobi.com/academia/academic-program-and-licenses/) for how to obtain one.
+
+      2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
 
 ## Usage
 
