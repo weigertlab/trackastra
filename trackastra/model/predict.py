@@ -28,7 +28,6 @@ def predict(batch, model):
     feats = torch.from_numpy(batch["features"])
     coords = torch.from_numpy(batch["coords"])
     timepoints = torch.from_numpy(batch["timepoints"]).long()
-
     # Hack that assumes that all parameters of a model are on the same device
     device = next(model.parameters()).device
     feats = feats.unsqueeze(0).to(device)
@@ -36,10 +35,10 @@ def predict(batch, model):
     coords = coords.unsqueeze(0).to(device)
 
     # Concat timepoints to coordinates
-    tp_and_coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
-    A = model(coords=tp_and_coords, features=feats)
-    A = model.normalize_output(A, timepoints, tp_and_coords)
-
+    coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
+    A = model(coords, features=feats)
+    A = model.normalize_output(A, timepoints, coords)
+    
     # # Spatially far entries should not influence the causal normalization
     # dist = torch.cdist(coords[0, :, 1:], coords[0, :, 1:])
     # invalid = dist > model.config["spatial_pos_cutoff"]
@@ -111,7 +110,7 @@ def predict_windows(
         labels = batch["labels"]
 
         A = predict(batch, model)
-
+        
         dt = timepoints[None, :] - timepoints[:, None]
         time_mask = np.logical_and(dt <= delta_t, dt > 0)
         A[~time_mask] = 0

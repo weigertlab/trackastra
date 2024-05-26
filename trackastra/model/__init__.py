@@ -1,4 +1,3 @@
 # ruff: noqa: F401
 
-from .model import Trackastra, TrackingTransformer
-from .predict import predict, predict_windows
+from .model_api import Trackastra

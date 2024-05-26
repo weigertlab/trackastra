@@ -54,6 +54,7 @@ def track_greedy(
         key=lambda edge: edge[2][edge_attr],
         reverse=True,
     )
+    
     for edge in tqdm(edges, desc="Greedily matched edges"):
         node_in, node_out, features = edge
         assert (
@@ -104,7 +105,7 @@ def build_graph(
             weight=1,
         )
 
-    if not use_distance:
+    if use_distance:
         weights = None
     if weights:
         weights = {w[0]: w[1] for w in weights}
@@ -165,7 +166,7 @@ def build_graph(
         iterator.set_description(
             f"{e_added} edges in frame {t_begin}  Total edges: {len(G.edges)}"
         )
-
+    
     logger.info(f"Added {len(G.nodes)} vertices, {len(G.edges)} edges")
 
     return G
