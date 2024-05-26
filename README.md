@@ -7,6 +7,10 @@ Trackastra links already segmented cells in a microscopy timelapse using a learn
 If you are using this code in your research, please cite our preprint
 > Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> arXiv, 2024
 
+## Examples
+Nuclei tracking | Bacteria tracking
+:-: | :-:
+<video src='https://github.com/weigertlab/trackastra/assets/8866751/807a8545-2f65-4697-a175-89b90dfdc435' width=180></video>| <video src='https://github.com/weigertlab/trackastra/assets/8866751/e7426d34-4407-4acb-ad79-fae3bc7ee6f9' width=180/></video>
 
 ## Installation
 This repository contains the Python implementation of Trackastra.
