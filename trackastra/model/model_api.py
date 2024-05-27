@@ -24,7 +24,7 @@ class Trackastra:
 
     @classmethod
     @validate_call
-    def load_from_folder(cls, dir: Path, device: str = "cpu"):
+    def from_folder(cls, dir: Path, device: str = "cpu"):
         transformer = TrackingTransformer.from_folder(dir, map_location=device)
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
@@ -32,12 +32,12 @@ class Trackastra:
     # TODO make safer
     @classmethod
     @validate_call
-    def load_pretrained(
+    def from_pretrained(
         cls, name: str, device: str = "cpu", download_dir: Path = "./.models"
     ):
         download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
-        return cls.load_from_folder(dir=Path(download_dir) / name, device=device)
+        return cls.from_folder(dir=Path(download_dir) / name, device=device)
 
     def _predict(
         self, imgs: np.ndarray, masks: np.ndarray, edge_threshold: float = 0.05, n_workers: int = 0,
