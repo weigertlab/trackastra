@@ -61,7 +61,7 @@ imgs, masks = test_data_bacteria()
 imgs = np.stack([normalize(x) for x in imgs])
 
 # Load a pretrained model
-model = Trackastra.from_pretrained("ctc", device="cuda")  # or device="cpu"
+model = Trackastra.from_pretrained("general_2d", device="cuda")  # or device="cpu"
 
 # or from a local folder
 # model = Trackastra.from_folder('path/my_model_folder/', device="cuda")  # or device="cpu"
@@ -80,6 +80,8 @@ ctc_tracks, masks_tracked = graph_to_ctc(
 
 # Visualise in napari
 napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
+
+import napari
 v = napari.Viewer()
 v.add_image(imgs)
 v.add_labels(masks_tracked)
