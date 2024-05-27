@@ -48,11 +48,14 @@ Consider the following python example script for tracking already segmented cell
 No hyperparameters to choose :)
 
 ```python
+import torch 
 import numpy as np
 from trackastra.utils import normalize
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
 from trackastra.data import test_data_bacteria
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # load some test data images and masks
 imgs, masks = test_data_bacteria()
@@ -61,11 +64,10 @@ imgs, masks = test_data_bacteria()
 imgs = np.stack([normalize(x) for x in imgs])
 
 # Load a pretrained model
-model = Trackastra.from_pretrained("general_2d", device="cuda")  # or device="cpu"
+model = Trackastra.from_pretrained("general_2d", device=device)  
 
 # or from a local folder
-# model = Trackastra.from_folder('path/my_model_folder/', device="cuda")  # or device="cpu"
-
+# model = Trackastra.from_folder('path/my_model_folder/', device=device)  
 
 # Track the cells
 track_graph = model.track(imgs, masks, mode="greedy")  # or mode="ilp"
