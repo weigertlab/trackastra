@@ -34,9 +34,9 @@ def create_widget(model_path:Path):
               model_path={"label": "Model Path", "mode": "d"})
     def my_widget(img_layer: Image, mask_layer:Labels, model_path:Path=model_path, distance_costs:bool=False) -> List[napari.types.LayerDataTuple]:
         if model_path.exists():
-            model = Trackastra.load_from_folder(model_path, device=device)
+            model = Trackastra.from_folder(model_path, device=device)
         else: 
-            model = Trackastra.load_pretrained(model_path.name, device=device)
+            model = Trackastra.from_pretrained(model_path.name, device=device)
         imgs = np.asarray(img_layer.data)
         masks = np.asarray(mask_layer.data)
         track_graph, masks_tracked, napari_tracks = track(model, imgs, masks, use_distance=distance_costs)

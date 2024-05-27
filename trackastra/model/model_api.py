@@ -33,11 +33,10 @@ class Trackastra:
     @classmethod
     @validate_call
     def from_pretrained(
-        cls, name: str, device: str = "cpu", download_dir: Path = "./.models"
-    ):
-        download_pretrained(name, download_dir)
+        cls, name: str, device: str = "cpu", download_dir: Path=None):
+        folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
-        return cls.from_folder(dir=Path(download_dir) / name, device=device)
+        return cls.from_folder(folder, device=device)
 
     def _predict(
         self, imgs: np.ndarray, masks: np.ndarray, edge_threshold: float = 0.05, n_workers: int = 0,
