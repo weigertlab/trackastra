@@ -1,31 +1,11 @@
-/results
-/data
-/runs
-/runs_debug
-/lightning_logs
-/iframe_figures
 /scripts/data
 /scripts/runs
-/scripts/runs_debug
-/scripts/runs_cluster
-/scripts/cluster/tmp
 /scripts/results
-/scripts/results_debug
-/baselines
 /test_data
 /tests/test_data
 /tests/data
 /tests/tmp
-/tests/.models
-/scripts/tracking_configs
-/scripts/runs_debug_old
-/scripts/inference/tmp
-/scripts/wandb
-/scripts/cluster/wandb-secret.yaml
-/scripts/model
-/scripts/CTC_Evaluation_Software
-/.models
-/scripts/ctc_submission
+*/.models
 
 
 # Byte-compiled / optimized / DLL files
