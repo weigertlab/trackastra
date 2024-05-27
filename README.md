@@ -4,7 +4,7 @@ Trackastra links already segmented cells in a microscopy timelapse using a learn
 
 ![Overview](overview.png)
 
-If you are using this code in your research, please cite our [preprint]([url](https://arxiv.org/abs/2405.15700))
+If you are using this code in your research, please cite our [preprint](https://arxiv.org/abs/2405.15700)
 > Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> arXiv, 2024
 
 ## Examples
