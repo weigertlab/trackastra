@@ -2,7 +2,6 @@ import torch
 from trackastra.model import TrackingTransformer
 
 
-# if __name__ == "__main__":
 def test_model():
     torch.manual_seed(0)
     coords = torch.randint(0, 400, (1, 100, 3)).float()

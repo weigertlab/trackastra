@@ -9,7 +9,6 @@ def repeat_tile(x, repeats=(4, 4)):
     return x
 
 
-# if __name__ == "__main__":
 def test_matching():
     np.random.seed(42)
 

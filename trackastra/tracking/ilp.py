@@ -59,7 +59,7 @@ ILP_CONFIGS = {
 def track_ilp(
     candidate_graph,
     allow_divisions: bool = True,
-    ilp_config: str = "ilp_gt",
+    ilp_config: str = "gt",
     params_file: str | None = None,
     **kwargs,
 ):
