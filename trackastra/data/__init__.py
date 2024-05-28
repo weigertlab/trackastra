@@ -8,7 +8,7 @@ from .data import (
     collate_sequence_padding,
     extract_features_regionprops,
 )
-from .example_data import example_data_bacteria, example_data_hela
+from .example_data import example_data_bacteria, example_data_fluo_3d, example_data_hela
 from .sampler import (
     BalancedBatchSampler,
     BalancedDataModule,

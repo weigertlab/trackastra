@@ -1,19 +1,21 @@
-from tqdm import tqdm
-import yaml
-import logging 
-import numpy as np
+import logging
 from pathlib import Path
+from typing import Literal, Optional
+
+import numpy as np
+import yaml
 from pydantic import validate_call
-from typing import Literal
+from tqdm import tqdm
 
-
-from .predict import predict_windows
-from .pretrained import download_pretrained
-from .model import TrackingTransformer
 from ..data import build_windows, get_features
 from ..tracking import build_graph, track_greedy
+from ..utils import normalize
+from .model import TrackingTransformer
+from .predict import predict_windows
+from .pretrained import download_pretrained
 
 logger = logging.getLogger(__name__)
+
 
 class Trackastra:
     def __init__(self, transformer, train_args, device="cpu"):
@@ -33,24 +35,38 @@ class Trackastra:
     @classmethod
     @validate_call
     def from_pretrained(
-        cls, name: str, device: str = "cpu", download_dir: Path=None):
+        cls, name: str, device: str = "cpu", download_dir: Optional[Path] = None
+    ):
         folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
         return cls.from_folder(folder, device=device)
 
     def _predict(
-        self, imgs: np.ndarray, masks: np.ndarray, edge_threshold: float = 0.05, n_workers: int = 0,
+        self,
+        imgs: np.ndarray,
+        masks: np.ndarray,
+        edge_threshold: float = 0.05,
+        n_workers: int = 0,
         progbar_class=tqdm,
     ):
         logger.info("Predicting weights for candidate graph")
+        imgs = normalize(imgs)
         self.transformer.eval()
-        
+
         features = get_features(
-            detections=masks, imgs=imgs, ndim=self.transformer.config["coord_dim"], n_workers=n_workers, progbar_class=progbar_class
+            detections=masks,
+            imgs=imgs,
+            ndim=self.transformer.config["coord_dim"],
+            n_workers=n_workers,
+            progbar_class=progbar_class,
         )
         logger.info("Building windows")
-        windows = build_windows(features, window_size=self.transformer.config["window"],progbar_class=progbar_class)
-        
+        windows = build_windows(
+            features,
+            window_size=self.transformer.config["window"],
+            progbar_class=progbar_class,
+        )
+
         logger.info("Predicting windows")
         predictions = predict_windows(
             windows=windows,
@@ -58,7 +74,7 @@ class Trackastra:
             model=self.transformer,
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
-            progbar_class=progbar_class
+            progbar_class=progbar_class,
         )
 
         return predictions
@@ -77,7 +93,7 @@ class Trackastra:
         logger.info("Running greedy tracker")
         nodes = predictions["nodes"]
         weights = predictions["weights"]
-        
+
         candidate_graph = build_graph(
             nodes=nodes,
             weights=weights,
@@ -93,7 +109,7 @@ class Trackastra:
         elif mode == "ilp":
             from trackastra.tracking.ilp import track_ilp
 
-            return track_ilp(candidate_graph, ilp_config='gt', **kwargs)
+            return track_ilp(candidate_graph, ilp_config="gt", **kwargs)
         else:
             raise ValueError(f"Tracking mode {mode} does not exist.")
 

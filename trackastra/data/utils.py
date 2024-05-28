@@ -53,7 +53,9 @@ def load_tiff_timeseries(
         leave=False,
         desc=f"Loading [{start_frame}:{end_frame}:{downscale[0]}]",
     ):
-        _x = tifffile.imread(f).astype(dtype)
+        _x = tifffile.imread(f)
+        if dtype:
+            _x = _x.astype(dtype)
         assert _x.shape == shape
         slices = tuple(slice(None, None, d) for d in downscale[1:])
         _x = _x[slices]

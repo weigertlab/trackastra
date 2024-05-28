@@ -27,3 +27,15 @@ def example_data_hela():
     img = tifffile.imread(root / "Fluo_Hela_02_img.tif")
     mask = tifffile.imread(root / "Fluo_Hela_02_ERR_SEG.tif")
     return img, mask
+
+
+def example_data_fluo_3d():
+    """Fluo-N3DH-CHO data from the cell tracking challenge.
+
+    Dzyubachyk et al. Advanced Level-Set-Based Cell Tracking in Time-Lapse Fluorescence Microscopy (2010)
+
+    subset of Fluo-N3DH-CHO/train/02
+    """
+    img = tifffile.imread(root / "Fluo-N3DH-CHO_02_img.tif")
+    mask = tifffile.imread(root / "Fluo-N3DH-CHO_02_ERR_SEG.tif")
+    return img, mask
