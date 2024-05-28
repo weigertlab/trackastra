@@ -66,7 +66,7 @@ class Trackastra:
     def _track_from_predictions(
         self,
         predictions,
-        mode: Literal["greedy", "ilp"] = "greedy",
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         use_distance: bool = False,
         max_distance: int = 256,
         max_neighbors: int = 10,
@@ -88,10 +88,12 @@ class Trackastra:
         )
         if mode == "greedy":
             return track_greedy(candidate_graph)
+        elif mode == "greedy_nodiv":
+            return track_greedy(candidate_graph, allow_divisions=False)
         elif mode == "ilp":
             from trackastra.tracking.ilp import track_ilp
 
-            return track_ilp(candidate_graph, **kwargs)
+            return track_ilp(candidate_graph, ilp_config='gt', **kwargs)
         else:
             raise ValueError(f"Tracking mode {mode} does not exist.")
 
