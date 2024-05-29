@@ -89,7 +89,11 @@ ctc_tracks, masks_tracked = graph_to_ctc(
       masks,
       outdir="tracked",
 )
+```
 
+You then can visualize the tracks with [napari](https://github.com/napari/napari):
+
+```python 
 # Visualise in napari
 napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
 
