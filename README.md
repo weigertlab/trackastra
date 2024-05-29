@@ -49,7 +49,13 @@ Consider the following python example script for tracking already segmented cell
 - `imgs`: a microscopy time lapse of shape `time,(z),y,x`.
 - `masks`: corresponding instance segmentation of shape `time,(z),y,x`.
 
-No hyperparameters to choose :)
+The predicted assocations can then be used for linked with several modes:
+
+- `greedy_nodiv`  (greedy linking with no division) - fast, no additional dependencies
+- `greedy`        (greedy linking with division) - fast, no additional dependencies
+- `ilp`          (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
+
+Otherwise, no hyperparameters to choose :)
 
 ```python
 import torch
