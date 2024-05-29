@@ -24,6 +24,7 @@ pip install git+https://github.com/weigertlab/trackastra.git
 
 For tracking with an integer linear program (ILP):
 ```bash
+conda create --name trackastra --no-default-packages
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp] @ git+https://github.com/weigertlab/trackastra.git"
 ```
@@ -34,7 +35,7 @@ Notes:
   1. The [Gurobi Optimizer](https://www.gurobi.com/). This is a commercial solver, which requires a valid license. Academic licenses are provided for free, see [here](https://www.gurobi.com/academia/academic-program-and-licenses/) for how to obtain one.
 
   2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
-
+- On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 ## Usage
 
 > This package is still under active development, please expect breaking changes in the future. If you encounter any problems please file an [issue](https://github.com/weigertlab/trackastra/issues) on the GitHub repo.
@@ -48,7 +49,7 @@ Consider the following python example script for tracking already segmented cell
 No hyperparameters to choose :)
 
 ```python
-import torch 
+import torch
 import numpy as np
 from trackastra.utils import normalize
 from trackastra.model import Trackastra
@@ -64,10 +65,10 @@ imgs, masks = test_data_bacteria()
 imgs = np.stack([normalize(x) for x in imgs])
 
 # Load a pretrained model
-model = Trackastra.from_pretrained("general_2d", device=device)  
+model = Trackastra.from_pretrained("general_2d", device=device)
 
 # or from a local folder
-# model = Trackastra.from_folder('path/my_model_folder/', device=device)  
+# model = Trackastra.from_folder('path/my_model_folder/', device=device)
 
 # Track the cells
 track_graph = model.track(imgs, masks, mode="greedy")  # or mode="ilp"
