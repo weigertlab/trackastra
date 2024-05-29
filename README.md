@@ -22,7 +22,7 @@ Trackastra can then be installed using `pip` directly from this repository:
 pip install git+https://github.com/weigertlab/trackastra.git
 ```
 
-For tracking with an integer linear program (ILP):
+For tracking with an integer linear program (ILP, which is optional)
 ```bash
 conda create --name trackastra --no-default-packages
 conda install -c conda-forge -c gurobi -c funkelab ilpy
