@@ -27,7 +27,6 @@ import psutil
 import trackastra
 import wandb
 import yaml
-from bioimageutils import str2bool
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
@@ -53,6 +52,7 @@ from trackastra.utils import (
     random_label_cmap,
     render_label,
     seed,
+    str2bool,
 )
 
 logging.basicConfig(level=logging.INFO)

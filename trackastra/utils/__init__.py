@@ -8,4 +8,5 @@ from .utils import (
     random_label_cmap,
     render_label,
     seed,
+    str2bool,
 )
