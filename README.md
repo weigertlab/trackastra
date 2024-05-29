@@ -1,6 +1,6 @@
 # *Trackastra* - Tracking by Association with Transformers
 
-Trackastra links already segmented cells in a microscopy timelapse using a learnt transformer model that was trained on a diverse set of microscopy videos.
+*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting assocations with a transformer model that was trained on a diverse set of microscopy videos. 
 
 ![Overview](overview.png)
 
@@ -15,7 +15,7 @@ Nuclei tracking | Bacteria tracking
 ## Installation
 This repository contains the Python implementation of Trackastra.
 
-Please first set up a Python environment (with Python version 3.9 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
+Please first set up a Python environment (with Python version 3.10 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
 
 Trackastra can then be installed using `pip` directly from this repository:
 ```bash
@@ -37,6 +37,9 @@ Notes:
   2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 ## Usage
+
+The input to *Trackastra* is a sequence of images and their corresponding cell (instance) segmentations.  
+
 
 > This package is still under active development, please expect breaking changes in the future. If you encounter any problems please file an [issue](https://github.com/weigertlab/trackastra/issues) on the GitHub repo.
 
@@ -71,7 +74,7 @@ model = Trackastra.from_pretrained("general_2d", device=device)
 # model = Trackastra.from_folder('path/my_model_folder/', device=device)
 
 # Track the cells
-track_graph = model.track(imgs, masks, mode="greedy")  # or mode="ilp"
+track_graph = model.track(imgs, masks, mode="greedy")  # or mode="ilp", or "greedy_nodiv"
 
 
 # Write to cell tracking challenge format
