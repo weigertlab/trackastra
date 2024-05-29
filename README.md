@@ -63,7 +63,7 @@ import numpy as np
 from trackastra.utils import normalize
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
-from trackastra.data import test_data_bacteria
+from trackastra.data import example_data_bacteria
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
