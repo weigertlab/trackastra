@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 class Trackastra:
     def __init__(self, transformer, train_args, device="cpu"):
+        if device == "mps":
+            raise NotImplementedError("Trackastra on mps not supported.")
         # Hack: to(device) for some more submodules that map_location does cover
         self.transformer = transformer.to(device)
         self.train_args = train_args

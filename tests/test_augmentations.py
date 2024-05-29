@@ -52,7 +52,7 @@ def test_augpipeline(plot=False):
 
 if __name__ == "__main__":
 
-    # test_augpipeline(plot=True)
+    test_augpipeline(plot=False)
 
     # pipe = RandomCrop((30, 40, 10, 20), ensure_inside_points=True)
     # pipe = RandomCrop((30,40), ensure_inside_points=True)

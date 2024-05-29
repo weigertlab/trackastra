@@ -9,9 +9,10 @@ from trackastra.model import Trackastra
 
 
 @pytest.mark.parametrize("name", ["ctc", "general_2d"])
-@pytest.mark.parametrize("device", ["cpu", "mps", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_pretrained(name, device):
     """Each pretrained model should run on all (available) device."""
+    # TODO mps support
     if device == "cuda":
         if torch.cuda.is_available():
             run_predictions(name, "cuda")
