@@ -1,14 +1,13 @@
 import logging
-import os
-from typing import Optional
+import shutil
+import tempfile
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 import requests
 from pydantic import validate_call
 from tqdm import tqdm
-import tempfile 
-import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ def download_and_unzip(url: str, dst: Path):
     if dst.exists():
         print(f"{dst} already downloaded, skipping.")
         return
-    
+
     # get the name of the zipfile
     zip_base = Path(url.split("/")[-1])
 
@@ -60,7 +59,7 @@ def download_pretrained(name: str, download_dir: Optional[Path] = None):
     # TODO make safe, introduce versioning
     if download_dir is None:
         download_dir = Path("~/.trackastra/.models").expanduser()
-    else: 
+    else:
         download_dir = Path(download_dir)
 
     download_dir.mkdir(exist_ok=True, parents=True)

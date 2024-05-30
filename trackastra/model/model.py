@@ -5,7 +5,6 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import torch
 
 # from torch_geometric.nn import GATv2Conv
@@ -506,4 +505,3 @@ class TrackingTransformer(torch.nn.Module):
         model.load_state_dict(state)
 
         return model
-
