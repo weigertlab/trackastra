@@ -1,3 +1,8 @@
+ci:
+  autoupdate_schedule: monthly
+  autofix_commit_msg: "style(pre-commit.ci): auto fixes [...]"
+  autoupdate_commit_msg: "ci(pre-commit.ci): autoupdate"
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.4.3
@@ -10,12 +15,3 @@ repos:
     - id: check-yaml
     - id: end-of-file-fixer
     - id: trailing-whitespace
-  - repo: https://github.com/psf/black
-    rev: 22.6.0
-    hooks:
-    - id: black
-  - repo: https://github.com/mwouts/jupytext
-    rev: v1.14.0
-    hooks:
-    - id: jupytext
-      args: [--from, ipynb, --to, "py:percent"]
