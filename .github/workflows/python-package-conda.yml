@@ -42,7 +42,7 @@ jobs:
           - platform: macos-latest
             python-version: "3.10"
             ilp: "false"
-          - platform: ubuntu_latest
+          - platform: ubuntu-latest
             python-version: "3.10"
             ilp: "true"
 
