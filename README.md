@@ -40,9 +40,6 @@ Notes:
 
 The input to *Trackastra* is a sequence of images and their corresponding cell (instance) segmentations.
 
-
-> This package is still under active development, please expect breaking changes in the future. If you encounter any problems please file an [issue](https://github.com/weigertlab/trackastra/issues) on the GitHub repo.
-
 ### Tracking with a pretrained model
 
 Consider the following python example script for tracking already segmented cells. All you need are the following two numpy arrays:
@@ -103,6 +100,10 @@ v.add_image(imgs)
 v.add_labels(masks_tracked)
 v.add_tracks(data=napari_tracks, graph=napari_tracks_graph)
 ```
+
+### Napari plugin 
+
+We additionally provide a [napari plugin](https://github.com/weigertlab/napari-trackastra/) which allows one to quickly apply pretrained and custom models on custom timeseries.
 
 ### Training a model on your own data
 
