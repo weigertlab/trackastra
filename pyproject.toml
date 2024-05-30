@@ -28,7 +28,6 @@ ignore = [
     "E402", # Module level import not at top of file
     "E501", # Line too long
 ]
-ignore-init-module-imports = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

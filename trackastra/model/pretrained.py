@@ -35,7 +35,7 @@ def download_and_unzip(url: str, dst: Path):
         with zipfile.ZipFile(zip_file, "r") as zip_ref:
             zip_ref.extractall(tmp)
 
-        shutil.move(tmp/zip_base.stem, dst)
+        shutil.move(tmp / zip_base.stem, dst)
 
 
 def download(url: str, fname: Path):

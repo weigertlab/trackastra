@@ -45,7 +45,7 @@ class RotaryPositionalEncoding(nn.Module):
         )
 
     def get_co_si(self, coords: torch.Tensor):
-        B, N, D = coords.shape
+        _B, _N, D = coords.shape
         assert D == len(self.freqs)
         co = torch.cat(
             tuple(
@@ -65,8 +65,8 @@ class RotaryPositionalEncoding(nn.Module):
         return co, si
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, coords: torch.Tensor):
-        B, N, D = coords.shape
-        B, H, N, C = q.shape
+        _B, _N, D = coords.shape
+        _B, _H, _N, _C = q.shape
 
         if not D == self._n_dim:
             raise ValueError(f"coords must have {self._n_dim} dimensions, got {D}")

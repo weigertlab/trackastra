@@ -200,7 +200,7 @@ class WRFeatures:
         )
 
 
-### augmentations
+# augmentations
 
 
 class WRRandomCrop:
@@ -230,7 +230,7 @@ class WRRandomCrop:
         elif len(crop_size) == 2 * ndim:
             pass
         else:
-            raise ValueError(f"crop_size has to be of length 1, {ndim}, or {2*ndim}")
+            raise ValueError(f"crop_size has to be of length 1, {ndim}, or {2 * ndim}")
 
         crop_size = np.array(crop_size)
         self._ndim = ndim
@@ -482,7 +482,7 @@ def get_features(
 
 def _check_dimensions(x: np.ndarray, ndim: int):
     if ndim == 2 and not x.ndim == 3:
-        raise ValueError(f"Expected 2D data, got {x.ndim-1}D data")
+        raise ValueError(f"Expected 2D data, got {x.ndim - 1}D data")
     elif ndim == 3:
         # if ndim=3 and data is two dimensional, it will be cast to 3D
         if x.ndim == 3:
@@ -490,7 +490,7 @@ def _check_dimensions(x: np.ndarray, ndim: int):
         elif x.ndim == 4:
             pass
         else:
-            raise ValueError(f"Expected 3D data, got {x.ndim-1}D data")
+            raise ValueError(f"Expected 3D data, got {x.ndim - 1}D data")
     return x
 
 

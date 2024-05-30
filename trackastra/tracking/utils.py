@@ -195,7 +195,7 @@ def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
         # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
         masks_lab = set(np.where(np.bincount(masks[t].ravel()))[0]) - {0}
         if not sub_lab.issubset(masks_lab):
-            print(f"Missing labels in masks at t={t}: {sub_lab-masks_lab}")
+            print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
             return False
     return True
 

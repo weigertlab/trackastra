@@ -592,7 +592,7 @@ class CTCData(Dataset):
 
     def _check_dimensions(self, x: np.ndarray):
         if self.ndim == 2 and not x.ndim == 3:
-            raise ValueError(f"Expected 2D data, got {x.ndim-1}D data")
+            raise ValueError(f"Expected 2D data, got {x.ndim - 1}D data")
         elif self.ndim == 3:
             # if ndim=3 and data is two dimensional, it will be cast to 3D
             if x.ndim == 3:
@@ -600,7 +600,7 @@ class CTCData(Dataset):
             elif x.ndim == 4:
                 pass
             else:
-                raise ValueError(f"Expected 3D data, got {x.ndim-1}D data")
+                raise ValueError(f"Expected 3D data, got {x.ndim - 1}D data")
         return x
 
     def _load(self):
@@ -1318,7 +1318,7 @@ def _ctc_assoc_matrix(detections, ts, graph, matching):
 
     # relabel to reduce the size of lookup matrices
     # offset 0 not allowed in skimage, which makes this very annoying
-    relabeled_gt, fwd_map, inv_map = relabel_sequential(matched_gt, offset=1)
+    relabeled_gt, fwd_map, _inv_map = relabel_sequential(matched_gt, offset=1)
     # dict is faster than arraymap
     fwd_map = dict(zip(fwd_map.in_values, fwd_map.out_values))
     # inv_map = dict(zip(inv_map.in_values, inv_map.out_values))

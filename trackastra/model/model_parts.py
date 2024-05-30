@@ -57,7 +57,7 @@ class PositionalEncoding(nn.Module):
         )
 
     def forward(self, coords: torch.Tensor):
-        B, N, D = coords.shape
+        _B, _N, D = coords.shape
         assert D == len(self.freqs)
         embed = torch.cat(
             tuple(
@@ -135,7 +135,7 @@ class RelativePositionalBias(nn.Module):
         )
 
     def forward(self, coords: torch.Tensor):
-        B, N, D = coords.shape
+        _B, _N, _D = coords.shape
         t = coords[..., 0]
         yx = coords[..., 1:]
         temporal_dist = t.unsqueeze(-1) - t.unsqueeze(-2)
@@ -172,7 +172,7 @@ class RelativePositionalAttention(nn.Module):
 
         if not embed_dim % (2 * n_head) == 0:
             raise ValueError(
-                f"embed_dim {embed_dim} must be divisible by 2 times n_head {2*n_head}"
+                f"embed_dim {embed_dim} must be divisible by 2 times n_head {2 * n_head}"
             )
 
         # qkv projection

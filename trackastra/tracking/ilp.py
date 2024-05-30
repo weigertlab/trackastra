@@ -65,7 +65,7 @@ def track_ilp(
 ):
     candidate_graph_motile = motile.TrackGraph(candidate_graph, frame_attribute="time")
 
-    ilp, used_costs = solve_full_ilp(
+    ilp, _used_costs = solve_full_ilp(
         candidate_graph_motile,
         allow_divisions=allow_divisions,
         mode=ilp_config,
@@ -94,7 +94,7 @@ def solve_full_ilp(
     else:
         try:
             p = ILP_CONFIGS[mode]
-            logger.info("Using `{mode}` ILP config.")
+            logger.info(f"Using `{mode}` ILP config.")
         except KeyError:
             raise ValueError(
                 f"Unknown ILP mode {mode}. Choose from {list(ILP_CONFIGS.keys())} or"

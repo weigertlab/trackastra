@@ -131,7 +131,7 @@ class ConcatAffine(K.RandomAffine):
         return self.merge_params(params)
 
 
-####  custom augmentations
+# custom augmentations
 class RandomIntensityScaleShift(K.IntensityAugmentationBase2D):
     r"""Apply a random scale and shift to the image intensity.
 
@@ -355,7 +355,7 @@ class RandomCrop:
         elif len(crop_size) == 2 * ndim:
             pass
         else:
-            raise ValueError(f"crop_size has to be of length 1, {ndim}, or {2*ndim}")
+            raise ValueError(f"crop_size has to be of length 1, {ndim}, or {2 * ndim}")
 
         crop_size = np.array(crop_size)
         self._ndim = ndim

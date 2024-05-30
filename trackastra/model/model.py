@@ -365,7 +365,7 @@ class TrackingTransformer(torch.nn.Module):
 
     def forward(self, coords, features=None, padding_mask=None):
         assert coords.ndim == 3 and coords.shape[-1] in (3, 4)
-        B, N, D = coords.shape
+        _B, _N, _D = coords.shape
 
         # disable padded coords (such that it doesnt affect minimum)
         if padding_mask is not None:
