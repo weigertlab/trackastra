@@ -274,6 +274,7 @@ def graph_to_ctc(
         _check_ctc_df(df, masks)
 
     if outdir is not None:
+        outdir = Path(outdir)
         outdir.mkdir(
             # mode=775,
             parents=True,
