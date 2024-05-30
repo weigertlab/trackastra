@@ -68,7 +68,7 @@ from trackastra.data import example_data_bacteria
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # load some test data images and masks
-imgs, masks = test_data_bacteria()
+imgs, masks = example_data_bacteria()
 
 # Normalize your images
 imgs = np.stack([normalize(x) for x in imgs])
