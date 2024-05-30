@@ -46,10 +46,10 @@ def test_api(example_data):
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        _, masks_tracked = graph_to_ctc(
+        _, _masks_tracked = graph_to_ctc(
             track_graph,
             masks,
             outdir=tmp,
         )
 
-    napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
+    _napari_tracks, _napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)

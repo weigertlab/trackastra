@@ -6,8 +6,8 @@ from trackastra.data import AugmentationPipeline
 def plot_augs(b1, b2, ts=(0, 1, 2)):
     import matplotlib.pyplot as plt
 
-    x1, y1, p1, t1 = b1
-    x2, y2, p2, t2 = b2
+    x1, _y1, p1, t1 = b1
+    x2, _y2, p2, t2 = b2
     plt.ion()
     fig = plt.figure(num=1)
     fig.clf()

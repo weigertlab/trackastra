@@ -28,7 +28,7 @@ def generate_data(ndim: int = 2, ngrid=10):
 
 
 def test_features():
-    x, y, p, ts = generate_data(ndim=2, ngrid=10)
+    x, y, _p, _ts = generate_data(ndim=2, ngrid=10)
     WRFeatures.from_mask_img(mask=y, img=x)
 
 
