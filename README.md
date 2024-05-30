@@ -1,6 +1,6 @@
 # *Trackastra* - Tracking by Association with Transformers
 
-*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting assocations with a transformer model that was trained on a diverse set of microscopy videos. 
+*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting assocations with a transformer model that was trained on a diverse set of microscopy videos.
 
 ![Overview](overview.png)
 
@@ -19,14 +19,14 @@ Please first set up a Python environment (with Python version 3.10 or higher), p
 
 Trackastra can then be installed using `pip` directly from this repository:
 ```bash
-pip install git+https://github.com/weigertlab/trackastra.git
+pip install trackastra
 ```
 
 For tracking with an integer linear program (ILP, which is optional)
 ```bash
-conda create --name trackastra --no-default-packages
+conda create --name trackastra python=3.10 --no-default-packages
 conda install -c conda-forge -c gurobi -c funkelab ilpy
-pip install "trackastra[ilp] @ git+https://github.com/weigertlab/trackastra.git"
+pip install trackastra[ilp]
 ```
 
 Notes:
@@ -38,7 +38,7 @@ Notes:
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 ## Usage
 
-The input to *Trackastra* is a sequence of images and their corresponding cell (instance) segmentations.  
+The input to *Trackastra* is a sequence of images and their corresponding cell (instance) segmentations.
 
 
 > This package is still under active development, please expect breaking changes in the future. If you encounter any problems please file an [issue](https://github.com/weigertlab/trackastra/issues) on the GitHub repo.
@@ -93,7 +93,7 @@ ctc_tracks, masks_tracked = graph_to_ctc(
 
 You then can visualize the tracks with [napari](https://github.com/napari/napari):
 
-```python 
+```python
 # Visualise in napari
 napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
 
