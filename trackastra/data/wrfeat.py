@@ -7,7 +7,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from functools import reduce
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import joblib
 import numpy as np
@@ -40,7 +40,7 @@ _PROPERTIES = {
 
 
 def _filter_points(
-    points: np.ndarray, shape: tuple[int], origin: Optional[tuple[int]] = None
+    points: np.ndarray, shape: tuple[int], origin: tuple[int] | None = None
 ) -> np.ndarray:
     """Returns indices of points that are inside the shape extent and given origin."""
     ndim = points.shape[-1]
@@ -208,7 +208,7 @@ class WRRandomCrop:
 
     def __init__(
         self,
-        crop_size: Optional[Union[int, tuple[int]]] = None,
+        crop_size: int | tuple[int] | None = None,
         ndim: int = 2,
     ) -> None:
         """crop_size: tuple of int

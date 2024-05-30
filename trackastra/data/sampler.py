@@ -6,7 +6,6 @@ Sampler utils for normal and distributed training
 
 import logging
 from collections.abc import Iterable
-from typing import Optional
 
 import numpy as np
 import torch
@@ -38,7 +37,7 @@ class BalancedBatchSampler(BatchSampler):
         dataset: torch.utils.data.Dataset,
         batch_size: int,
         n_pool: int = 10,
-        num_samples: Optional[int] = None,
+        num_samples: int | None = None,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         drop_last: bool = False,
@@ -132,7 +131,7 @@ class BalancedDistributedSampler(DistributedSampler):
         dataset: Dataset,
         batch_size: int = 16,
         n_pool: int = 10,
-        num_samples: Optional[int] = None,
+        num_samples: int | None = None,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         *args,
@@ -168,7 +167,7 @@ class BalancedDataModule(LightningDataModule):
         val_dataset,
         batch_size,
         n_pool=8,
-        num_samples: Optional[int] = None,  # means all
+        num_samples: int | None = None,  # means all
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         **loader_kwargs,

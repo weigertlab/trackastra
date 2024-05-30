@@ -2,7 +2,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
-from typing import Literal, Optional
+from typing import Literal
 
 import joblib
 import lz4.frame
@@ -110,9 +110,9 @@ class CTCData(Dataset):
         root: str = "",
         ndim: int = 2,
         use_gt: bool = True,
-        detection_folders: Optional[list[str]] = None,
+        detection_folders: list[str] | None = None,
         window_size: int = 10,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         slice_pct: tuple = (0.0, 1.0),
         downscale_spatial: int = 1,
         downscale_temporal: int = 1,
@@ -126,7 +126,7 @@ class CTCData(Dataset):
             "wrfeat",
         ] = "none",
         sanity_dist: bool = False,
-        crop_size: Optional[tuple] = None,
+        crop_size: tuple | None = None,
         return_dense: bool = False,
         compress: bool = False,
         **kwargs,
@@ -469,7 +469,7 @@ class CTCData(Dataset):
         return masks, track_df
 
     def _correct_gt_with_st(
-        self, folder: Path, x: np.ndarray, dtype: Optional[str] = None
+        self, folder: Path, x: np.ndarray, dtype: str | None = None
     ):
         if str(folder).endswith("_GT/TRA"):
             st_path = (
@@ -1401,7 +1401,7 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
     return torch.cat((x, pad), dim=dim)
 
 
-def collate_sequence_padding(max_len: Optional[int] = None):
+def collate_sequence_padding(max_len: int | None = None):
     """Collate function that pads all sequences to the same length."""
 
     def collate_sequence(batch):

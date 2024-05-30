@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Sequence
 from itertools import chain
-from typing import Any, Optional, Union
+from typing import Any
 
 import kornia.augmentation as K
 import numpy as np
@@ -49,7 +49,7 @@ def default_augmenter(coords: np.ndarray):
 
 
 def _rotate(
-    coords: np.ndarray, phi: float, rot_axis=(-2, -1), center: Optional[tuple] = None
+    coords: np.ndarray, phi: float, rot_axis=(-2, -1), center: tuple | None = None
 ):
     """Rotation along the last two dimensions of coords[..,:-2:]."""
     ndim = coords.shape[1]
@@ -71,7 +71,7 @@ def _rotate(
 
 
 def _filter_points(
-    points: np.ndarray, shape: tuple[int], origin: Optional[tuple[int]] = None
+    points: np.ndarray, shape: tuple[int], origin: tuple[int] | None = None
 ) -> np.ndarray:
     """Returns indices of points that are inside the shape extent and given origin."""
     ndim = points.shape[-1]
@@ -180,7 +180,7 @@ class RandomIntensityScaleShift(K.IntensityAugmentationBase2D):
         input: torch.Tensor,
         params: dict[str, torch.Tensor],
         flags: dict[str, Any],
-        transform: Optional[torch.Tensor] = None,
+        transform: torch.Tensor | None = None,
     ) -> torch.Tensor:
         scale_factor = params["scale_factor"].to(input)
         shift_factor = params["shift_factor"].to(input)
@@ -330,7 +330,7 @@ class BasicPipeline:
 class RandomCrop:
     def __init__(
         self,
-        crop_size: Optional[Union[int, tuple[int]]] = None,
+        crop_size: int | tuple[int] | None = None,
         ndim: int = 2,
         ensure_inside_points: bool = False,
         use_padding: bool = True,

@@ -3,7 +3,6 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 import requests
 from pydantic import validate_call
@@ -55,7 +54,7 @@ def download(url: str, fname: Path):
 
 
 @validate_call
-def download_pretrained(name: str, download_dir: Optional[Path] = None):
+def download_pretrained(name: str, download_dir: Path | None = None):
     # TODO make safe, introduce versioning
     if download_dir is None:
         download_dir = Path("~/.trackastra/.models").expanduser()

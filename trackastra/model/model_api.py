@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import yaml
@@ -37,7 +37,7 @@ class Trackastra:
     @classmethod
     @validate_call
     def from_pretrained(
-        cls, name: str, device: str = "cpu", download_dir: Optional[Path] = None
+        cls, name: str, device: str = "cpu", download_dir: Path | None = None
     ):
         folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip

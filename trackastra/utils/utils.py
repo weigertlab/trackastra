@@ -1,9 +1,9 @@
 import colorsys
+import itertools
 import logging
 import random
 import sys
 from timeit import default_timer
-from typing import Optional
 
 import matplotlib
 import numpy as np
@@ -152,7 +152,7 @@ def _blockwise_sum_with_bounds(A: torch.Tensor, bounds: torch.Tensor, dim: int =
     cum = torch.cumsum(A, dim=0)
     cum = torch.cat((torch.zeros_like(cum[:1]), cum), dim=0)
     B = torch.zeros_like(A, device=A.device)
-    for i, j in zip(bounds[:-1], bounds[1:]):
+    for i, j in itertools.pairwise(bounds[:-1], bounds[1:]):
         B[i:j] = cum[j] - cum[i]
     B = B.transpose(0, dim)
     return B
@@ -294,7 +294,7 @@ def blockwise_causal_norm(
     return res
 
 
-def normalize_tensor(x: torch.Tensor, dim: Optional[int] = None, eps: float = 1e-8):
+def normalize_tensor(x: torch.Tensor, dim: int | None = None, eps: float = 1e-8):
     if dim is None:
         dim = tuple(range(x.ndim))
 
