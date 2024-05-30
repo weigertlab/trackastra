@@ -35,3 +35,4 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D"]
 "__init__.py" = ["F401"]
+"scripts/*" = ["*"]
