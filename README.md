@@ -45,7 +45,7 @@ The input to *Trackastra* is a sequence of images and their corresponding cell (
 
 ### Tracking with a pretrained model
 
-Consider the following python example script for tracking already segmented cells. All you need are the following two numpy arrarys:
+Consider the following python example script for tracking already segmented cells. All you need are the following two numpy arrays:
 - `imgs`: a microscopy time lapse of shape `time,(z),y,x`.
 - `masks`: corresponding instance segmentation of shape `time,(z),y,x`.
 
