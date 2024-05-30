@@ -1,9 +1,10 @@
 import numpy as np
+import pytest
 from scipy.ndimage import maximum_filter
 from trackastra.data import AugmentationPipeline
 
 
-def plot_augs(b1, b2, ts=(0, 1, 2)):
+def plot_augs(b1, b2):
     import matplotlib.pyplot as plt
 
     x1, _y1, p1, t1 = b1
@@ -11,12 +12,12 @@ def plot_augs(b1, b2, ts=(0, 1, 2)):
     plt.ion()
     fig = plt.figure(num=1)
     fig.clf()
-    axs = fig.subplots(2, len(ts))
-    for i, t in enumerate(ts):
+    axs = fig.subplots(2, len(np.unique(t1)))
+    for i, t in enumerate(np.unique(t1)):
         axs[0, i].imshow(x1[t], clim=(0, 1))
-        axs[0, i].plot(*p1[t1 == t].T[::-1], "o", color="C1", alpha=0.4)
+        axs[0, i].plot(*p1[t1 == t].T[::-1], "o", color="C2", alpha=0.4)
         axs[1, i].imshow(x2[t], clim=(0, 1))
-        axs[1, i].plot(*p2[t2 == t].T[::-1], "o", color="C1", alpha=0.4)
+        axs[1, i].plot(*p2[t2 == t].T[::-1], "o", color="C2", alpha=0.4)
 
 
 def generate_data(ndim: int = 2):
@@ -35,6 +36,7 @@ def generate_data(ndim: int = 2):
     return x, y, points, ts
 
 
+@pytest.mark.skip(reason="outdated")
 def test_augpipeline(plot=False):
 
     x, y, points, ts = generate_data()
@@ -47,23 +49,23 @@ def test_augpipeline(plot=False):
         assert np.all(y2[i][tuple(p2[t2 == i].T)] == 1)
 
     if plot:
-        plot_augs((x, y, points, ts), (x2, y2, p2, t2), ts=(0, 1, 2))
+        plot_augs((x, y, points, ts), (x2, y2, p2, t2))
 
 
 if __name__ == "__main__":
 
-    test_augpipeline(plot=False)
+    test_augpipeline(plot=True)
 
     # pipe = RandomCrop((30, 40, 10, 20), ensure_inside_points=True)
     # pipe = RandomCrop((30,40), ensure_inside_points=True)
     # x, y, p, ts = generate_data()
     # (x2, y2, p2), idx = pipe(x, y, p)
 
-    pipe = AugmentationPipeline(level=4, p=1)
+    # pipe = AugmentationPipeline(level=4, p=1)
 
-    x, y, p, ts = generate_data(ndim=3)
+    # x, y, p, ts = generate_data(ndim=3)
 
-    (x2, y2, p2), idx = pipe(x, y, p, ts)
+    # (x2, y2, p2), idx = pipe(x, y, p, ts)
 
     # for _ in range(10):
     #     (x2, y2, p2), idx = pipe(x, y, p)

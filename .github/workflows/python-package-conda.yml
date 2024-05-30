@@ -24,7 +24,7 @@ jobs:
         run: pipx run pre-commit run --all-files
         
   test:
-    name: ${{ matrix.platform }} py${{ matrix.python-version }} with ilp=${{ matrix.ilp }}
+    name: ${{ matrix.platform }} py${{ matrix.python-version }} ilp=${{ matrix.ilp }}
     runs-on: ${{ matrix.platform }}
     defaults:
       run:
