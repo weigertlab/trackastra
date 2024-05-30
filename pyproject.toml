@@ -2,10 +2,9 @@
 requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
-# https://beta.ruff.rs/docs
 [tool.ruff]
-target-version = "py39"
-src = ["trackastra"]
+target-version = "py310"
+src = ["trackastra", "tests"]
 
 [tool.ruff.lint]
 select = [
