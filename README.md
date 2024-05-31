@@ -1,4 +1,6 @@
-<img src="/artwork/trackastra_logo.png" alt="Description" width="150">
+<div align="center">
+  <img src="artwork/trackastra_logo.png" alt="Optimus Prime" style="width:25%;"/>
+</div>
 
 # *Trackastra* - Tracking by Association with Transformers
 
