@@ -22,7 +22,7 @@ This repository contains the Python implementation of Trackastra.
 
 Please first set up a Python environment (with Python version 3.10 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
 
-Trackastra can then be installed using `pip` directly from this repository:
+Trackastra can then be installed from PyPI using `pip`:
 ```bash
 pip install trackastra
 ```
