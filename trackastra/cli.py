@@ -8,25 +8,28 @@ from .tracking.utils import graph_to_ctc
 from .utils import str2path
 
 
-def track_from_disk():
+def cli():
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter, allow_abbrev=False
     )
-    p.add_argument(
+    subparsers = p.add_subparsers(help="trackastra")
+
+    p_track = subparsers.add_parser("track", help="Tracking help")
+    p_track.add_argument(
         "-i",
         "--imgs",
         type=str2path,
         required=True,
         help="Directory with series of .tif files.",
     )
-    p.add_argument(
+    p_track.add_argument(
         "-m",
         "--masks",
         type=str2path,
         required=True,
         help="Directory with series of .tif files.",
     )
-    p.add_argument(
+    p_track.add_argument(
         "-o",
         "--outdir",
         type=str2path,
@@ -36,24 +39,29 @@ def track_from_disk():
             " `{masks}_tracked`."
         ),
     )
-    p.add_argument(
+    p_track.add_argument(
         "--model-pretrained",
         type=str,
         default=None,
         help="Name of pretrained Trackastra model.",
     )
-    p.add_argument(
+    p_track.add_argument(
         "--model-custom",
         type=str2path,
         default=None,
         help="Local folder with custom model.",
     )
-    p.add_argument(
+    p_track.add_argument(
         "--mode", choices=["greedy_nodiv", "greedy", "ilp"], default="greedy"
     )
-    p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    p_track.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    p_track.set_defaults(cmd=_track_from_disk)
     args = p.parse_args()
 
+    args.cmd(args)
+
+
+def _track_from_disk(args):
     device = "cuda" if torch.cuda.is_available() and args.device == "cuda" else "cpu"
 
     if args.model_pretrained is None == args.model_custom is None:
