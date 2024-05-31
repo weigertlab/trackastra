@@ -30,6 +30,7 @@ pip install trackastra
 For tracking with an integer linear program (ILP, which is optional)
 ```bash
 conda create --name trackastra python=3.10 --no-default-packages
+conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install trackastra[ilp]
 ```
