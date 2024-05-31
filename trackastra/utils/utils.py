@@ -3,6 +3,7 @@ import itertools
 import logging
 import random
 import sys
+from pathlib import Path
 from timeit import default_timer
 
 import matplotlib
@@ -435,6 +436,17 @@ def str2bool(x: str) -> bool:
         return False
     else:
         raise ValueError(f"'{x}' does not seem to be boolean.")
+
+
+def str2path(x: str) -> Path:
+    """Cast string to resolved absolute path.
+
+    Useful for parsing command line arguments.
+    """
+    if not isinstance(x, str):
+        raise TypeError("String expected.")
+    else:
+        return Path(x).expanduser().resolve()
 
 
 if __name__ == "__main__":

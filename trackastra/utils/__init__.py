@@ -9,4 +9,5 @@ from .utils import (
     render_label,
     seed,
     str2bool,
+    str2path,
 )
