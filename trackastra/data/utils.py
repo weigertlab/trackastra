@@ -7,13 +7,11 @@ import pandas as pd
 
 # from .data import CTCData
 import tifffile
-from pydantic import validate_call
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 
-@validate_call
 def load_tiff_timeseries(
     dir: Path,
     dtype: str | type | None = None,

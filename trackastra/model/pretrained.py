@@ -5,13 +5,14 @@ import zipfile
 from pathlib import Path
 
 import requests
-from pydantic import validate_call
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 _MODELS = {
-    "ctc": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip",
+    "ctc": (
+        "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip"
+    ),
     "general_2d": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1.1/general_2d.zip",
 }
 
@@ -53,7 +54,6 @@ def download(url: str, fname: Path):
             bar.update(size)
 
 
-@validate_call
 def download_pretrained(name: str, download_dir: Path | None = None):
     # TODO make safe, introduce versioning
     if download_dir is None:
@@ -66,7 +66,8 @@ def download_pretrained(name: str, download_dir: Path | None = None):
         url = _MODELS[name]
     except KeyError:
         raise ValueError(
-            f"Pretrained model `name` is not available. Choose from {list(_MODELS.keys())}"
+            "Pretrained model `name` is not available. Choose from"
+            f" {list(_MODELS.keys())}"
         )
     folder = download_dir / name
     download_and_unzip(url=url, dst=folder)

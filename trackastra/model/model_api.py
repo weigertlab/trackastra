@@ -4,7 +4,6 @@ from typing import Literal
 
 import numpy as np
 import yaml
-from pydantic import validate_call
 from tqdm import tqdm
 
 from ..data import build_windows, get_features
@@ -27,7 +26,6 @@ class Trackastra:
         self.device = device
 
     @classmethod
-    @validate_call
     def from_folder(cls, dir: Path, device: str = "cpu"):
         transformer = TrackingTransformer.from_folder(dir, map_location=device)
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
@@ -35,7 +33,6 @@ class Trackastra:
 
     # TODO make safer
     @classmethod
-    @validate_call
     def from_pretrained(
         cls, name: str, device: str = "cpu", download_dir: Path | None = None
     ):
