@@ -9,7 +9,7 @@
 
 ![Overview](overview.png)
 
-If you are using this code in your research, please cite our [preprint](https://arxiv.org/abs/2405.15700)
+If you are using this code in your research, please cite our [preprint](https://arxiv.org/abs/2405.15700):
 > Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> arXiv, 2024
 
 ## Examples
@@ -42,9 +42,18 @@ Notes:
 
   2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
+- 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
+
 ## Usage
 
-The input to *Trackastra* is a sequence of images and their corresponding cell (instance) segmentations.
+The input to Trackastra is a sequence of images and their corresponding cell (instance) segmentations.
+
+### Napari plugin 
+
+For a quick try of Trackastra on your data, please use our [napari plugin](https://github.com/weigertlab/napari-trackastra/), which already comes with pretrained models included.
+
+![demo](https://github.com/weigertlab/napari-trackastra/assets/8866751/097eb82d-0fef-423e-9275-3fb528c20f7d)
+
 
 ### Tracking with a pretrained model
 
@@ -106,10 +115,6 @@ v.add_image(imgs)
 v.add_labels(masks_tracked)
 v.add_tracks(data=napari_tracks, graph=napari_tracks_graph)
 ```
-
-### Napari plugin 
-
-We additionally provide a [napari plugin](https://github.com/weigertlab/napari-trackastra/) which allows one to quickly apply pretrained and custom models on custom timeseries.
 
 ### Training a model on your own data
 
