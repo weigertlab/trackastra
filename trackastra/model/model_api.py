@@ -1,8 +1,10 @@
 import logging
+import os
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import torch
 import yaml
 from tqdm import tqdm
 
@@ -17,24 +19,46 @@ logger = logging.getLogger(__name__)
 
 
 class Trackastra:
-    def __init__(self, transformer, train_args, device="cpu"):
-        if device == "mps":
-            raise NotImplementedError("Trackastra on mps not supported.")
-        # Hack: to(device) for some more submodules that map_location does cover
-        self.transformer = transformer.to(device)
+    def __init__(
+        self,
+        transformer: TrackingTransformer,
+        train_args: dict,
+        device: str | None = None,
+    ):
+        if device is None:
+            should_use_mps = (
+                torch.backends.mps.is_available()
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
+            )
+            self.device = (
+                "cuda"
+                if torch.cuda.is_available()
+                else (
+                    "mps"
+                    if should_use_mps and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK")
+                    else "cpu"
+                )
+            )
+        else:
+            self.device = device
+
+        print(f"Using device {self.device}")
+
+        self.transformer = transformer.to(self.device)
         self.train_args = train_args
-        self.device = device
 
     @classmethod
-    def from_folder(cls, dir: Path, device: str = "cpu"):
-        transformer = TrackingTransformer.from_folder(dir, map_location=device)
+    def from_folder(cls, dir: Path, device: str | None = None):
+        # Always load to cpu first
+        transformer = TrackingTransformer.from_folder(dir, map_location="cpu")
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
 
     # TODO make safer
     @classmethod
     def from_pretrained(
-        cls, name: str, device: str = "cpu", download_dir: Path | None = None
+        cls, name: str, device: str | None = None, download_dir: Path | None = None
     ):
         folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
