@@ -161,6 +161,9 @@ def graph_to_napari_tracks(
     for i, cs in enumerate(chains):
         label = i + 1
         labels.append(label)
+        if len(cs) == 1:
+            # Non-connected node
+            continue
         end = cs[-1]
         track_end_to_track_id[end] = label
 
