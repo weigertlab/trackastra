@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 import torch
@@ -56,6 +57,11 @@ def cli():
     )
     p_track.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     p_track.set_defaults(cmd=_track_from_disk)
+
+    if len(sys.argv) == 1:
+        p.print_help(sys.stdout)
+        sys.exit(0)
+
     args = p.parse_args()
 
     args.cmd(args)

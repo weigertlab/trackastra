@@ -189,6 +189,10 @@ def graph_to_napari_tracks(
 
 def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
     """Sanity check of all labels in a CTC dataframe are present in the masks."""
+    # Check for empty df
+    if len(df) == 0 and np.all(masks == 0):
+        return True
+
     for t in range(df.t1.min(), df.t1.max()):
         sub = df[(df.t1 <= t) & (df.t2 >= t)]
         sub_lab = set(sub.label)
@@ -266,7 +270,7 @@ def graph_to_ctc(
 
         rows.append([label, t1, t2, node_to_tracklets[_parent]])
 
-    df = pd.DataFrame(rows, columns=["label", "t1", "t2", "parent"])
+    df = pd.DataFrame(rows, columns=["label", "t1", "t2", "parent"], dtype=int)
 
     masks = np.stack(masks)
 
