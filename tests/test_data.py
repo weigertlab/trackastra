@@ -8,6 +8,20 @@ from trackastra.data import CTCData, collate_sequence_padding
 
 
 def example_dataset():
+    img_dir = Path("test_data/img")
+    img_dir.mkdir(exist_ok=True, parents=True)
+    img = np.array(
+        [
+            [0, 1, 1],  # t=0
+            [0, 1, 0],  # t=1
+            [1, 1, 0],  # t=2
+        ]
+    )
+    img = np.expand_dims(img, -1)
+
+    for i in range(img.shape[0]):
+        imwrite(img_dir / f"emp_{i}.tif", img[i])
+
     tra_dir = Path("test_data/TRA")
     tra_dir.mkdir(exist_ok=True, parents=True)
 
@@ -20,7 +34,7 @@ def example_dataset():
         ],
         dtype=int,
     )
-    np.savetxt(tra_dir / "man_track.txt", man_track)
+    np.savetxt(tra_dir / "man_track.txt", man_track, fmt="%i")
 
     y = np.array(
         [
