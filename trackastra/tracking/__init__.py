@@ -9,6 +9,6 @@ from .utils import (
     ctc_to_napari_tracks,
     graph_to_ctc,
     graph_to_napari_tracks,
+    graph_to_trackmate,
     linear_chains,
-    edges_to_csv,
 )
