@@ -205,13 +205,13 @@ def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
     return True
 
 
-def graph_to_trackmate(
+def graph_to_edge_table(
     graph: nx.DiGraph,
     frame_attribute: str = "time",
     edge_attribute: str = "weight",
     outpath: Path | None = None,
 ) -> pd.DataFrame:
-    """Write edges of a graph to a table compatible with TrackMate.
+    """Write edges of a graph to a table.
 
     The table has columns `source_frame`, `source_label`, `target_frame`, `target_label`, and `weight`.
     The first line is a header. The source and target are the labels of the objects in the
