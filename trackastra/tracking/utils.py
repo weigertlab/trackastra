@@ -204,6 +204,49 @@ def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
             return False
     return True
 
+def edges_to_csv(
+        graph: nx.DiGraph,
+        frame_attribute: str = "time",
+        outpath: Path| None = None,
+    ) -> pd.DataFrame:
+    """Write edges of a graph to a CSV file.
+    The CSV file has columns `source_frame`, `source_label`, `target_frame`, `target_label`, and `weight`. 
+    The first line is a header. The source and target are the labels of the objects in the
+    input masks in the designated frames (0-based).
+
+    Args:
+        graph: with node attributes `frame_attribute` and "label"
+        frame_attribute: Name of the frame attribute in the graph nodes.
+        outdir: path to save the edges in CSV file format.
+
+    Returns:
+        pd.DataFrame: edges dataframe with columns ['source_frame', 'source', 'target_frame', 'target', 'weight']"""
+
+    rows = []
+    for edge in graph.edges:
+        source = graph.nodes[edge[0]]
+        target = graph.nodes[edge[1]]
+        source_label = source["label"]
+        source_frame = source[frame_attribute]
+        target_label = target["label"]
+        target_frame = target[frame_attribute]
+        weight = graph.edges[edge]['weight']
+        rows.append([source_frame, source_label, target_frame, target_label, weight])
+
+    df = pd.DataFrame(rows, columns=["source_frame", "source_label", "target_frame", "target_label", "weight"])
+
+    if outpath is not None:
+        outpath = Path(outpath)
+        outpath.parent.mkdir(
+            # mode=775,
+            parents=True,
+            exist_ok=True,
+        )
+
+        df.to_csv(outpath, index=False, header=True, sep=",")
+
+
+    return df
 
 def graph_to_ctc(
     graph: nx.DiGraph,
