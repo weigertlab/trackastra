@@ -17,12 +17,12 @@ class FoundTracks(Exception):
     pass
 
 
-def ctc_to_napari_tracks(segmentation: np.ndarray, man_track: np.ndarray):
+def ctc_to_napari_tracks(segmentation: np.ndarray, man_track: pd.DataFrame):
     """Convert tracks in CTC format to tracks in napari format.
 
     Args:
-        segmentation:
-            Dimensions: time, spatial_0, ... , spatial_n
+        segmentation: Dims time, spatial_0, ... , spatial_n
+        man_track: columns id, start, end, parent
     """
     tracks = []
     for t, frame in tqdm(
@@ -36,7 +36,7 @@ def ctc_to_napari_tracks(segmentation: np.ndarray, man_track: np.ndarray):
 
     tracks_graph = {}
     for idx, _, _, parent in tqdm(
-        man_track,
+        man_track.to_numpy(),
         desc="Converting CTC to napari tracks",
         leave=False,
     ):
@@ -161,8 +161,10 @@ def graph_to_napari_tracks(
     for i, cs in enumerate(chains):
         label = i + 1
         labels.append(label)
-        # start nodes of dividing tracks include the parent
-        start, end = cs[0], cs[-1]
+        if len(cs) == 1:
+            # Non-connected node
+            continue
+        end = cs[-1]
         track_end_to_track_id[end] = label
 
     tracks = []
@@ -173,8 +175,11 @@ def graph_to_napari_tracks(
         start = cs[0]
         if start in track_end_to_track_id:
             tracks_graph[label] = track_end_to_track_id[start]
+            nodes = cs[1:]
+        else:
+            nodes = cs
 
-        for c in cs:
+        for c in nodes:
             node = graph.nodes[c]
             t = node["time"]
             coord = node["coords"]

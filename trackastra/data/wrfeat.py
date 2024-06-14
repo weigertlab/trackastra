@@ -13,8 +13,6 @@ import joblib
 import numpy as np
 import pandas as pd
 from edt import edt
-from pydantic import validate_call
-from pydantic_numpy import NpNDArray
 from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
 
@@ -89,7 +87,10 @@ class WRFeatures:
         self.timepoints = timepoints
 
     def __repr__(self):
-        s = f"WindowRegionFeatures(ndim={self.ndim}, nregions={len(self.labels)}, ntimepoints={len(np.unique(self.timepoints))})\n\n"
+        s = (
+            f"WindowRegionFeatures(ndim={self.ndim}, nregions={len(self.labels)},"
+            f" ntimepoints={len(np.unique(self.timepoints))})\n\n"
+        )
         for k, v in self.features.items():
             s += f"{k:>20} -> {v.shape}\n"
         return s
@@ -445,10 +446,9 @@ class WRAugmentationPipeline:
         return feats
 
 
-@validate_call
 def get_features(
-    detections: NpNDArray,
-    imgs: NpNDArray | None = None,
+    detections: np.ndarray,
+    imgs: np.ndarray | None = None,
     features: Literal["none", "wrfeat"] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
@@ -458,25 +458,34 @@ def get_features(
     imgs = _check_dimensions(imgs, ndim)
     logger.info(f"Extracting features from {len(detections)} detections")
     if n_workers > 0:
-        features = joblib.Parallel(n_jobs=n_workers, backend='multiprocessing')(
+        features = joblib.Parallel(n_jobs=n_workers, backend="multiprocessing")(
             joblib.delayed(WRFeatures.from_mask_img)(
                 # New axis for time component
                 mask=mask[np.newaxis, ...],
                 img=img[np.newaxis, ...],
                 t_start=t,
             )
-            for t, (mask, img) in progbar_class(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
+            for t, (mask, img) in progbar_class(
+                enumerate(zip(detections, imgs)),
+                total=len(imgs),
+                desc="Extracting features",
+            )
         )
     else:
         logger.info("Using single process for feature extraction")
-        features = tuple(WRFeatures.from_mask_img(
+        features = tuple(
+            WRFeatures.from_mask_img(
                 mask=mask[np.newaxis, ...],
                 img=img[np.newaxis, ...],
                 t_start=t,
             )
-            for t, (mask, img) in progbar_class(enumerate(zip(detections, imgs)), total=len(imgs), desc="Extracting features")
-        ) 
-        
+            for t, (mask, img) in progbar_class(
+                enumerate(zip(detections, imgs)),
+                total=len(imgs),
+                desc="Extracting features",
+            )
+        )
+
     return features
 
 
@@ -495,9 +504,7 @@ def _check_dimensions(x: np.ndarray, ndim: int):
 
 
 def build_windows(
-    features: list[WRFeatures],
-    window_size: int,
-    progbar_class=tqdm
+    features: list[WRFeatures], window_size: int, progbar_class=tqdm
 ) -> list[dict]:
     windows = []
     for t1, t2 in progbar_class(

@@ -6,6 +6,7 @@ from .tracking import (
     track_greedy,
 )
 from .utils import (
+    ctc_to_napari_tracks,
     graph_to_ctc,
     graph_to_napari_tracks,
     linear_chains,

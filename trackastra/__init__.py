@@ -1,4 +1,5 @@
-# from . import cli
+import os
+
 from ._version import __version__, __version_tuple__
 
-# from .cli import cli
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"

@@ -1,0 +1,54 @@
+{
+    "general_2d": {
+        "tags": ["cells, nuclei, bacteria, epithelial"],
+        "dimensionality": [2],
+        "description": "For tracking fluorescent nuclei, bacteria (PhC), whole cells (BF, PhC, DIC), epithelial cells with fluorescent membrane.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1.1/general_2d.zip",
+        "datasets": {
+            "Subset of Cell Tracking Challenge 2d datasets": {
+                "url": "https://celltrackingchallenge.net/2d-datasets/",
+                "reference": "Maška M, Ulman V, Delgado-Rodriguez P, Gómez-de-Mariscal E, Nečasová T, Guerrero Peña FA, Ren TI, Meyerowitz EM, Scherr T, Löffler K, Mikut R. The Cell Tracking Challenge: 10 years of objective benchmarking. Nature Methods. 2023 Jul;20(7):1010-20."
+            },
+            "Bacteria van Vliet": {
+                "url": "https://zenodo.org/records/268921", 
+                "reference": "van Vliet S, Winkler AR, Spriewald S, Stecher B, Ackermann M. Spatially correlated gene expression in bacterial groups: the role of lineage history, spatial gradients, and cell-cell interactions. Cell systems. 2018 Apr 25;6(4):496-507."
+            },
+            "Bacteria ObiWan-Microbi": {
+                "url": "https://zenodo.org/records/7260137",
+                "reference": "Seiffarth J, Scherr T, Wollenhaupt B, Neumann O, Scharr H, Kohlheyer D, Mikut R, Nöh K. ObiWan-Microbi: OMERO-based integrated workflow for annotating microbes in the cloud. SoftwareX. 2024 May 1;26:101638."
+            },
+            "DeepCell": {
+                "url": "https://datasets.deepcell.org/data",
+                "reference": "Schwartz, M, Moen E, Miller G, Dougherty T, Borba E, Ding R, Graf W, Pao E, Van Valen D. Caliban: Accurate cell tracking and lineage construction in live-cell imaging experiments with deep learning. Biorxiv. 2023 Sept 13:803205."
+            },
+            "Ker phase contrast": {
+                "url": "https://osf.io/ysaq2/",
+                "reference": "Ker DF, Eom S, Sanami S, Bise R, Pascale C, Yin Z, Huh SI, Osuna-Highley E, Junkers SN, Helfrich CJ, Liang PY. Phase contrast time-lapse microscopy datasets with automated and manual cell tracking annotations. Scientific data. 2018 Nov 13;5(1):1-2."
+            },
+            "Epithelia benchmark": {
+                "reference": "Funke J, Mais L, Champion A, Dye N, Kainmueller D. A benchmark for epithelial cell tracking. InProceedings of The European Conference on Computer Vision (ECCV) Workshops 2018 (pp. 0-0)."
+            },
+            "T Cells": {
+                "url": "https://zenodo.org/records/5206119"
+            },
+            "Neisseria meningitidis bacterial growth": {
+                "url": "https://zenodo.org/records/5419619"
+            },
+            "Synthetic nuclei": {
+                "reference": "Weigert group live cell simulator."
+            }
+        }
+    },
+    "ctc": {
+        "tags": ["ctc", "isbi2024"],
+        "dimensionality": [2, 3],
+        "description": "For tracking Cell Tracking Challenge datasets. Winner of the ISBI 2024 CTC generalizable linking challenge.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip",
+        "datasets": {
+            "All Cell Tracking Challenge 2d+3d datasets with available GT and ERR_SEG": {
+                "url": "https://celltrackingchallenge.net/3d-datasets/",
+                "reference": "Maška M, Ulman V, Delgado-Rodriguez P, Gómez-de-Mariscal E, Nečasová T, Guerrero Peña FA, Ren TI, Meyerowitz EM, Scherr T, Löffler K, Mikut R. The Cell Tracking Challenge: 10 years of objective benchmarking. Nature Methods. 2023 Jul;20(7):1010-20."
+            }
+        }
+    }
+}
