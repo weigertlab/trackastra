@@ -8,7 +8,7 @@ from .tracking import (
 from .utils import (
     ctc_to_napari_tracks,
     graph_to_ctc,
+    graph_to_edge_table,
     graph_to_napari_tracks,
-    graph_to_trackmate,
     linear_chains,
 )
