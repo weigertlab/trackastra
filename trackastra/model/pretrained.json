@@ -3,6 +3,7 @@
         "tags": ["cells, nuclei, bacteria, epithelial"],
         "dimensionality": [2],
         "description": "For tracking fluorescent nuclei, bacteria (PhC), whole cells (BF, PhC, DIC), epithelial cells with fluorescent membrane.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1.1/general_2d.zip",
         "datasets": {
             "Subset of Cell Tracking Challenge 2d datasets": {
                 "url": "https://celltrackingchallenge.net/2d-datasets/",
@@ -42,6 +43,7 @@
         "tags": ["ctc", "isbi2024"],
         "dimensionality": [2, 3],
         "description": "For tracking Cell Tracking Challenge datasets. Winner of the ISBI 2024 CTC generalizable linking challenge.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip",
         "datasets": {
             "All Cell Tracking Challenge 2d+3d datasets with available GT and ERR_SEG": {
                 "url": "https://celltrackingchallenge.net/3d-datasets/",

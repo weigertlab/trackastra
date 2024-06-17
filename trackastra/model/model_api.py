@@ -8,8 +8,8 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from ..data import build_windows, get_features
-from ..tracking import build_graph, track_greedy
+from ..data import build_windows, get_features, load_tiff_timeseries
+from ..tracking import TrackGraph, build_graph, track_greedy
 from ..utils import normalize
 from .model import TrackingTransformer
 from .predict import predict_windows
@@ -140,10 +140,64 @@ class Trackastra:
         self,
         imgs: np.ndarray,
         masks: np.ndarray,
-        mode: Literal["greedy", "ilp"] = "greedy",
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         progbar_class=tqdm,
         **kwargs,
-    ):
+    ) -> TrackGraph:
         predictions = self._predict(imgs, masks, progbar_class=progbar_class)
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         return track_graph
+
+    def track_from_disk(
+        self,
+        imgs_path: Path,
+        masks_path: Path,
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        **kwargs,
+    ) -> tuple[TrackGraph, np.ndarray]:
+        """Track directly from two series of tiff files.
+
+        Args:
+            imgs_path:
+                Directory containing a series of numbered tiff files.
+                Each file contains an image of shape (C),(Z),Y,X.
+            masks_path:
+                Directory containing a series of numbered tiff files.
+                Each file contains an image of shape (Z), Y, X.
+            mode (optional):
+                Mode for candidate graph pruning.
+        """
+        if not imgs_path.exists():
+            raise FileNotFoundError(f"{imgs_path=} does not exist.")
+        if not masks_path.exists():
+            raise FileNotFoundError(f"{masks_path=} does not exist.")
+
+        if not imgs_path.is_dir() or not masks_path.is_dir():
+            raise NotImplementedError("Currently only tiff sequences are supported.")
+
+        imgs = load_tiff_timeseries(imgs_path)
+        masks = load_tiff_timeseries(masks_path)
+
+        if len(imgs) != len(masks):
+            raise RuntimeError(
+                f"#imgs and #masks do not match. Found {len(imgs)} images,"
+                f" {len(masks)} masks."
+            )
+
+        if imgs.ndim - 1 == masks.ndim:
+            if imgs[1] == 1:
+                logger.info(
+                    "Found a channel dimension with a single channel. Removing dim."
+                )
+                masks = np.squeeze(masks, 1)
+            else:
+                raise RuntimeError(
+                    "Trackastra currently only supports single channel images."
+                )
+
+        if imgs.shape != masks.shape:
+            raise RuntimeError(
+                f"Img shape {imgs.shape} and mask shape {masks. shape} do not match."
+            )
+
+        return self.track(imgs, masks, mode, **kwargs), masks
