@@ -22,11 +22,15 @@ def test_cli_tracking_from_folder():
 
 def test_cli_tracking_from_file():
     root = Path(__file__).parent.parent / "trackastra" / "data" / "resources"
-    output_ctc = Path(__file__).parent / "test_data" / "tracked_bacteria"
-    output_edge_table = Path(__file__).parent / "test_data" / "tracked_bacteria.csv"
+    print(root)
+    assert root.exists()
+    output_ctc = Path("test_data") / "tracked_bacteria"
+    output_edge_table = Path("test_data") / "tracked_bacteria.csv"
+
     cmd = f"trackastra track -i {root / 'trpL_150310-11_img.tif'} -m {root / 'trpL_150310-11_mask.tif'} --output-ctc {output_ctc} --output-edge-table {output_edge_table} --model-pretrained general_2d"  # noqa: RUF100
     print(cmd)
     result = shell(cmd)
+
     assert output_ctc.exists()
     assert output_edge_table.exists()
     assert result.code == 0
