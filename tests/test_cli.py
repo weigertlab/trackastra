@@ -1,23 +1,22 @@
+import os
 from pathlib import Path
-
-from shell import shell
 
 from test_data import example_dataset
 
 
 def test_cli_parser():
-    result = shell("trackastra")
-    assert result.code == 0
+    result = os.system("trackastra")
+    assert result == 0
 
 
 def test_cli_tracking_from_folder():
     example_dataset()
     cmd = "trackastra track -i test_data/img -m test_data/TRA --output-ctc test_data/tracked --output-edge-table test_data/tracked.csv --model-pretrained general_2d"  # noqa: RUF100
     print(cmd)
-    result = shell(cmd)
+    result = os.system(cmd)
     assert Path("test_data/tracked").exists()
     assert Path("test_data/tracked.csv").exists()
-    assert result.code == 0
+    assert result == 0
 
 
 def test_cli_tracking_from_file():
@@ -29,8 +28,8 @@ def test_cli_tracking_from_file():
 
     cmd = f"trackastra track -i {root / 'trpL_150310-11_img.tif'} -m {root / 'trpL_150310-11_mask.tif'} --output-ctc {output_ctc} --output-edge-table {output_edge_table} --model-pretrained general_2d"  # noqa: RUF100
     print(cmd)
-    result = shell(cmd)
+    result = os.system(cmd)
 
     assert output_ctc.exists()
     assert output_edge_table.exists()
-    assert result.code == 0
+    assert result == 0
