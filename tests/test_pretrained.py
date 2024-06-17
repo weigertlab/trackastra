@@ -9,7 +9,7 @@ from trackastra.model import Trackastra
 
 
 @pytest.mark.parametrize("name", ["ctc", "general_2d"])
-@pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_pretrained(name, device):
     """Each pretrained model should run on all (available) device."""
     # TODO mps support
