@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import tifffile
 import torch
 import yaml
 from tqdm import tqdm
@@ -159,11 +160,13 @@ class Trackastra:
 
         Args:
             imgs_path:
-                Directory containing a series of numbered tiff files.
-                Each file contains an image of shape (C),(Z),Y,X.
+                Options
+                - Directory containing a series of numbered tiff files. Each file contains an image of shape (C),(Z),Y,X.
+                - Single tiff file with time series of shape T,(C),(Z),Y,X.
             masks_path:
-                Directory containing a series of numbered tiff files.
-                Each file contains an image of shape (Z), Y, X.
+                Options
+                - Directory containing a series of numbered tiff files. Each file contains an image of shape (C),(Z),Y,X.
+                - Single tiff file with time series of shape T,(Z),Y,X.
             mode (optional):
                 Mode for candidate graph pruning.
         """
@@ -172,11 +175,15 @@ class Trackastra:
         if not masks_path.exists():
             raise FileNotFoundError(f"{masks_path=} does not exist.")
 
-        if not imgs_path.is_dir() or not masks_path.is_dir():
-            raise NotImplementedError("Currently only tiff sequences are supported.")
+        if imgs_path.is_dir():
+            imgs = load_tiff_timeseries(imgs_path)
+        else:
+            imgs = tifffile.imread(imgs_path)
 
-        imgs = load_tiff_timeseries(imgs_path)
-        masks = load_tiff_timeseries(masks_path)
+        if masks_path.is_dir():
+            masks = load_tiff_timeseries(masks_path)
+        else:
+            masks = tifffile.imread(masks_path)
 
         if len(imgs) != len(masks):
             raise RuntimeError(

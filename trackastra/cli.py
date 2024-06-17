@@ -1,11 +1,10 @@
 import argparse
 import sys
-from pathlib import Path
 
 import torch
 
 from .model import Trackastra
-from .tracking.utils import graph_to_ctc
+from .tracking.utils import graph_to_ctc, graph_to_edge_table
 from .utils import str2path
 
 
@@ -31,14 +30,16 @@ def cli():
         help="Directory with series of .tif files.",
     )
     p_track.add_argument(
-        "-o",
-        "--outdir",
+        "--output-ctc",
         type=str2path,
         default=None,
-        help=(
-            "Directory for writing results (optional). Default writes to"
-            " `{masks}_tracked`."
-        ),
+        help="If set, write results in CTC format to this directory.",
+    )
+    p_track.add_argument(
+        "--output-edge-table",
+        type=str2path,
+        default=None,
+        help="If set, write results as an edge table in CSV format to the given file.",
     )
     p_track.add_argument(
         "--model-pretrained",
@@ -93,14 +94,19 @@ def _track_from_disk(args):
         mode=args.mode,
     )
 
-    if args.outdir is None:
-        outdir = Path(f"{args.masks}_tracked")
-    else:
-        outdir = args.outdir
+    if args.output_ctc:
+        outdir = args.output_ctc
+        outdir.mkdir(parents=True, exist_ok=True)
+        graph_to_ctc(
+            track_graph,
+            masks,
+            outdir=outdir,
+        )
 
-    outdir.mkdir(parents=True, exist_ok=True)
-    graph_to_ctc(
-        track_graph,
-        masks,
-        outdir=outdir,
-    )
+    if args.output_edge_table:
+        outpath = args.output_edge_table
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        graph_to_edge_table(
+            graph=track_graph,
+            outpath=outpath,
+        )

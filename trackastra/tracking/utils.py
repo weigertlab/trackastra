@@ -209,6 +209,67 @@ def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
     return True
 
 
+def graph_to_edge_table(
+    graph: nx.DiGraph,
+    frame_attribute: str = "time",
+    edge_attribute: str = "weight",
+    outpath: Path | None = None,
+) -> pd.DataFrame:
+    """Write edges of a graph to a table.
+
+    The table has columns `source_frame`, `source_label`, `target_frame`, `target_label`, and `weight`.
+    The first line is a header. The source and target are the labels of the objects in the
+    input masks in the designated frames (0-indexed).
+
+    Args:
+        graph: With node attributes `frame_attribute`, `edge_attribute` and 'label'.
+        frame_attribute: Name of the frame attribute 'graph`.
+        edge_attribute: Name of the score attribute in `graph`.
+        outpath: If given, save the edges in CSV file format.
+
+    Returns:
+        pd.DataFrame: Edges DataFrame with columns ['source_frame', 'source', 'target_frame', 'target', 'weight']
+    """
+    rows = []
+    for edge in graph.edges:
+        source = graph.nodes[edge[0]]
+        target = graph.nodes[edge[1]]
+
+        source_label = int(source["label"])
+        source_frame = int(source[frame_attribute])
+        target_label = int(target["label"])
+        target_frame = int(target[frame_attribute])
+        weight = float(graph.edges[edge][edge_attribute])
+
+        rows.append([source_frame, source_label, target_frame, target_label, weight])
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "source_frame",
+            "source_label",
+            "target_frame",
+            "target_label",
+            "weight",
+        ],
+    )
+    df = df.sort_values(
+        by=["source_frame", "source_label", "target_frame", "target_label"],
+        ascending=True,
+    )
+
+    if outpath is not None:
+        outpath = Path(outpath)
+        outpath.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        df.to_csv(outpath, index=False, header=True, sep=",")
+
+    return df
+
+
 def graph_to_ctc(
     graph: nx.DiGraph,
     masks_original: np.ndarray,
