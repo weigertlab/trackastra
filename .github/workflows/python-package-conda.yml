@@ -65,7 +65,7 @@ jobs:
         run: python -m pip install -e .[test]
 
       - name: Test
-        run: pytest tests -v --color=yes
+        run: pytest tests -v -s --color=yes
 
   upload_pypi:
     name: Upload package to PyPi
