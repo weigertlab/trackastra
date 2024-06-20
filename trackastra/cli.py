@@ -3,9 +3,9 @@ import sys
 
 import torch
 
-from .model import Trackastra
-from .tracking.utils import graph_to_ctc, graph_to_edge_table
-from .utils import str2path
+from trackastra.model import Trackastra
+from trackastra.tracking.utils import graph_to_ctc, graph_to_edge_table
+from trackastra.utils import str2path
 
 
 def cli():
@@ -110,3 +110,7 @@ def _track_from_disk(args):
             graph=track_graph,
             outpath=outpath,
         )
+
+
+if __name__ == "__main__":
+    cli()
