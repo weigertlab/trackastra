@@ -5,7 +5,7 @@
 # *Trackastra* - Tracking by Association with Transformers
 
 
-*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting assocations with a transformer model that was trained on a diverse set of microscopy videos.
+*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting associations with a transformer model that was trained on a diverse set of microscopy videos.
 
 ![Overview](overview.png)
 
