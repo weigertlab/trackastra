@@ -12,19 +12,18 @@ from trackastra.model import Trackastra
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_pretrained(name, device):
     """Each pretrained model should run on all (available) device."""
-    # TODO mps support
     if device == "cuda":
         if torch.cuda.is_available():
             run_predictions(name, "cuda")
         else:
             pytest.skip("cuda not available")
     elif device == "mps":
+        # TODO mps on GitHub actions only has 8GB memory, so it's disabled for now.
         if torch.backends.mps.is_available():
             run_predictions(name, "mps")
         else:
             pytest.skip("mps not available")
     elif device == "cpu":
-        # pytest.skip("cpu not needed")
         run_predictions(name, "cpu")
     else:
         raise ValueError()

@@ -1,11 +1,12 @@
 import argparse
+import logging
 import sys
-
-import torch
 
 from trackastra.model import Trackastra
 from trackastra.tracking.utils import graph_to_ctc, graph_to_edge_table
 from trackastra.utils import str2path
+
+logging.basicConfig(level=logging.INFO)
 
 
 def cli():
@@ -14,7 +15,12 @@ def cli():
     )
     subparsers = p.add_subparsers(help="trackastra")
 
-    p_track = subparsers.add_parser("track", help="Tracking help")
+    p_track = subparsers.add_parser(
+        "track",
+        help="Tracking help",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
+    )
     p_track.add_argument(
         "-i",
         "--imgs",
@@ -54,9 +60,23 @@ def cli():
         help="Local folder with custom model.",
     )
     p_track.add_argument(
-        "--mode", choices=["greedy_nodiv", "greedy", "ilp"], default="greedy"
+        "--mode",
+        choices=["greedy_nodiv", "greedy", "ilp"],
+        default="greedy",
+        help=(
+            "Mode for candidate graph pruning. For installing the ilp tracker, see"
+            " https://github.com/weigertlab/trackastra#installation."
+        ),
     )
-    p_track.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    p_track.add_argument(
+        "--device",
+        choices=["cuda", "mps", "cpu"],
+        default=None,
+        help=(
+            "Device to use. If not set, tries to use cuda/mps if available, otherwise"
+            " falling back to cpu."
+        ),
+    )
     p_track.set_defaults(cmd=_track_from_disk)
 
     if len(sys.argv) == 1:
@@ -69,7 +89,19 @@ def cli():
 
 
 def _track_from_disk(args):
-    device = "cuda" if torch.cuda.is_available() and args.device == "cuda" else "cpu"
+    # if torch.cuda.is_available() and args.device == "cuda":
+    #     device = "cuda"
+    # elif (
+    #     torch.backends.mps.is_available()
+    #     and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
+    #     and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
+    #     and args.device == "mps"
+    # ):
+    #     device = "mps"
+    # elif args.device == "cpu":
+    #     device = "cpu"
+    # else:
+    #     device = None
 
     if args.model_pretrained is None == args.model_custom is None:
         raise ValueError(
@@ -80,12 +112,12 @@ def _track_from_disk(args):
     if args.model_pretrained is not None:
         model = Trackastra.from_pretrained(
             name=args.model_pretrained,
-            device=device,
+            device=args.device,
         )
     if args.model_custom is not None:
         model = Trackastra.from_folder(
             args.model_custom,
-            device=device,
+            device=args.device,
         )
 
     track_graph, masks = model.track_from_disk(

@@ -16,6 +16,7 @@ from .model import TrackingTransformer
 from .predict import predict_windows
 from .pretrained import download_pretrained
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -24,9 +25,27 @@ class Trackastra:
         self,
         transformer: TrackingTransformer,
         train_args: dict,
-        device: str | None = None,
+        device: Literal["cuda", "mps", "cpu", None] = None,
     ):
-        if device is None:
+        if device == "cuda":
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            else:
+                logger.info("Cuda not available, falling back to cpu.")
+                self.device = "cpu"
+        elif device == "mps":
+            if (
+                torch.backends.mps.is_available()
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
+            ):
+                self.device = "mps"
+            else:
+                logger.info("Mps not available, falling back to cpu.")
+                self.device = "cpu"
+        elif device == "cpu":
+            self.device = "cpu"
+        else:
             should_use_mps = (
                 torch.backends.mps.is_available()
                 and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
@@ -41,10 +60,8 @@ class Trackastra:
                     else "cpu"
                 )
             )
-        else:
-            self.device = device
 
-        print(f"Using device {self.device}")
+        logger.info(f"Using device {self.device}")
 
         self.transformer = transformer.to(self.device)
         self.train_args = train_args

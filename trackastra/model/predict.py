@@ -12,7 +12,6 @@ from tqdm import tqdm
 
 warnings.simplefilter("ignore", SparseEfficiencyWarning)
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -38,7 +37,7 @@ def predict(batch, model):
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     A = model(coords, features=feats)
     A = model.normalize_output(A, timepoints, coords)
-    
+
     # # Spatially far entries should not influence the causal normalization
     # dist = torch.cdist(coords[0, :, 1:], coords[0, :, 1:])
     # invalid = dist > model.config["spatial_pos_cutoff"]
@@ -58,7 +57,7 @@ def predict_windows(
     delta_t: int = 1,
     edge_threshold: float = 0.05,
     spatial_dim: int = 3,
-    progbar_class=tqdm
+    progbar_class=tqdm,
 ) -> dict:
     """_summary_.
 
@@ -111,7 +110,7 @@ def predict_windows(
         labels = batch["labels"]
 
         A = predict(batch, model)
-        
+
         dt = timepoints[None, :] - timepoints[:, None]
         time_mask = np.logical_and(dt <= delta_t, dt > 0)
         A[~time_mask] = 0

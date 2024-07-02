@@ -10,9 +10,7 @@ from .track_graph import TrackGraph
 
 # from trackastra.tracking import graph_to_napari_tracks, graph_to_ctc
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
 def copy_edge(edge: tuple, source: nx.DiGraph, target: nx.DiGraph):
@@ -54,7 +52,7 @@ def track_greedy(
         key=lambda edge: edge[2][edge_attr],
         reverse=True,
     )
-    
+
     for edge in tqdm(edges, desc="Greedily matched edges"):
         node_in, node_out, features = edge
         assert (
@@ -166,7 +164,7 @@ def build_graph(
         iterator.set_description(
             f"{e_added} edges in frame {t_begin}  Total edges: {len(G.edges)}"
         )
-    
+
     logger.info(f"Added {len(G.nodes)} vertices, {len(G.edges)} edges")
 
     return G

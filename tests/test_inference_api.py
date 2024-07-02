@@ -5,7 +5,6 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 from pathlib import Path
 
 import pytest
-import torch
 from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
@@ -21,10 +20,8 @@ from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
 )
 def test_api(example_data):
     imgs, masks = example_data()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = Trackastra.from_pretrained(
         name="ctc",
-        device=device,
     )
 
     # TODO store predictions already on trackastra.TrackGraph
