@@ -70,7 +70,7 @@ def cli():
     )
     p_track.add_argument(
         "--device",
-        choices=["cuda", "mps", "cpu"],
+        choices=["cuda", "mps", "cpu", "automatic"],
         default=None,
         help=(
             "Device to use. If not set, tries to use cuda/mps if available, otherwise"
@@ -89,20 +89,6 @@ def cli():
 
 
 def _track_from_disk(args):
-    # if torch.cuda.is_available() and args.device == "cuda":
-    #     device = "cuda"
-    # elif (
-    #     torch.backends.mps.is_available()
-    #     and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
-    #     and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
-    #     and args.device == "mps"
-    # ):
-    #     device = "mps"
-    # elif args.device == "cpu":
-    #     device = "cpu"
-    # else:
-    #     device = None
-
     if args.model_pretrained is None == args.model_custom is None:
         raise ValueError(
             "Please pick a Trackastra model for tracking, either pretrained or a local"

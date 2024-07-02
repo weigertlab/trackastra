@@ -25,7 +25,7 @@ class Trackastra:
         self,
         transformer: TrackingTransformer,
         train_args: dict,
-        device: Literal["cuda", "mps", "cpu", None] = None,
+        device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
     ):
         if device == "cuda":
             if torch.cuda.is_available():
@@ -45,7 +45,7 @@ class Trackastra:
                 self.device = "cpu"
         elif device == "cpu":
             self.device = "cpu"
-        else:
+        elif device == "automatic" or device is None:
             should_use_mps = (
                 torch.backends.mps.is_available()
                 and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
@@ -60,6 +60,8 @@ class Trackastra:
                     else "cpu"
                 )
             )
+        else:
+            raise ValueError(f"Device {device} not recognized.")
 
         logger.info(f"Using device {self.device}")
 

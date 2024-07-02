@@ -22,6 +22,7 @@ def test_api(example_data):
     imgs, masks = example_data()
     model = Trackastra.from_pretrained(
         name="ctc",
+        device="cpu",
     )
 
     # TODO store predictions already on trackastra.TrackGraph
