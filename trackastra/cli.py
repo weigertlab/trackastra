@@ -69,6 +69,13 @@ def cli():
         ),
     )
     p_track.add_argument(
+        "--max-distance",
+        type=float,
+        default=128,
+        help="Maximum distance for linking cells.",
+    )
+        
+    p_track.add_argument(
         "--device",
         choices=["cuda", "mps", "cpu", "automatic"],
         default=None,
@@ -110,6 +117,7 @@ def _track_from_disk(args):
         args.imgs,
         args.masks,
         mode=args.mode,
+        max_distance=args.max_distance
     )
 
     if args.output_ctc:
