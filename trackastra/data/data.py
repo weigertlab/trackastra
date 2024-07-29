@@ -110,7 +110,7 @@ class CTCData(Dataset):
         root: str = "",
         ndim: int = 2,
         use_gt: bool = True,
-        detection_folders: list[str] | None = None,
+        detection_folders: list[str] = ["TRA"],
         window_size: int = 10,
         max_tokens: int | None = None,
         slice_pct: tuple = (0.0, 1.0),
@@ -1342,9 +1342,9 @@ def _ctc_assoc_matrix(detections, ts, graph, matching):
                 if n in fwd_map:
                     ancestors.append(fwd_map[n])
 
-            family[
-                i, np.array([fwd_map[gt_tracklet_id], *ancestors, *descendants])
-            ] = True
+            family[i, np.array([fwd_map[gt_tracklet_id], *ancestors, *descendants])] = (
+                True
+            )
         else:
             pass
             # Now we match to nothing, so even the matrix diagonal will not be filled.
