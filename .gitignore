@@ -2,7 +2,10 @@
 
 /scripts/data
 /scripts/runs
+/scripts/runs_cluster
+/scripts/runs_debug
 /scripts/results
+/scripts/results_debug
 /test_data
 /tests/test_data
 /tests/data
