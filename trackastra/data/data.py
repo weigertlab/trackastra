@@ -621,9 +621,10 @@ class CTCData(Dataset):
             self.imgs = self._check_dimensions(self.imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
-                self.imgs = np.stack(
+                self.imgs = np.stack([
                     _compress_img_mask_preproc(im, mask, self.features)
                     for im, mask in zip(self.imgs, self.gt_masks)
+                ]
                 )
 
         assert len(self.gt_masks) == len(self.imgs)
@@ -1403,48 +1404,44 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
     return torch.cat((x, pad), dim=dim)
 
 
-def collate_sequence_padding(max_len: int | None = None):
+def collate_sequence_padding(batch):
     """Collate function that pads all sequences to the same length."""
-
-    def collate_sequence(batch):
-        lens = tuple(len(x["coords"]) for x in batch)
-        n_max_len = max(lens) if max_len is None else max_len
-        # print(tuple(len(x["coords"]) for x in batch))
-        # print(tuple(len(x["features"]) for x in batch))
-        # print(batch[0].keys())
-        tuple(batch[0].keys())
-        normal_keys = {
-            "coords": 0,
-            "features": 0,
-            "labels": 0,  # Not needed, remove for speed.
-            "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
-        }
-        n_pads = tuple(n_max_len - s for s in lens)
-        batch_new = dict(
-            (
-                k,
-                torch.stack(
-                    [pad_tensor(x[k], n_max=n_max_len, value=v) for x in batch], dim=0
-                ),
+    lens = tuple(len(x["coords"]) for x in batch)
+    n_max_len = max(lens)
+    # print(tuple(len(x["coords"]) for x in batch))
+    # print(tuple(len(x["features"]) for x in batch))
+    # print(batch[0].keys())
+    tuple(batch[0].keys())
+    normal_keys = {
+        "coords": 0,
+        "features": 0,
+        "labels": 0,  # Not needed, remove for speed.
+        "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
+    }
+    n_pads = tuple(n_max_len - s for s in lens)
+    batch_new = dict(
+        (
+            k,
+            torch.stack(
+                [pad_tensor(x[k], n_max=n_max_len, value=v) for x in batch], dim=0
+            ),
+        )
+        for k, v in normal_keys.items()
+    )
+    batch_new["assoc_matrix"] = torch.stack(
+        [
+            pad_tensor(
+                pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
             )
-            for k, v in normal_keys.items()
-        )
-        batch_new["assoc_matrix"] = torch.stack(
-            [
-                pad_tensor(
-                    pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
-                )
-                for x in batch
-            ],
-            dim=0,
-        )
+            for x in batch
+        ],
+        dim=0,
+    )
 
-        # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
-        pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
-        for i, n_pad in enumerate(n_pads):
-            pad_mask[i, n_max_len - n_pad :] = True
+    # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
+    pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
+    for i, n_pad in enumerate(n_pads):
+        pad_mask[i, n_max_len - n_pad :] = True
 
-        batch_new["padding_mask"] = pad_mask.bool()
-        return batch_new
-
-    return collate_sequence
+    batch_new["padding_mask"] = pad_mask.bool()
+    return batch_new

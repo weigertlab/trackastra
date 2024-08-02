@@ -883,7 +883,7 @@ def train(args):
     common_loader_args = dict(
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
-        collate_fn=collate_sequence_padding(),
+        collate_fn=collate_sequence_padding,
     )
 
     datamodule = None

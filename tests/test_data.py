@@ -112,7 +112,7 @@ def test_ctc_assoc_matrix_emtpy():
     loader_train = torch.utils.data.DataLoader(
         data,
         batch_size=2,
-        collate_fn=collate_sequence_padding(),
+        collate_fn=collate_sequence_padding,
     )
     for batch in loader_train:
         pass
@@ -145,7 +145,7 @@ def test_ctc_assoc_matrix_single_detection():
     loader_train = torch.utils.data.DataLoader(
         data,
         batch_size=2,
-        collate_fn=collate_sequence_padding(),
+        collate_fn=collate_sequence_padding,
     )
     for batch in loader_train:
         pass
@@ -309,3 +309,4 @@ def test_compress(features=None):
             else:
                 print(f"{k:20} OK")
     return data1, data2
+
