@@ -34,7 +34,7 @@ class EncoderLayer(nn.Module):
         window: int = 16,
         positional_bias: Literal["bias", "rope", "none"] = "bias",
         positional_bias_n_spatial: int = 32,
-        attn_dist_mode:str = 'v0'
+        attn_dist_mode: str = "v0",
     ):
         super().__init__()
         self.positional_bias = positional_bias
@@ -48,7 +48,7 @@ class EncoderLayer(nn.Module):
             n_temporal=window,
             dropout=dropout,
             mode=positional_bias,
-            attn_dist_mode=attn_dist_mode
+            attn_dist_mode=attn_dist_mode,
         )
         self.mlp = FeedForward(d_model)
         self.norm1 = nn.LayerNorm(d_model)
@@ -88,7 +88,7 @@ class DecoderLayer(nn.Module):
         cutoff_spatial: int = 256,
         positional_bias: Literal["bias", "rope", "none"] = "bias",
         positional_bias_n_spatial: int = 32,
-        attn_dist_mode:str = 'v0'
+        attn_dist_mode: str = "v0",
     ):
         super().__init__()
         self.positional_bias = positional_bias
@@ -102,7 +102,7 @@ class DecoderLayer(nn.Module):
             n_temporal=window,
             dropout=dropout,
             mode=positional_bias,
-            attn_dist_mode=attn_dist_mode
+            attn_dist_mode=attn_dist_mode,
         )
 
         self.mlp = FeedForward(d_model)
@@ -287,7 +287,7 @@ class TrackingTransformer(torch.nn.Module):
         causal_norm: Literal[
             "none", "linear", "softmax", "quiet_softmax"
         ] = "quiet_softmax",
-        attn_dist_mode:str = 'v0'
+        attn_dist_mode: str = "v0",
     ):
         super().__init__()
 
@@ -306,7 +306,7 @@ class TrackingTransformer(torch.nn.Module):
             spatial_pos_cutoff=spatial_pos_cutoff,
             feat_embed_per_dim=feat_embed_per_dim,
             causal_norm=causal_norm,
-            attn_dist_mode=attn_dist_mode
+            attn_dist_mode=attn_dist_mode,
         )
 
         # TODO remove, alredy present in self.config
@@ -330,7 +330,7 @@ class TrackingTransformer(torch.nn.Module):
                     cutoff_spatial=spatial_pos_cutoff,
                     positional_bias=attn_positional_bias,
                     positional_bias_n_spatial=attn_positional_bias_n_spatial,
-                    attn_dist_mode=attn_dist_mode
+                    attn_dist_mode=attn_dist_mode,
                 )
                 for _ in range(num_encoder_layers)
             ]
@@ -346,7 +346,7 @@ class TrackingTransformer(torch.nn.Module):
                     cutoff_spatial=spatial_pos_cutoff,
                     positional_bias=attn_positional_bias,
                     positional_bias_n_spatial=attn_positional_bias_n_spatial,
-                    attn_dist_mode=attn_dist_mode
+                    attn_dist_mode=attn_dist_mode,
                 )
                 for _ in range(num_decoder_layers)
             ]
@@ -472,7 +472,8 @@ class TrackingTransformer(torch.nn.Module):
                 if k in args:
                     if config[k] != args[k]:
                         errors.append(
-                            f"Loaded model config {k}={config[k]}, but current argument {k}={args[k]}."
+                            f"Loaded model config {k}={config[k]}, but current argument"
+                            f" {k}={args[k]}."
                         )
             if errors:
                 raise ValueError("\n".join(errors))

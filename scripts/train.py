@@ -162,15 +162,15 @@ def log_tracking_metrics(model, _data, causal_norm: str, delta: int):
             max_distance=50,
         )
         (
-            df,
+            _df,
             df_metric,
-            df_mot,
-            masks,
-            graph,
-            tracks_graph,
-            tracks,
-            masks_original,
-            viewer,
+            _df_mot,
+            _masks,
+            _graph,
+            _tracks_graph,
+            _tracks,
+            _masks_original,
+            _viewer,
         ) = tracking(args_track)
     return df_metric
 
@@ -651,7 +651,7 @@ def cache_class(cachedir=None):
     """A simple file cache for CTCData."""
 
     def make_hashable(obj):
-        if isinstance(obj, (tuple, list)):
+        if isinstance(obj, tuple | list):
             return tuple(make_hashable(e) for e in obj)
         elif isinstance(obj, Path):
             return obj.as_posix()
@@ -821,6 +821,7 @@ def train(args):
             spatial_pos_cutoff=args.spatial_pos_cutoff,
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
+            attn_dist_mode=args.attn_dist_mode,
             causal_norm=args.causal_norm,
         )
 
@@ -849,6 +850,9 @@ def train(args):
     for p in args.input_train + args.input_val:
         if not Path(p).exists():
             raise FileNotFoundError(f"Input folder {p} does not exist")
+
+    if args.only_prechecks:
+        return locals()
 
     for split, inps, slice_pct in zip(
         ("train", "val"),
@@ -993,6 +997,7 @@ def train(args):
             spatial_pos_cutoff=args.spatial_pos_cutoff,
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
+            attn_dist_mode=args.attn_dist_mode,
             causal_norm=args.causal_norm,
         )
 
@@ -1075,8 +1080,8 @@ def train(args):
                 ckpt_path=resume_path,
             )
 
-    print(f"Time elapsed:     {(default_timer() - t)/60:.02f} min")
-    print(f"CPU Memory used:  {(_process_memory() - memory)/1e9:.2f} GB")
+    print(f"Time elapsed:     {(default_timer() - t) / 60:.02f} min")
+    print(f"CPU Memory used:  {(_process_memory() - memory) / 1e9:.2f} GB")
     print(f"GPU Memory used : {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
     return locals()
@@ -1148,6 +1153,7 @@ def parse_train_args():
         default="rope",
     )
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)
+    parser.add_argument("--attn_dist_mode", default="v0")
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -1177,6 +1183,7 @@ def parse_train_args():
 
     parser.add_argument("--sanity_dist", action="store_true")
     parser.add_argument("--preallocate", type=str2bool, default=True)
+    parser.add_argument("--only_prechecks", action="store_true")
     parser.add_argument(
         "--compress", type=str2bool, default=False, help="compress dataset"
     )
@@ -1266,6 +1273,11 @@ def parse_train_args():
         raise ValueError(
             "Distributed training does not work in interactive mode. Run as `python"
             " train.py`."
+        )
+
+    if args.train_samples == 0:
+        raise NotImplementedError(
+            "--train_samples must be > 0, full dataset pass not supported."
         )
 
     return args
