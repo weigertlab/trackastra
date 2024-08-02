@@ -840,7 +840,7 @@ def train(args):
         preallocate_memory(
             dummy_data,
             dummy_model_lightning,
-            args.batch_size // n_gpus,
+            args.batch_size,
             args.max_tokens,
             device,
         )

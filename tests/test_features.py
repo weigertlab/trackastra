@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.ndimage import maximum_filter
 from trackastra.data.wrfeat import (
-    WRFeatures,
+    WRFeatures, WRAugmentationPipeline, WRRandomAffine, WRRandomMovement
 )
 
 
@@ -37,18 +37,21 @@ if __name__ == "__main__":
     x, y, p, ts = generate_data(ndim=2, ngrid=10)
     feats = WRFeatures.from_mask_img(mask=y, img=x)
 
-    # np.random.seed(42)
+    np.random.seed(42)
 
-    # aug = WRAugmentationPipeline(
-    #     [
-    #         # WRRandomFlip(p=0.5),
-    #         # WRRandomAffine(p=1, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)),
-    #         # WRRandomBrightness(p=1, factor=(0.5, 0.2)),
-    #         # WRRandomOffset(p=1, offset=(-3, 3))
-    #         # WRRandomAffine(p=1, degrees=None, scale=None, shear=(.1,.1)),
-    #     ]
-    # )
+    aug = WRAugmentationPipeline(
+        [
+            # WRRandomFlip(p=0.5),
+            #WRRandomAffine(p=1, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)),
+            # WRRandomAffine(p=1, degrees=180, scale=(1, 1), shear=(0, 0)),
+            WRRandomMovement(p=1),
+            # WRRandomBrightness(p=1, factor=(0.5, 0.2)),
+            # WRRandomOffset(p=1, offset=(-3, 3))
+            # WRRandomAffine(p=1, degrees=None, scale=None, shear=(.1,.1)),
+        ]
+    )
 
+    feats2 = aug(feats)
     # aug = WRRandomAffine(p=1, degrees=180, scale=None, shear=None)
 
     # from trackastra.data.wrfeat import _rotation_matrix, _transform_affine

@@ -982,7 +982,7 @@ class CTCData(Dataset):
                     # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
                 ]
             )
-        elif augment > 1:
+        elif augment == 2:
             augmenter = wrfeat.WRAugmentationPipeline(
                 [
                     wrfeat.WRRandomFlip(p=0.5),
@@ -993,6 +993,18 @@ class CTCData(Dataset):
                     wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
                 ]
             )
+        elif augment == 3:
+            augmenter = wrfeat.WRAugmentationPipeline(
+                [
+                    wrfeat.WRRandomFlip(p=0.5),
+                    wrfeat.WRRandomAffine(
+                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    ),
+                    wrfeat.WRRandomBrightness(p=0.8),
+                    wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
+                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                ]
+            )            
         else:
             augmenter = None
 
@@ -1200,7 +1212,7 @@ class CTCData(Dataset):
 
         if self.augmenter is not None:
             coords = coords0.clone()
-            coords[:, 1:] += torch.randint(0, 256, (1, self.ndim))
+            coords[:, 1:] += torch.randint(0, 512, (1, self.ndim))
         else:
             coords = coords0.clone()
         res = dict(
