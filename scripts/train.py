@@ -1128,7 +1128,7 @@ def parse_train_args():
         ),
     )
     parser.add_argument("--input_train", type=str, nargs="+")
-    parser.add_argument("--input_val", type=str, nargs="+")
+    parser.add_argument("--input_val", type=str, nargs="*")
     parser.add_argument("--slice_pct_train", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--downscale_temporal", type=int, default=1)
