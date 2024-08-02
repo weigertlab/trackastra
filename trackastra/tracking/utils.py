@@ -364,25 +364,22 @@ def graph_to_ctc(
     return df, masks
 
 
-
-
-def ctc_to_graph(df:pd.DataFrame, frame_attribute:str='time'):
+def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = 'time'):
     """From a ctc dataframe, create a digraph with frame_attribute and label as node attributes.
 
     Args:
         df: pd.DataFrame with columns `label`, `t1`, `t2`, `parent` (man_track.txt)
         frame_attribute: Name of the frame attribute in the graph nodes.
+
     Returns:
         graph: The track graph
     """
-
     graph = nx.DiGraph()
-    labels = []
 
     t1 = df.t1.min()
     t2 = df.t2.max()
     
-    for t in tqdm(range(t1, t2+1)):
+    for t in tqdm(range(t1, t2 + 1)):
         obs = df[(df.t1 <= t) & (df.t2 >= t)]
         for row in obs.itertuples():
             label, t1, t2, parent = row.label, row.t1, row.t2, row.parent
@@ -394,7 +391,7 @@ def ctc_to_graph(df:pd.DataFrame, frame_attribute:str='time'):
                    }
                 graph.add_node(label, **attrs)
 
-            if parent!=0:
+            if parent != 0:
                 graph.add_edge(parent, label)
 
     return graph

@@ -299,6 +299,7 @@ class WRRandomFlip(WRBaseAugmentation):
             features=features.features,
         )
 
+
 def _scale_matrix(sz: float, sy: float, sx: float):
     return np.diag([sz, sy, sx])
 
@@ -437,11 +438,13 @@ class WRRandomOffset(WRBaseAugmentation):
             features=features.features,
         )
 
+
 class WRRandomMovement(WRBaseAugmentation):
-    """ random global linear shift"""
+    """random global linear shift."""
     def __init__(self, offset: float = (-10, 10), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
+
     def _augment(self, features: WRFeatures):
         base_offset = self._rng.uniform(*self.offset, features.coords.shape[-1])
         tmin = features.timepoints.min()

@@ -167,7 +167,7 @@ class RelativePositionalAttention(nn.Module):
         n_temporal: int = 16,
         dropout: float = 0.0,
         mode: Literal["bias", "rope", "none"] = "bias",
-        attn_dist_mode:str='v0'
+        attn_dist_mode: str = 'v0'
     ):
         super().__init__()
 
@@ -258,10 +258,10 @@ class RelativePositionalAttention(nn.Module):
             else:
                 pass
 
-            if self.attn_dist_mode=='v0':
+            if self.attn_dist_mode == 'v0':
                 dist = torch.cdist(coords, coords, p=2)
                 attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))
-            elif self.attn_dist_mode=='v1':
+            elif self.attn_dist_mode == 'v1':
                 attn_mask += torch.exp(-5 * spatial_dist.unsqueeze(1) / self.cutoff_spatial)            
             else: 
                 raise ValueError(f"Unknown attn_dist_mode {self.attn_dist_mode}")

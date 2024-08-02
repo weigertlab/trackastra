@@ -1,7 +1,9 @@
 import numpy as np
 from scipy.ndimage import maximum_filter
 from trackastra.data.wrfeat import (
-    WRFeatures, WRAugmentationPipeline, WRRandomAffine, WRRandomMovement
+    WRAugmentationPipeline,
+    WRFeatures,
+    WRRandomMovement,
 )
 
 
@@ -42,7 +44,7 @@ if __name__ == "__main__":
     aug = WRAugmentationPipeline(
         [
             # WRRandomFlip(p=0.5),
-            #WRRandomAffine(p=1, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)),
+            # WRRandomAffine(p=1, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)),
             # WRRandomAffine(p=1, degrees=180, scale=(1, 1), shear=(0, 0)),
             WRRandomMovement(p=1),
             # WRRandomBrightness(p=1, factor=(0.5, 0.2)),
