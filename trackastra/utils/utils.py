@@ -389,7 +389,6 @@ def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device)
     loss.backward()
     model_lightning.zero_grad()
 
-    # FIXME somehow does not keep this memory allocated
     logger.info(
         f"Preallocated memory for largest training batch (length {max_len}) in"
         f" {default_timer() - start:.02f} s"

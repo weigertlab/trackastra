@@ -1413,7 +1413,8 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
         raise ValueError(f"pad_tensor: n_max={n_max} must be larger than n={n} !")
     pad_shape = list(x.shape)
     pad_shape[dim] = n_max - n
-    pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype).to(x.device)
+    # pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype).to(x.device)
+    pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype)
     return torch.cat((x, pad), dim=dim)
 
 

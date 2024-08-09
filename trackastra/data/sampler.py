@@ -1,5 +1,4 @@
-""""
-Sampler utils for normal and distributed training
+"""Sampler utils for normal and distributed training
 (e.g. to balance batch size).
 
 """

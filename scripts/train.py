@@ -846,7 +846,9 @@ def train(args):
             device,
         )
         del dummy_model_lightning
+        del dummy_model
         del dummy_data
+        torch.cuda.empty_cache()
 
     for p in args.input_train + args.input_val:
         if not Path(p).exists():
@@ -1042,8 +1044,8 @@ def train(args):
     logging.info(f"Model has {numerize.numerize(num_params)} parameters")
 
     if args.distributed:
-        # strategy = "ddp"
-        strategy = "ddp_find_unused_parameters_true"
+        strategy = "ddp"
+        # strategy = "ddp_find_unused_parameters_true"
     else:
         strategy = "auto"
 
@@ -1075,6 +1077,7 @@ def train(args):
 
     if args.epochs > 0:
         if args.distributed and datamodule is not None:
+            logger.info("Using lightning datamodule")
             trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
         else:
             trainer.fit(
