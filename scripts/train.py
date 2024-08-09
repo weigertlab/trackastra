@@ -627,7 +627,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
             value = trainer.logged_metrics[self._monitor]
             if value < self._best:
                 self._best = value
-                logging.info(f"saved best model with {self._monitor}={value:.5f}")
+                logging.info(f"Saved best model with {self._monitor}={value:.5f}")
                 pl_module.model.save(self._logdir)
 
 
@@ -756,6 +756,7 @@ def train(args):
                 mode="min",
                 save_top_k=1,
                 save_last=True,
+                verbose=True,
             )
         )
 
@@ -874,7 +875,8 @@ def train(args):
                 downscale_temporal=args.downscale_temporal,
                 downscale_spatial=args.downscale_spatial,
                 sanity_dist=args.sanity_dist,
-                crop_size=args.crop_size if split == "train" else None,
+                # crop_size=args.crop_size if split == "train" else None,
+                crop_size=args.crop_size,
                 compress=args.compress,
             )
             for inp in inps
@@ -1012,6 +1014,8 @@ def train(args):
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
     )
+    # Compiling does not work!
+    # model_lightning = torch.compile(model_lightning)
 
     # if logdir already exists and --resume option is set, load the last checkpoint (eg when continuing training after crash)
     if logdir is not None and logdir.exists() and args.resume:
@@ -1141,7 +1145,7 @@ def parse_train_args():
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
     parser.add_argument("--feat_embed_per_dim", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.00)
-    parser.add_argument("--num_workers", type=int, default=12)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_tokens", type=int, default=None)
     parser.add_argument("--delta_cutoff", type=int, default=2)
