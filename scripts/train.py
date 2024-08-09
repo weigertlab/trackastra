@@ -1139,7 +1139,7 @@ def parse_train_args():
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--spatial_pos_cutoff", type=int, default=256)
     parser.add_argument("--from_subfolder", action="store_true")
-    parser.add_argument("--train_samples", type=int, default=10000)
+    parser.add_argument("--train_samples", type=int, default=100000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
