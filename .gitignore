@@ -6,6 +6,7 @@
 /scripts/runs_debug
 /scripts/results
 /scripts/results_debug
+/scripts/wandb
 /test_data
 /tests/test_data
 /tests/data
