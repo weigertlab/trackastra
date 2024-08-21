@@ -273,7 +273,7 @@ class RelativePositionalAttention(nn.Module):
             ).unsqueeze(1)
             attn_mask.masked_fill_(ignore_mask, attn_ignore_val)
 
-        self.attn_mask = attn_mask.clone()
+        # self.attn_mask = attn_mask.clone()
 
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0

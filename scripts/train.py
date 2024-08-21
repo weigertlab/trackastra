@@ -884,6 +884,10 @@ def train(args):
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
     )
+    # still write cached dataset even if epochs == 0 (e.g. for parallel cache creation)
+    if args.epochs==0:
+        datamodule.prepare_data()
+
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
