@@ -839,10 +839,11 @@ def train(args):
         del dummy_data
         torch.cuda.empty_cache()
 
-    for p in args.input_train + args.input_val:
-        if not Path(p).exists():
-            raise FileNotFoundError(f"Input folder {p} does not exist")
-
+    non_exists = tuple(p for p in args.input_train + args.input_val if not Path(p).exists())
+    if len(non_exists) > 0:
+        p_non = '\n'.join(non_exists)
+        raise FileNotFoundError(f"the following input folders don't exist: \n{p_non}")
+    
     if args.only_prechecks:
         return locals()
 
@@ -990,7 +991,7 @@ def train(args):
         profiler = PyTorchProfiler(dirpath=".", filename="profile", skip_first=16)
     else:
         profiler = None
-
+    
     trainer = pl.Trainer(
         accelerator="cuda",
         strategy=strategy,
