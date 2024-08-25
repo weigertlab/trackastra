@@ -1206,7 +1206,7 @@ class CTCData(Dataset):
 
         coords0 = np.concatenate((feat.timepoints[:, None], feat.coords), axis=-1)
         coords0 = torch.from_numpy(coords0).float()
-        assoc_matrix = torch.from_numpy(assoc_matrix.copy()).float()
+        assoc_matrix = torch.from_numpy(assoc_matrix.astype(np.float32))
         features = torch.from_numpy(feat.features_stacked).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()

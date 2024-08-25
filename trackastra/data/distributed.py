@@ -174,9 +174,9 @@ class BalancedDistributedSampler(DistributedSampler):
     def __init__(
         self,
         dataset: Dataset,
-        batch_size: int = 16,
-        n_pool: int = 10,
-        num_samples: int | None = None,
+        batch_size: int,
+        n_pool: int,
+        num_samples: int,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         *args,
@@ -212,6 +212,7 @@ class BalancedDataModule(LightningDataModule):
         input_val: list,
         cachedir: str,
         augment: int,
+        distributed:bool, 
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
@@ -221,6 +222,7 @@ class BalancedDataModule(LightningDataModule):
         self.input_val = input_val
         self.cachedir = cachedir
         self.augment = augment
+        self.distributed = distributed
         self.dataset_kwargs = dataset_kwargs
         self.sampler_kwargs = sampler_kwargs
         self.loader_kwargs = loader_kwargs
@@ -276,15 +278,28 @@ class BalancedDataModule(LightningDataModule):
             )
 
     def train_dataloader(self):
-        sampler = BalancedDistributedSampler(
-            self.datasets["train"],
-            **self.sampler_kwargs,
-        )
-
+        loader_kwargs = self.loader_kwargs.copy()
+        if self.distributed:
+            sampler = BalancedDistributedSampler(
+                self.datasets["train"],
+                **self.sampler_kwargs,
+            )
+            batch_sampler = None
+        else: 
+            sampler=None
+            batch_sampler = BalancedBatchSampler(
+                self.datasets["train"],
+                **self.sampler_kwargs,
+            )
+            if not loader_kwargs['batch_size'] == batch_sampler.batch_size:
+                raise ValueError(f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and sampler_kwargs ({batch_sampler.batch_size}) must match")            
+            del loader_kwargs['batch_size']
+        
         loader = DataLoader(
             self.datasets["train"],
             sampler=sampler,
-            **self.loader_kwargs,
+            batch_sampler=batch_sampler,
+            **loader_kwargs,
         )
         return loader
 

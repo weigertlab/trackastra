@@ -880,6 +880,7 @@ def train(args):
         input_val=args.input_val,
         cachedir=args.cachedir,
         augment=args.augment,
+        distributed=args.distributed,
         dataset_kwargs=dataset_kwargs,
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
@@ -985,7 +986,7 @@ def train(args):
     logging.info(f"Model has {numerize.numerize(num_params)} parameters")
 
     if args.distributed:
-        strategy = "ddp"
+        strategy = "ddp" if args.distributed else "dp"
         # strategy = "ddp_find_unused_parameters_true"
     else:
         strategy = "auto"
@@ -1017,9 +1018,8 @@ def train(args):
         resume_path = None
 
     if args.epochs > 0:
-        if args.distributed and datamodule is not None:
-            logger.info("Using lightning datamodule")
-            trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
+        logger.info("Using lightning datamodule")
+        trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
 
     print(f"Time elapsed:     {(default_timer() - t) / 60:.02f} min")
     print(f"CPU Memory used:  {(_process_memory() - memory) / 1e9:.2f} GB")
@@ -1207,12 +1207,6 @@ def parse_train_args():
     #     args.attn_positional_bias = "bias"
     # elif args.attn_positional_bias == "False":
     #     args.attn_positional_bias = False
-
-    if args.distributed and hasattr(sys, "ps1"):
-        raise ValueError(
-            "Distributed training does not work in interactive mode. Run as `python"
-            " train.py`."
-        )
 
     if args.train_samples == 0:
         raise NotImplementedError(
