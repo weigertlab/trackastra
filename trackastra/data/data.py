@@ -19,12 +19,22 @@ from skimage.segmentation import relabel_sequential
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from ..utils import blockwise_sum, normalize
-from . import wrfeat
-from ._check_ctc import _check_ctc, _get_node_attributes
-from .augmentations import AugmentationPipeline, RandomCrop
-from .features import _PROPERTIES, extract_features_patch, extract_features_regionprops
-from .matching import matching
+from trackastra.data import wrfeat
+from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
+from trackastra.data.augmentations import (
+    AugmentationPipeline,
+    RandomCrop,
+    default_augmenter,
+)
+from trackastra.data.features import (
+    _PROPERTIES,
+    extract_features_patch,
+    extract_features_regionprops,
+)
+from trackastra.data.matching import matching
+
+# from ..utils import blockwise_sum, normalize
+from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -331,6 +341,21 @@ class CTCData(Dataset):
         if self.features == "wrfeat":
             return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
 
+        cropper = (
+            RandomCrop(
+                crop_size=crop_size,
+                ndim=ndim,
+                use_padding=False,
+                ensure_inside_points=True,
+            )
+            if crop_size is not None
+            else None
+        )
+
+        # Hack
+        if self.features == "none":
+            return 0, default_augmenter, cropper
+
         if ndim == 2:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
             feat_dim = {
@@ -347,16 +372,7 @@ class CTCData(Dataset):
                 "regionprops2": 11,
                 "patch_regionprops": 256 + 8,
             }[features]
-        cropper = (
-            RandomCrop(
-                crop_size=crop_size,
-                ndim=ndim,
-                use_padding=False,
-                ensure_inside_points=True,
-            )
-            if crop_size is not None
-            else None
-        )
+
         return feat_dim, augmenter, cropper
 
     def _compress_data(self):
@@ -1459,3 +1475,22 @@ def collate_sequence_padding(batch):
 
     batch_new["padding_mask"] = pad_mask.bool()
     return batch_new
+
+
+if __name__ == "__main__":
+
+    dummy_data = CTCData(
+        root="../../scripts/data/synthetic_cells/01",
+        ndim=2,
+        detection_folders=["TRA"],
+        window_size=4,
+        max_tokens=None,
+        augment=3,
+        features="none",
+        downscale_temporal=1,
+        downscale_spatial=1,
+        sanity_dist=False,
+        crop_size=(256, 256),
+    )
+
+    x = dummy_data[0]

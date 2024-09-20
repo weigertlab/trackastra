@@ -8,7 +8,6 @@ import torch.multiprocessing
 torch.set_float32_matmul_precision("medium")
 
 import logging
-import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -839,11 +838,13 @@ def train(args):
         del dummy_data
         torch.cuda.empty_cache()
 
-    non_exists = tuple(p for p in args.input_train + args.input_val if not Path(p).exists())
+    non_exists = tuple(
+        p for p in args.input_train + args.input_val if not Path(p).exists()
+    )
     if len(non_exists) > 0:
-        p_non = '\n'.join(non_exists)
+        p_non = "\n".join(non_exists)
         raise FileNotFoundError(f"the following input folders don't exist: \n{p_non}")
-    
+
     if args.only_prechecks:
         return locals()
 
@@ -886,9 +887,8 @@ def train(args):
         loader_kwargs=loader_kwargs,
     )
     # still write cached dataset even if epochs == 0 (e.g. for parallel cache creation)
-    if args.epochs==0:
+    if args.epochs == 0:
         datamodule.prepare_data()
-
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
@@ -927,12 +927,13 @@ def train(args):
         else:
             model = TrackingTransformer.from_folder(fpath, args=args)
     else:
+        feat_dim = 0 if args.features == "none" else 7 if args.ndim == 2 else 12
         model = TrackingTransformer(
             # coord_dim=datasets["train"].datasets[0].ndim,
             coord_dim=args.ndim,
             # feat_dim=datasets["train"].datasets[0].feat_dim,
             # FIXME hardcoded feat_dim
-            feat_dim=7 if args.ndim == 2 else 12,
+            feat_dim=feat_dim,
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
@@ -986,7 +987,7 @@ def train(args):
     logging.info(f"Model has {numerize.numerize(num_params)} parameters")
 
     if args.distributed:
-        strategy = "ddp" if args.distributed else "dp"
+        strategy = "ddp"
         # strategy = "ddp_find_unused_parameters_true"
     else:
         strategy = "auto"
@@ -996,7 +997,7 @@ def train(args):
         profiler = PyTorchProfiler(dirpath=".", filename="profile", skip_first=16)
     else:
         profiler = None
-    
+
     trainer = pl.Trainer(
         accelerator="cuda",
         strategy=strategy,

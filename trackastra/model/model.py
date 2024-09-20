@@ -386,7 +386,7 @@ class TrackingTransformer(torch.nn.Module):
 
         pos = self.pos_embed(coords)
 
-        if features is None:
+        if features is None or features.numel() == 0:
             features = pos
         else:
             features = self.feat_embed(features)
