@@ -69,7 +69,7 @@ The predicted assocations can then be used for linked with several modes:
 - `greedy`        (greedy linking with division) - fast, no additional dependencies
 - `ilp`          (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
 
-Otherwise, no hyperparameters to choose :)
+Apart from that, no hyperparameters to choose :)
 
 ```python
 import torch
