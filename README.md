@@ -9,7 +9,7 @@
 
 ![Overview](overview.png)
 
-If you are using this code in your research, please cite our [preprint](https://arxiv.org/abs/2405.15700):
+If you are using this code in your research, please cite our [paper](https://arxiv.org/abs/2405.15700):
 > Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> European Conference on Computer Vision, 2024
 
 ## Examples
