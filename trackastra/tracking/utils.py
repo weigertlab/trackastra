@@ -128,7 +128,7 @@ def linear_chains(G: nx.DiGraph):
     """Find all linear chains in a tree/graph, i.e. paths that.
 
     i) either start/end at a node with out_degree>in_degree or and have no internal branches, or
-    ii) consists of a single node or a single splitting node 
+    ii) consists of a single node or a single splitting node
 
     Note that each chain includes its start/end node, i.e. they can be appear in multiple chains.
     """
@@ -136,8 +136,10 @@ def linear_chains(G: nx.DiGraph):
     nodes = tuple(n for n in G.nodes if G.out_degree[n] > G.in_degree[n])
     # single nodes are those that are not starting a linear chain
     # single_nodes = tuple(n for n in G.nodes if G.out_degree[n] == G.in_degree[n] == 0)
-    single_nodes = tuple(n for n in G.nodes if G.in_degree[n] == 0 and G.out_degree[n] != 1)
-    
+    single_nodes = tuple(
+        n for n in G.nodes if G.in_degree[n] == 0 and G.out_degree[n] != 1
+    )
+
     for ni in single_nodes:
         yield [ni]
 
@@ -328,7 +330,10 @@ def graph_to_ctc(
         for _n in _nodes:
             node = graph.nodes[_n]
             t = node[frame_attribute]
-            lab = node["label"]
+            try:
+                lab = node["label"].item()
+            except AttributeError:
+                lab = node["label"]
             ss = regions[t][lab]
             m = masks_original[t][ss] == lab
             if masks[t][ss][m].max() > 0:
@@ -364,7 +369,7 @@ def graph_to_ctc(
     return df, masks
 
 
-def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = 'time'):
+def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = "time"):
     """From a ctc dataframe, create a digraph with frame_attribute and label as node attributes.
 
     Args:
@@ -378,17 +383,14 @@ def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = 'time'):
 
     t1 = df.t1.min()
     t2 = df.t2.max()
-    
+
     for t in tqdm(range(t1, t2 + 1)):
         obs = df[(df.t1 <= t) & (df.t2 >= t)]
         for row in obs.itertuples():
             label, t1, t2, parent = row.label, row.t1, row.t2, row.parent
             # add label as node if not already in graph
             if not graph.has_node(label):
-                attrs = {
-                    "label": label,
-                   frame_attribute: t
-                   }
+                attrs = {"label": label, frame_attribute: t}
                 graph.add_node(label, **attrs)
 
             if parent != 0:

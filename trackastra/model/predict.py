@@ -145,18 +145,20 @@ def predict_windows(
     )
 
     # Normalize weights by the number of times they were written from different sliding window positions
+    sp_weights.data /= sp_accum_coo.data
+
     weights = tuple(
-        ((i, j), v / a)
-        for i, j, v, a in zip(
+        ((i, j), v)
+        for i, j, v in zip(
             sp_weights_coo.row,
             sp_weights_coo.col,
             sp_weights_coo.data,
-            sp_accum_coo.data,
         )
     )
 
     results = dict()
     results["nodes"] = node_properties
     results["weights"] = weights
+    results["adj"] = sp_weights
 
     return results

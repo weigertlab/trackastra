@@ -9,12 +9,12 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from ..data import build_windows, get_features, load_tiff_timeseries
-from ..tracking import TrackGraph, build_graph, track_greedy
-from ..utils import normalize
-from .model import TrackingTransformer
-from .predict import predict_windows
-from .pretrained import download_pretrained
+from trackastra.data import build_windows, get_features, load_tiff_timeseries
+from trackastra.model.model import TrackingTransformer
+from trackastra.model.predict import predict_windows
+from trackastra.model.pretrained import download_pretrained
+from trackastra.tracking import TrackGraph, build_graph, track_greedy
+from trackastra.utils import normalize
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -82,7 +82,44 @@ class Trackastra:
     ):
         folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
+
         return cls.from_folder(folder, device=device)
+
+    def _predict_from_features(
+        self,
+        features,
+        edge_threshold: float = 0.05,
+        progbar_class=tqdm,
+        spatial_dim=3,
+    ):
+        #     labels: np.ndarray,
+        #     timepoints: np.ndarray,
+        #     features: OrderedDict[np.ndarray],
+        # )
+        # coords = features[["z", "y", "x"]].to_numpy()
+        from trackastra.data.wrfeat import WRFeatures
+
+        wr_features = tuple(
+            WRFeatures.from_ultrack_features(features[features.t == t], t_start=t)
+            for t in sorted(features.t.unique())
+        )
+
+        windows = build_windows(
+            wr_features,
+            window_size=self.transformer.config["window"],
+            progbar_class=progbar_class,
+        )
+
+        logger.info("Predicting windows")
+        predictions = predict_windows(
+            windows=windows,
+            features=wr_features,
+            model=self.transformer,
+            edge_threshold=edge_threshold,
+            spatial_dim=spatial_dim,
+            progbar_class=progbar_class,
+        )
+        return predictions
 
     def _predict(
         self,
@@ -227,3 +264,46 @@ class Trackastra:
             )
 
         return self.track(imgs, masks, mode, **kwargs), masks
+
+
+if __name__ == "__main__":
+    import torch
+
+    from trackastra.data import load_tiff_timeseries
+    from trackastra.model import Trackastra
+    from trackastra.tracking import graph_to_ctc
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load a pretrained model
+    model = Trackastra.from_pretrained("general_2d", device=device)
+
+    # imgs, masks = example_data_bacteria()
+    # track_graph = model.track(imgs, masks)
+
+    import pandas as pd
+
+    feats = pd.read_csv("../data/features.csv")
+
+    # Track the cells
+    predictions = model._predict_from_features(features=feats)
+    track_graph = model._track_from_predictions(
+        predictions, mode="greedy", max_distance=32
+    )
+
+    imgs = load_tiff_timeseries(Path("../data/02/"))
+    masks = np.zeros_like(imgs, dtype=int)
+
+    for _, row in feats.iterrows():
+        idx = np.array([int(row.t), int(row.y), int(row.x)], dtype=int)
+        while masks[tuple(idx)] != 0:
+            print("Wiggle")
+            idx += np.array((0, *tuple(np.random.randint(-1, 2, size=2))))
+
+        masks[tuple(idx)] = row.id
+
+    ctc_tracks, masks_tracked = graph_to_ctc(
+        track_graph,
+        masks,
+        outdir="tracked",
+    )

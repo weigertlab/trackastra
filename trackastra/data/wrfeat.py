@@ -200,6 +200,44 @@ class WRFeatures:
             coords=coords, labels=labels, timepoints=timepoints, features=features
         )
 
+    @classmethod
+    def from_ultrack_features(
+        cls,
+        df,
+        properties="regionprops2",
+        t_start: int = 0,
+    ):
+
+        properties = tuple(_PROPERTIES[properties])
+        if "label" in properties or "centroid" in properties:
+            raise ValueError(
+                f"label and centroid should not be in properties {properties}"
+            )
+
+        timepoints = df["t"].values.astype(np.int32)
+        labels = df["id"].values.astype(np.int64)
+        # coords = df[[f"centroid-{i}" for i in range(ndim)]].values.astype(np.float32)
+        coords = df[["y", "x"]].values.astype(np.float32)
+
+        features = OrderedDict(
+            (
+                p,
+                np.stack(
+                    [
+                        df[c].values.astype(np.float32)
+                        for c in df.columns
+                        if c.startswith(p)
+                    ],
+                    axis=-1,
+                ),
+            )
+            for p in properties
+        )
+
+        return cls(
+            coords=coords, labels=labels, timepoints=timepoints, features=features
+        )
+
 
 # augmentations
 
@@ -303,6 +341,7 @@ class WRRandomFlip(WRBaseAugmentation):
 def _scale_matrix(sz: float, sy: float, sx: float):
     return np.diag([sz, sy, sx])
 
+
 # def _scale_matrix(sy: float, sx: float):
 #     return np.array([[1, 0, 0], [0, sy, 0], [0, 0, sx]])
 
@@ -370,11 +409,9 @@ class WRRandomAffine(WRBaseAugmentation):
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
-            _rotation_matrix(degrees)
-            @ _scale_matrix(*scale)
-            @ _shear_matrix(shy, shx)
+            _rotation_matrix(degrees) @ _scale_matrix(*scale) @ _shear_matrix(shy, shx)
         )
-        
+
         # M is by default 3D , we need to remove the last dimension for 2D
         self._M = self._M[-features.ndim :, -features.ndim :]
         points = features.coords @ self._M.T
@@ -441,6 +478,7 @@ class WRRandomOffset(WRBaseAugmentation):
 
 class WRRandomMovement(WRBaseAugmentation):
     """random global linear shift."""
+
     def __init__(self, offset: float = (-10, 10), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
@@ -450,7 +488,7 @@ class WRRandomMovement(WRBaseAugmentation):
         tmin = features.timepoints.min()
         offset = (features.timepoints[:, None] - tmin) * base_offset[None]
         coords = features.coords + offset
-        
+
         return WRFeatures(
             coords=coords,
             labels=features.labels,

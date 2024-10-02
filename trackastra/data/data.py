@@ -19,12 +19,16 @@ from skimage.segmentation import relabel_sequential
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from ..utils import blockwise_sum, normalize
-from . import wrfeat
-from ._check_ctc import _check_ctc, _get_node_attributes
-from .augmentations import AugmentationPipeline, RandomCrop
-from .features import _PROPERTIES, extract_features_patch, extract_features_regionprops
-from .matching import matching
+from trackastra.data import wrfeat
+from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
+from trackastra.data.augmentations import AugmentationPipeline, RandomCrop
+from trackastra.data.features import (
+    _PROPERTIES,
+    extract_features_patch,
+    extract_features_regionprops,
+)
+from trackastra.data.matching import matching
+from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
