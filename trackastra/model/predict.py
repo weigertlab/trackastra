@@ -35,15 +35,17 @@ def predict(batch, model):
 
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
-    A = model(coords, features=feats)
-    A = model.normalize_output(A, timepoints, coords)
+    with torch.no_grad():
+        A = model(coords, features=feats)
+        A = model.normalize_output(A, timepoints, coords)
 
-    # # Spatially far entries should not influence the causal normalization
-    # dist = torch.cdist(coords[0, :, 1:], coords[0, :, 1:])
-    # invalid = dist > model.config["spatial_pos_cutoff"]
-    # A[invalid] = -torch.inf
+        # # Spatially far entries should not influence the causal normalization
+        # dist = torch.cdist(coords[0, :, 1:], coords[0, :, 1:])
+        # invalid = dist > model.config["spatial_pos_cutoff"]
+        # A[invalid] = -torch.inf
 
-    A = A.squeeze(0).detach().cpu().numpy()
+        A = A.squeeze(0).detach().cpu().numpy()
+
     return A
 
 
