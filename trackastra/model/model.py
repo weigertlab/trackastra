@@ -504,7 +504,7 @@ class TrackingTransformer(torch.nn.Module):
         fpath = folder / checkpoint_path
         logger.info(f"Loading model state from {fpath}")
 
-        state = torch.load(fpath, map_location=map_location)
+        state = torch.load(fpath, map_location=map_location, weights_only=True)
         # if state is a checkpoint, we have to extract state_dict
         if "state_dict" in state:
             state = state["state_dict"]
