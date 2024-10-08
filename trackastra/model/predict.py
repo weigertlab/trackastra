@@ -112,7 +112,7 @@ def predict_windows(
         A = predict(batch, model)
 
         dt = timepoints[None, :] - timepoints[:, None]
-        time_mask = np.logical_and(dt <= delta_t, dt > 0)
+        time_mask = np.logical_and(dt <= delta_t, dt >= 0)
         A[~time_mask] = 0
         ii, jj = np.where(A >= edge_threshold)
 
