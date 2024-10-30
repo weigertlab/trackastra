@@ -201,9 +201,9 @@ class WRFeatures:
         )
 
     @classmethod
-    def from_ultrack_features(
-        cls,
+    def from_ultrack_features( cls,
         df,
+        ndim: int,
         properties="regionprops2",
         t_start: int = 0,
     ):
@@ -217,7 +217,11 @@ class WRFeatures:
         timepoints = df["t"].values.astype(np.int32)
         labels = df["id"].values.astype(np.int64)
         # coords = df[[f"centroid-{i}" for i in range(ndim)]].values.astype(np.float32)
-        coords = df[["y", "x"]].values.astype(np.float32)
+        if ndim == 2:
+            coords = df[["y", "x"]].values
+        else:
+            coords = df[["z", "y", "x"]].values
+        coords = coords.astype(np.float32)
 
         features = OrderedDict(
             (
