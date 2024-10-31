@@ -355,6 +355,9 @@ class TrackingTransformer(torch.nn.Module):
         self.head_x = FeedForward(d_model)
         self.head_y = FeedForward(d_model)
 
+        self.start_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.end_token = nn.Parameter(torch.randn(1, 1, d_model))
+
         if feat_embed_per_dim > 1:
             self.feat_embed = PositionalEncoding(
                 cutoffs=(1000,) * feat_dim,
@@ -409,6 +412,9 @@ class TrackingTransformer(torch.nn.Module):
 
         x = self.head_x(x)
         y = self.head_y(y)
+        import ipdb
+
+        ipdb.set_trace()
 
         # outer product is the association matrix (logits)
         A = torch.einsum("bnd,bmd->bnm", x, y)

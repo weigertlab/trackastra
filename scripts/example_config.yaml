@@ -4,12 +4,12 @@ crop_size:
 - 256
 detection_folders:
 - TRA
-dropout: 0.01
+dropout: 0.0
 example_images: False  # Slow
 input_train:
-- data/ctc/Fluo-N2DL-HeLa/02
+- /Users/gallusse/data/celltracking/ctc/Fluo-N2DL-HeLa/train/02
 input_val:
-- data/ctc/Fluo-N2DL-HeLa/01
+- /Users/gallusse/data/celltracking/ctc/Fluo-N2DL-HeLa/train/01
 max_tokens: 2048
 name: example
 ndim: 2

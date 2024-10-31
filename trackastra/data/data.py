@@ -1324,7 +1324,7 @@ def _assoc(A: np.ndarray, labels: np.ndarray, family: np.ndarray):
 
 
 def _ctc_assoc_matrix(detections, ts, graph, matching):
-    """Create the association matrix for a list of labels and a tracklet parent -> childrend graph.
+    """Create the association matrix for a list of labels and a tracklet parent -> children graph.
 
     Each detection is associated with all its ancestors and descendants, but not its siblings and their offspring.
 
