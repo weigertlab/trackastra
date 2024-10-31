@@ -220,7 +220,7 @@ def blockwise_sum(
 def blockwise_causal_norm(
     A: torch.Tensor,
     timepoints: torch.Tensor,
-    mode: str = "softmax",
+    mode: str = "quiet_softmax",
     mask_invalid: torch.BoolTensor = None,
     eps: float = 1e-6,
 ):
@@ -253,8 +253,9 @@ def blockwise_causal_norm(
         # TODO set to min, then to 0 after exp
 
         # Blockwise max
-        ma0 = blockwise_sum(A, timepoints, dim=0, reduce="amax")
-        ma1 = blockwise_sum(A, timepoints, dim=1, reduce="amax")
+        with torch.no_grad():
+            ma0 = blockwise_sum(A, timepoints, dim=0, reduce="amax")
+            ma1 = blockwise_sum(A, timepoints, dim=1, reduce="amax")
 
         u0 = torch.exp(A - ma0)
         u1 = torch.exp(A - ma1)
