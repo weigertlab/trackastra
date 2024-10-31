@@ -448,6 +448,47 @@ def str2path(x: str) -> Path:
         return Path(x).expanduser().resolve()
 
 
+def add_start_end_gt(A, timepoints, padding_mask=None, mask_invalid=None):
+    if A.ndim == 2:
+        A = A.unsqueeze(0)
+        timepoints = timepoints.unsqueeze(0)
+        if padding_mask is not None:
+            padding_mask = padding_mask.unsqueeze(0)
+        if mask_invalid is not None:
+            mask_invalid = mask_invalid.unsqueeze(0)
+
+    dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+    mask_dt1 = dt == 1
+    starts = torch.sum(A * mask_dt1, dim=1, keepdim=False) == 0
+    ends = torch.sum(A * mask_dt1, dim=2, keepdim=False) == 0
+    timepoints = torch.cat([timepoints, torch.zeros_like(timepoints[:, -1:])], dim=1)
+
+    A_ext = torch.zeros((A.shape[0], A.shape[1] + 1, A.shape[2] + 1), device=A.device)
+    A_ext[:, :-1, :-1] = A
+    A_ext[:, -1, :-1] = starts
+    A_ext[:, :-1, -1] = ends
+
+    if padding_mask is not None and mask_invalid is not None:
+        padding_mask = torch.cat(
+            [
+                padding_mask,
+                torch.zeros(
+                    (padding_mask.shape[0], 1), device=padding_mask.device
+                ).bool(),
+            ],
+            dim=1,
+        )
+        mask_invalid = torch.logical_or(
+            padding_mask.unsqueeze(1), padding_mask.unsqueeze(2)
+        )
+
+        # start <--> end token should not match
+        mask_invalid[:, -1, -1] = True
+        return A_ext, timepoints, padding_mask, mask_invalid
+    else:
+        return A_ext, timepoints
+
+
 if __name__ == "__main__":
     A = torch.rand(50, 50)
     idx = torch.tensor([0, 10, 20, A.shape[0]])

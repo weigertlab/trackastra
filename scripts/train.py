@@ -38,6 +38,7 @@ from trackastra.data import (
 )
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
+    add_start_end_gt,
     blockwise_causal_norm,
     blockwise_sum,
     normalize,
@@ -217,6 +218,13 @@ class WrappedLightningModule(pl.LightningModule):
             padding_mask.unsqueeze(1), padding_mask.unsqueeze(2)
         )
 
+        A, timepoints, padding_mask, mask_invalid = add_start_end_gt(
+            A,
+            timepoints,
+            padding_mask,
+            mask_invalid,
+        )
+
         A_pred[mask_invalid] = 0
         loss = self.criterion(A_pred, A)
 
@@ -336,6 +344,13 @@ class WrappedLightningModule(pl.LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
+        self.log(
+            "start_token_norm",
+            torch.norm(self.model.start_token),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
 
         # self.train_loss.append(loss)
 
@@ -419,6 +434,10 @@ class WrappedLightningModule(pl.LightningModule):
             sample = 0
             A_gt = batch["assoc_matrix"][sample]
             timepoints = batch["timepoints"][sample]
+
+            A_gt, timepoints = add_start_end_gt(A_gt, timepoints)
+            A_gt, timepoints = A_gt[0], timepoints[0]
+
             A_pred = out["A_pred"][sample]
             loss_before_reduce = out["loss_before_reduce"][sample]
 
@@ -434,8 +453,11 @@ class WrappedLightningModule(pl.LightningModule):
             time_grid = time_grid.unsqueeze(0) + time_grid.unsqueeze(1)
 
             over = torch.stack((A_pred, A_gt, A_pred), 0)
-            # add grid as blue background
-            over[2, time_grid] += 0.2
+            # add grid as yellow background
+            over[0, time_grid] += 0.5
+            over[1, time_grid] += 0.5
+            # blue
+            # over[2, time_grid] += 0.2
             # over = over.unsqueeze(0)
 
             if isinstance(self.logger, TensorBoardLogger):
@@ -492,21 +514,20 @@ class WrappedLightningModule(pl.LightningModule):
                         )
 
             elif isinstance(self.logger, WandbLogger):
-                pass
-                # wandb.log(
-                #     {
-                #         "images/assoc_matrix": wandb.Image(
-                #             np.moveaxis(over.detach().cpu().numpy(), 0, -1), mode="RGB"
-                #         ),
-                #         "images/loss": wandb.Image(
-                #             loss_before_reduce.unsqueeze(2).detach().cpu().numpy()
-                #         ),
-                #         "images/loss_mask": wandb.Image(
-                #             out["mask"][sample].unsqueeze(2).detach().cpu().numpy()
-                #         ),
-                #     },
-                #     step=self.current_epoch,
-                # )
+                wandb.log(
+                    {
+                        "images/assoc_matrix": wandb.Image(
+                            np.moveaxis(over.detach().cpu().numpy(), 0, -1), mode="RGB"
+                        ),
+                        "images/loss": wandb.Image(
+                            loss_before_reduce.unsqueeze(2).detach().cpu().numpy()
+                        ),
+                        "images/loss_mask": wandb.Image(
+                            out["mask"][sample].unsqueeze(2).detach().cpu().numpy()
+                        ),
+                    },
+                    step=self.current_epoch,
+                )
             elif self.logger is None:
                 pass
             else:
@@ -998,8 +1019,7 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        # accelerator="cuda",
-        accelerator="mps",
+        accelerator="cuda",
         strategy=strategy,
         devices=n_gpus,
         precision="16-mixed" if args.mixedp else 32,

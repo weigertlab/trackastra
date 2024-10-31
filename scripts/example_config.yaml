@@ -7,10 +7,11 @@ detection_folders:
 dropout: 0.0
 example_images: False  # Slow
 input_train:
-- /Users/gallusse/data/celltracking/ctc/Fluo-N2DL-HeLa/train/02
+- data/ctc_2024/Fluo-N2DL-HeLa/train/02
 input_val:
-- /Users/gallusse/data/celltracking/ctc/Fluo-N2DL-HeLa/train/01
+- data/ctc_2024/Fluo-N2DL-HeLa/train/01
 max_tokens: 2048
+train_samples: 100
 name: example
 ndim: 2
 num_decoder_layers: 5

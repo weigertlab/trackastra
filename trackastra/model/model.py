@@ -412,9 +412,9 @@ class TrackingTransformer(torch.nn.Module):
 
         x = self.head_x(x)
         y = self.head_y(y)
-        import ipdb
 
-        ipdb.set_trace()
+        x = torch.cat([self.start_token.expand(_B, -1, -1), x], dim=1)
+        y = torch.cat([self.end_token.expand(_B, -1, -1), y], dim=1)
 
         # outer product is the association matrix (logits)
         A = torch.einsum("bnd,bmd->bnm", x, y)
