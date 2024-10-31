@@ -1,0 +1,65 @@
+name: vanvliet
+epochs: 600
+window: 4
+delta_cutoff: 2
+num_encoder_layers: 6
+num_decoder_layers: 6
+causal_norm: none
+d_model: 256
+batch_size: 8
+div_upweight: 5
+max_tokens: 2048
+spatial_pos_cutoff: 256
+crop_size:
+- 320
+- 320
+train_samples: 10000
+cache: True
+
+input_train:
+- data/vanvliet/cib/140408-02  # ok
+- data/vanvliet/cib/140408-04  # ok
+- data/vanvliet/cib/140408-10  # ok
+- data/vanvliet/cib/140409-03  #
+- data/vanvliet/cib/140415-08
+- data/vanvliet/recA/151027-05
+- data/vanvliet/recA/151027-06
+- data/vanvliet/recA/151027-10  # Has an empty frame, annoying
+- data/vanvliet/recA/151028-01
+- data/vanvliet/recA/151029-05
+- data/vanvliet/recA/151029-11
+- data/vanvliet/rpsM/151029_E1-6
+- data/vanvliet/rpsM/151101_E2-1
+- data/vanvliet/rpsM/151101_E2-2
+- data/vanvliet/rpsM/151101_E3-11
+- data/vanvliet/rpsM/151101_E4-12
+- data/vanvliet/rpsM/151101_E4-19
+- data/vanvliet/rpsM/151101_E4-20
+- data/vanvliet/metA/150317-07
+- data/vanvliet/metA/150318-06
+- data/vanvliet/metA/150331-12
+- data/vanvliet/metA/151222-10
+- data/vanvliet/metA/151222-11
+- data/vanvliet/pheA/150324-03
+- data/vanvliet/pheA/150324-05
+- data/vanvliet/pheA/150325-04
+- data/vanvliet/pheA/160112-04
+- data/vanvliet/trpL/150303-01
+# - data/vanvliet/trpL/150303-08 broken
+- data/vanvliet/trpL/150428-08
+- data/vanvliet/trpL/151021-11
+
+input_val:
+# Rather small validation set.
+- data/vanvliet/cib/140415-13  # ok
+- data/vanvliet/recA/151031-03  # ok
+
+input_test:
+# - data/vanvliet/cib/140408-01  # dense labels not precise
+- data/vanvliet/rpsM/151029_E1-1  # ok
+- data/vanvliet/rpsM/151029_E1-5  # ok
+- data/vanvliet/rpsM/151101_E3-12  # ok
+- data/vanvliet/trpL/150309-04  # ok
+# - data/vanvliet/trpL/150310-05  # was empty
+- data/vanvliet/trpL/150310-11  # not in delta test set. quite some global moving!
+- data/vanvliet/pheA/160112-06  # ok. tricky. not in delta test set.
