@@ -531,16 +531,31 @@ class WrappedLightningModule(pl.LightningModule):
             elif isinstance(self.logger, WandbLogger):
                 assert over.shape[-2:] == out["mask"][sample].shape
                 assert over.shape[-2:] == loss_before_reduce.shape
+                import torch.nn.functional as F
+
+                def upsample(x, up=4):
+                    # interpolate needs B, C, H, W
+                    return F.interpolate(
+                        x.unsqueeze(0).unsqueeze(0) if x.ndim == 2 else x.unsqueeze(0),
+                        size=(x.shape[-2] * up, x.shape[-1] * up),
+                        mode="nearest",
+                    ).squeeze()
+
                 self.logger.log_image(
-                    key="assoc", images=[over], step=self.current_epoch
+                    key="assoc",
+                    images=[upsample(over)],
+                    step=self.current_epoch,
                 )
+
                 self.logger.log_image(
                     key="loss_mask",
-                    images=[out["mask"][sample]],
+                    images=[upsample(out["mask"][sample])],
                     step=self.current_epoch,
                 )
                 self.logger.log_image(
-                    key="loss", images=[loss_before_reduce], step=self.current_epoch
+                    key="loss",
+                    images=[upsample(loss_before_reduce)],
+                    step=self.current_epoch,
                 )
                 # self.log(
                 #     {
