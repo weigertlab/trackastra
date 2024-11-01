@@ -283,7 +283,15 @@ class WrappedLightningModule(pl.LightningModule):
 
         mask_valid = ~mask_invalid
         dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
-        mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
+        start_end_on = torch.zeros_like(dt, dtype=torch.bool)
+        start_end_on[:, -1, :] = True
+        start_end_on[:, :, -1] = True
+
+        mask_time = torch.logical_or(
+            torch.logical_and(dt > 0, dt <= self.delta_cutoff),
+            start_end_on,
+            # don't mask out the last row and col
+        )
 
         mask = mask_time * mask_valid
         mask = mask.float()
@@ -390,6 +398,11 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         # self.val_loss.append(loss)
+        if (
+            self.batch_val_tb_idx == -1
+            and batch_idx == len(self.trainer.val_dataloaders) - 1
+        ):
+            self.batch_val_tb = dict(batch=batch, out=out)
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
 
@@ -447,6 +460,8 @@ class WrappedLightningModule(pl.LightningModule):
                 )
             else:
                 A_pred = torch.sigmoid(A_pred)
+
+            # TODO the validation loss should also include the new start and end tokens
 
             # create grid of timepoints for visualization
             time_grid = torch.diff(timepoints, append=timepoints[-1:]) != 0
@@ -514,20 +529,36 @@ class WrappedLightningModule(pl.LightningModule):
                         )
 
             elif isinstance(self.logger, WandbLogger):
-                wandb.log(
-                    {
-                        "images/assoc_matrix": wandb.Image(
-                            np.moveaxis(over.detach().cpu().numpy(), 0, -1), mode="RGB"
-                        ),
-                        "images/loss": wandb.Image(
-                            loss_before_reduce.unsqueeze(2).detach().cpu().numpy()
-                        ),
-                        "images/loss_mask": wandb.Image(
-                            out["mask"][sample].unsqueeze(2).detach().cpu().numpy()
-                        ),
-                    },
+                assert over.shape[-2:] == out["mask"][sample].shape
+                assert over.shape[-2:] == loss_before_reduce.shape
+                self.logger.log_image(
+                    key="assoc", images=[over], step=self.current_epoch
+                )
+                self.logger.log_image(
+                    key="loss_mask",
+                    images=[out["mask"][sample]],
                     step=self.current_epoch,
                 )
+                self.logger.log_image(
+                    key="loss", images=[loss_before_reduce], step=self.current_epoch
+                )
+                # self.log(
+                #     {
+                #         "images/assoc_matrix": wandb.Image(
+                #             np.moveaxis(over.detach().cpu().numpy(), 0, -1), mode="RGB"
+                #         ),
+                #         "images/loss": wandb.Image(
+                #             loss_before_reduce.unsqueeze(2).detach().cpu().numpy()
+                #         ),
+                #         "images/loss_mask": wandb.Image(
+                #             out["mask"][sample].unsqueeze(2).detach().cpu().numpy()
+                #         ),
+                #     },
+                #     on_step=False,
+                #     on_epoch=True,
+                #     sync_dist=True,
+                #     # step=self.current_epoch,
+                # )
             elif self.logger is None:
                 pass
             else:
@@ -913,7 +944,7 @@ def train(args):
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    batch_val_tb_idx = 0
+    batch_val_tb_idx = -1
 
     if train_logger:
         callbacks.append(
@@ -1184,7 +1215,7 @@ def parse_train_args():
     parser.add_argument(
         "--logger",
         type=str,
-        default="tensorboard",
+        default="wandb",
         choices=["tensorboard", "wandb", "none"],
     )
     parser.add_argument("--wandb_project", type=str, default="trackastra")
