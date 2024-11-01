@@ -403,6 +403,7 @@ class WrappedLightningModule(pl.LightningModule):
             and batch_idx == len(self.trainer.val_dataloaders) - 1
         ):
             self.batch_val_tb = dict(batch=batch, out=out)
+
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
 
@@ -443,8 +444,8 @@ class WrappedLightningModule(pl.LightningModule):
             batch = self.batch_val_tb["batch"]
             out = self.batch_val_tb["out"]
 
-            # First sample of the batch
-            sample = 0
+            # Biggest sample of the batch
+            sample = torch.sum(batch["timepoints"] >= 0, dim=1).argmax()
             A_gt = batch["assoc_matrix"][sample]
             timepoints = batch["timepoints"][sample]
 
@@ -533,7 +534,7 @@ class WrappedLightningModule(pl.LightningModule):
                 assert over.shape[-2:] == loss_before_reduce.shape
                 import torch.nn.functional as F
 
-                def upsample(x, up=4):
+                def upsample(x, up=2):
                     # interpolate needs B, C, H, W
                     return F.interpolate(
                         x.unsqueeze(0).unsqueeze(0) if x.ndim == 2 else x.unsqueeze(0),
@@ -952,6 +953,7 @@ def train(args):
     datamodule = BalancedDataModule(
         input_train=args.input_train,
         input_val=args.input_val,
+        crop_val=args.crop_val,
         cachedir=args.cachedir,
         augment=args.augment,
         distributed=args.distributed,
@@ -965,7 +967,8 @@ def train(args):
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    batch_val_tb_idx = -1
+    batch_val_tb_idx = 0
+    # batch_val_tb_idx = -1
 
     if train_logger:
         callbacks.append(
@@ -1247,6 +1250,12 @@ def parse_train_args():
         nargs="+",
         default=None,
         help="random crop size for augmentation",
+    )
+    parser.add_argument(
+        "--crop_val",
+        type=str2bool,
+        default=True,
+        help="If set to True, will also apply random cropping in validation set.",
     )
     parser.add_argument(
         "--weight_by_ndivs",

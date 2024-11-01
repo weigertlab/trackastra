@@ -4,7 +4,6 @@ crop_size:
 - 256
 detection_folders:
 - TRA
-dropout: 0.0
 example_images: False  # Slow
 input_train:
 - data/ctc_2024/Fluo-N2DL-HeLa/train/02
@@ -18,4 +17,4 @@ num_decoder_layers: 5
 num_encoder_layers: 5
 outdir: runs
 distributed: False
-window: 6
+window: 4

@@ -210,9 +210,10 @@ class BalancedDataModule(LightningDataModule):
         self,
         input_train: list,
         input_val: list,
+        crop_val: bool,
         cachedir: str,
         augment: int,
-        distributed:bool, 
+        distributed: bool,
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
@@ -220,6 +221,7 @@ class BalancedDataModule(LightningDataModule):
         super().__init__()
         self.input_train = input_train
         self.input_val = input_val
+        self.crop_val = crop_val
         self.cachedir = cachedir
         self.augment = augment
         self.distributed = distributed
@@ -264,11 +266,16 @@ class BalancedDataModule(LightningDataModule):
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
+            if split == "train":
+                crop_size = self.dataset_kwargs["crop_size"]
+            else:
+                crop_size = self.dataset_kwargs["crop_size"] if self.crop_val else None
+
             self.datasets[split] = torch.utils.data.ConcatDataset(
                 CTCData(
                     root=Path(inp),
                     augment=self.augment if split == "train" else 0,
-                    **self.dataset_kwargs,
+                    **self.dataset_kwargs | {"crop_size": crop_size},
                 )
                 for inp in inps
             )
@@ -285,16 +292,19 @@ class BalancedDataModule(LightningDataModule):
                 **self.sampler_kwargs,
             )
             batch_sampler = None
-        else: 
-            sampler=None
+        else:
+            sampler = None
             batch_sampler = BalancedBatchSampler(
                 self.datasets["train"],
                 **self.sampler_kwargs,
             )
-            if not loader_kwargs['batch_size'] == batch_sampler.batch_size:
-                raise ValueError(f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and sampler_kwargs ({batch_sampler.batch_size}) must match")            
-            del loader_kwargs['batch_size']
-        
+            if not loader_kwargs["batch_size"] == batch_sampler.batch_size:
+                raise ValueError(
+                    f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and"
+                    f" sampler_kwargs ({batch_sampler.batch_size}) must match"
+                )
+            del loader_kwargs["batch_size"]
+
         loader = DataLoader(
             self.datasets["train"],
             sampler=sampler,
