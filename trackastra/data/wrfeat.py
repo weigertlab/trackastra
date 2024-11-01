@@ -201,7 +201,8 @@ class WRFeatures:
         )
 
     @classmethod
-    def from_ultrack_features( cls,
+    def from_ultrack_features(
+        cls,
         df,
         ndim: int,
         properties="regionprops2",
@@ -396,8 +397,8 @@ class WRRandomAffine(WRBaseAugmentation):
     def __init__(
         self,
         degrees: float = 10,
-        scale: float = (0.9, 1.1),
-        shear: float = (0.1, 0.1),
+        scale: tuple[float, float] = (0.9, 1.1),
+        shear: tuple[float, float] = (0.1, 0.1),
         p: float = 0.5,
     ):
         super().__init__(p)
@@ -435,8 +436,8 @@ class WRRandomAffine(WRBaseAugmentation):
 class WRRandomBrightness(WRBaseAugmentation):
     def __init__(
         self,
-        scale: tuple[float] = (0.5, 2.0),
-        shift: tuple[float] = (-0.1, 0.1),
+        scale: tuple[float, float] = (0.5, 2.0),
+        shift: tuple[float, float] = (-0.1, 0.1),
         p: float = 0.5,
     ):
         super().__init__(p)
@@ -463,8 +464,10 @@ class WRRandomBrightness(WRBaseAugmentation):
         )
 
 
-class WRRandomOffset(WRBaseAugmentation):
-    def __init__(self, offset: float = (-3, 3), p: float = 0.5):
+class WRRandomJitter(WRBaseAugmentation):
+    """Random small shift for each token."""
+
+    def __init__(self, offset: tuple[int, int] = (-3, 3), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
 
@@ -481,9 +484,9 @@ class WRRandomOffset(WRBaseAugmentation):
 
 
 class WRRandomMovement(WRBaseAugmentation):
-    """random global linear shift."""
+    """random global linear movement."""
 
-    def __init__(self, offset: float = (-10, 10), p: float = 0.5):
+    def __init__(self, offset: tuple[int, int] = (-10, 10), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
 
@@ -491,6 +494,25 @@ class WRRandomMovement(WRBaseAugmentation):
         base_offset = self._rng.uniform(*self.offset, features.coords.shape[-1])
         tmin = features.timepoints.min()
         offset = (features.timepoints[:, None] - tmin) * base_offset[None]
+        coords = features.coords + offset
+
+        return WRFeatures(
+            coords=coords,
+            labels=features.labels,
+            timepoints=features.timepoints,
+            features=features.features,
+        )
+
+
+class WRRandomGlobalShift(WRBaseAugmentation):
+    """Random global shift."""
+
+    def __init__(self, offset: tuple[int, int] = (-256, 256), p: float = 1.0):
+        super().__init__(p)
+        self.offset = offset
+
+    def _augment(self, features: WRFeatures):
+        offset = self._rng.uniform(*self.offset, features.coords.shape[-1])
         coords = features.coords + offset
 
         return WRFeatures(

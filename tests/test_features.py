@@ -48,7 +48,7 @@ if __name__ == "__main__":
             # WRRandomAffine(p=1, degrees=180, scale=(1, 1), shear=(0, 0)),
             WRRandomMovement(p=1),
             # WRRandomBrightness(p=1, factor=(0.5, 0.2)),
-            # WRRandomOffset(p=1, offset=(-3, 3))
+            # WRRandomJitter(p=1, offset=(-3, 3))
             # WRRandomAffine(p=1, degrees=None, scale=None, shear=(.1,.1)),
         ]
     )

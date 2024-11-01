@@ -989,7 +989,7 @@ class CTCData(Dataset):
                         p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
                     ),
                     # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
-                    # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                    # wrfeat.WRRandomJitter(p=0.8, offset=(-3, 3)),
                 ]
             )
         elif augment == 2:
@@ -1000,7 +1000,7 @@ class CTCData(Dataset):
                         p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                    wrfeat.WRRandomJitter(p=0.8, offset=(-3, 3)),
                 ]
             )
         elif augment == 3:
@@ -1012,7 +1012,20 @@ class CTCData(Dataset):
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
                     wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                    wrfeat.WRRandomJitter(p=0.8, offset=(-3, 3)),
+                ]
+            )
+        elif augment == 4:
+            # No random shifts per token
+            augmenter = wrfeat.WRAugmentationPipeline(
+                [
+                    wrfeat.WRRandomFlip(p=0.5),
+                    wrfeat.WRRandomAffine(
+                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    ),
+                    wrfeat.WRRandomBrightness(p=0.8),
+                    wrfeat.WRRandomGlobalShift(offset=(-10, 10), p=0.3),
+                    wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
                 ]
             )
         else:
