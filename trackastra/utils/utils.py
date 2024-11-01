@@ -459,8 +459,22 @@ def add_start_end_gt(A, timepoints, padding_mask=None, mask_invalid=None):
 
     dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
     mask_dt1 = dt == 1
-    starts = torch.sum(A * mask_dt1, dim=1, keepdim=False) == 0
-    ends = torch.sum(A * mask_dt1, dim=2, keepdim=False) == 0
+
+    # Starts and ends can not be marked in the first/last frame of a window
+    t_unique = [t.unique() for t in timepoints]
+    t_unique = [set(tu.detach().cpu().numpy()) - {-1} for tu in t_unique]
+    mins = torch.tensor([min(tu) for tu in t_unique])
+    maxs = torch.tensor([max(tu) for tu in t_unique])
+
+    starts = torch.logical_and(
+        torch.sum(A * mask_dt1, dim=1, keepdim=False) == 0,
+        (timepoints != mins.unsqueeze(1).cuda()),
+    )
+    ends = torch.logical_and(
+        torch.sum(A * mask_dt1, dim=2, keepdim=False) == 0,
+        (timepoints != maxs.unsqueeze(1).cuda()),
+    )
+
     timepoints = torch.cat([timepoints, torch.zeros_like(timepoints[:, -1:])], dim=1)
 
     A_ext = torch.zeros((A.shape[0], A.shape[1] + 1, A.shape[2] + 1), device=A.device)
@@ -484,6 +498,12 @@ def add_start_end_gt(A, timepoints, padding_mask=None, mask_invalid=None):
 
         # start <--> end token should not match
         mask_invalid[:, -1, -1] = True
+        mask_invalid[:, -1, :] = torch.logical_or(
+            mask_invalid[:, -1, :], (timepoints == mins.unsqueeze(1).cuda())
+        )  # Starts
+        mask_invalid[:, :, -1] = torch.logical_or(
+            mask_invalid[:, :, -1], (timepoints == maxs.unsqueeze(1).cuda())
+        )  # ends
         return A_ext, timepoints, padding_mask, mask_invalid
     else:
         return A_ext, timepoints

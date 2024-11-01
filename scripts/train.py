@@ -548,6 +548,12 @@ class WrappedLightningModule(pl.LightningModule):
                 )
 
                 self.logger.log_image(
+                    key="gt",
+                    images=[upsample(A_gt)],
+                    step=self.current_epoch,
+                )
+
+                self.logger.log_image(
                     key="loss_mask",
                     images=[upsample(out["mask"][sample])],
                     step=self.current_epoch,
