@@ -967,7 +967,7 @@ def train(args):
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    batch_val_tb_idx = 0
+    batch_val_tb_idx = 10
     # batch_val_tb_idx = -1
 
     if train_logger:
