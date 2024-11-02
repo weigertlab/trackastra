@@ -1024,7 +1024,7 @@ class CTCData(Dataset):
                         p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomGlobalShift(offset=(-10, 10), p=0.3),
+                    wrfeat.WRRandomGlobalShift(),
                     wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
                 ]
             )

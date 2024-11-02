@@ -8,7 +8,6 @@ import torch.multiprocessing
 torch.set_float32_matmul_precision("medium")
 
 import logging
-import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -839,11 +838,13 @@ def train(args):
         del dummy_data
         torch.cuda.empty_cache()
 
-    non_exists = tuple(p for p in args.input_train + args.input_val if not Path(p).exists())
+    non_exists = tuple(
+        p for p in args.input_train + args.input_val if not Path(p).exists()
+    )
     if len(non_exists) > 0:
-        p_non = '\n'.join(non_exists)
+        p_non = "\n".join(non_exists)
         raise FileNotFoundError(f"the following input folders don't exist: \n{p_non}")
-    
+
     if args.only_prechecks:
         return locals()
 
@@ -886,9 +887,8 @@ def train(args):
         loader_kwargs=loader_kwargs,
     )
     # still write cached dataset even if epochs == 0 (e.g. for parallel cache creation)
-    if args.epochs==0:
+    if args.epochs == 0:
         datamodule.prepare_data()
-
 
     # FIXME: bring back the biggest batch for visualization.
     # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
@@ -932,7 +932,9 @@ def train(args):
             coord_dim=args.ndim,
             # feat_dim=datasets["train"].datasets[0].feat_dim,
             # FIXME hardcoded feat_dim
-            feat_dim=7 if args.ndim == 2 else 12,
+            # feat_dim=7 if args.ndim == 2 else 12,
+            feat_dim=9 if args.ndim == 2 else 14,  # hierarchy regionprops
+            #
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
@@ -996,7 +998,7 @@ def train(args):
         profiler = PyTorchProfiler(dirpath=".", filename="profile", skip_first=16)
     else:
         profiler = None
-    
+
     trainer = pl.Trainer(
         accelerator="cuda",
         strategy=strategy,
@@ -1117,7 +1119,7 @@ def parse_train_args():
     )
     parser.add_argument("--div_upweight", type=float, default=2)
 
-    parser.add_argument("--augment", type=int, default=3)
+    parser.add_argument("--augment", type=int, default=1)
     parser.add_argument("--tracking_frequency", type=int, default=-1)
 
     parser.add_argument("--sanity_dist", action="store_true")

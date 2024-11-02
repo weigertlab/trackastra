@@ -34,6 +34,14 @@ _PROPERTIES = {
         "inertia_tensor",
         "border_dist",
     ),
+    "hierarchy_regionprops": (
+        "equivalent_diameter_area",
+        "intensity_mean",
+        "node_birth",
+        "node_death",
+        "inertia_tensor",
+        "border_dist",
+    ),
 }
 
 
@@ -205,7 +213,7 @@ class WRFeatures:
         cls,
         df,
         ndim: int,
-        properties="regionprops2",
+        properties="hierarchy_regionprops",
         t_start: int = 0,
     ):
 
@@ -386,6 +394,8 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         "intensity_max",
         "intensity_min",
         "border_dist",
+        "node_birth",
+        "node_death",
     ):
         pass
     else:
