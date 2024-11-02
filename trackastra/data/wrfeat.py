@@ -6,6 +6,7 @@ import itertools
 import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
+from copy import deepcopy
 from functools import reduce
 from typing import Literal
 
@@ -490,6 +491,37 @@ class WRRandomJitter(WRBaseAugmentation):
             labels=features.labels,
             timepoints=features.timepoints,
             features=features.features,
+        )
+
+
+class WRHierarchyNoise(WRBaseAugmentation):
+    """Random small shift for each token."""
+
+    def __init__(self, scale: tuple[float, float] = (3 / 4.0, 4 / 3.0), p: float = 0.5):
+        super().__init__(p)
+        self.scale = scale
+
+    def _augment(self, features: WRFeatures):
+
+        b = features["node_birth"]
+        d = features["node_death"]
+
+        dist = d - b
+        scaled_dist = dist * self._rng.uniform(*self.scale, b.shape)
+
+        offset = (scaled_dist - dist) / 2
+        b -= offset
+        d += offset
+
+        new_feat = deepcopy(features.features)
+        new_feat["node_birth"] = b
+        new_feat["node_death"] = d
+
+        return WRFeatures(
+            coords=features.coords,
+            labels=features.labels,
+            timepoints=features.timepoints,
+            features=new_feat,
         )
 
 
