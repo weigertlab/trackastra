@@ -497,8 +497,14 @@ class WRRandomJitter(WRBaseAugmentation):
 class WRHierarchyNoise(WRBaseAugmentation):
     """Random small shift for each token."""
 
-    def __init__(self, scale: tuple[float, float] = (3 / 4.0, 4 / 3.0), p: float = 0.5):
+    def __init__(
+        self,
+        offset: float = 0.05,
+        scale: tuple[float, float] = (3 / 4.0, 4 / 3.0),
+        p: float = 0.5,
+    ):
         super().__init__(p)
+        self.offset = offset
         self.scale = scale
 
     def _augment(self, features: WRFeatures):
@@ -509,8 +515,12 @@ class WRHierarchyNoise(WRBaseAugmentation):
         dist = d - b
         scaled_dist = dist * self._rng.uniform(*self.scale, b.shape)
 
-        offset = (scaled_dist - dist) / 2
-        b -= offset
+        scale_diff = (scaled_dist - dist) / 2
+        b -= scale_diff
+        d += scale_diff
+
+        offset = self._rng.uniform(-self.offset, self.offset, b.shape)
+        b += offset
         d += offset
 
         new_feat = deepcopy(features.features)

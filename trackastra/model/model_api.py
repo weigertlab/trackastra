@@ -100,7 +100,9 @@ class Trackastra:
         from trackastra.data.wrfeat import WRFeatures
 
         wr_features = tuple(
-            WRFeatures.from_ultrack_features(features[features.t == t], t_start=t)
+            WRFeatures.from_ultrack_features(
+                features[features.t == t], ndim=spatial_dim, t_start=t
+            )
             for t in sorted(features.t.unique())
         )
 
