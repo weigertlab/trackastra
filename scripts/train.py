@@ -1125,7 +1125,7 @@ def parse_train_args():
     parser.add_argument("--preallocate", type=str2bool, default=False)
     parser.add_argument("--only_prechecks", action="store_true")
     parser.add_argument(
-        "--compress", type=str2bool, default=False, help="compress dataset"
+        "--compress", type=str2bool, default=True, help="compress dataset"
     )
     parser.add_argument(
         "--cache",
