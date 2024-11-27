@@ -189,10 +189,10 @@ class CTCData(Dataset):
                 f" {tuple(_PROPERTIES[ndim].keys())}"
             )
 
-        logger.info(f"ROOT (config): {self.root}")
+        logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
-        logger.info(f"ROOT: \t{self.root}")
-        logger.info(f"GT TRA:\t{self.gt_tra_folder}")
+        logger.info(f"ROOT (guessed): \t{self.root}")
+        logger.info(f"GT TRA (guessed):\t{self.gt_tra_folder}")
         if self.use_gt:
             self.gt_mask_folder = self._guess_mask_folder(self.root, self.gt_tra_folder)
         else:
@@ -200,14 +200,14 @@ class CTCData(Dataset):
             self.gt_mask_folder = self._guess_det_folder(
                 self.root, self.detection_folders[0]
             )
-        logger.info(f"GT MASK:\t{self.gt_mask_folder}")
+        logger.info(f"GT MASK (guessed):\t{self.gt_mask_folder}")
 
         # dont load image data if not needed
         if features in ("none",):
             self.img_folder = None
         else:
             self.img_folder = self._guess_img_folder(self.root)
-        logger.info(f"IMG:\t\t{self.img_folder}")
+        logger.info(f"IMG (guessed):\t{self.img_folder}")
 
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
             ndim, features, augment, crop_size
@@ -496,7 +496,7 @@ class CTCData(Dataset):
             if not st_path.exists():
                 logger.debug("No _ST folder found, skipping correction")
             else:
-                logger.info(f"GT MASK:\t{st_path} for correcting with ST masks")
+                logger.info(f"ST MASK:\t\t{st_path} for correcting with ST masks")
                 st_masks = self._load_tiffs(st_path, dtype)
                 x = np.maximum(x, st_masks)
 
@@ -621,6 +621,7 @@ class CTCData(Dataset):
 
     def _load(self):
         # Load ground truth
+        logger.info("Loading ground truth")
         self.gt_masks, self.gt_track_df = self._load_gt()
 
         self.gt_masks = self._check_dimensions(self.gt_masks)
@@ -1068,6 +1069,7 @@ class CTCData(Dataset):
         windows = []
         self.properties_by_time = dict()
         self.det_masks = dict()
+        logger.info("Loading detections")
         for _f in self.detection_folders:
             det_folder = self.root / _f
 
@@ -1083,7 +1085,7 @@ class CTCData(Dataset):
                 det_folder = self._guess_det_folder(root=self.root, suffix=_f)
                 if det_folder is None:
                     continue
-                logger.info(f"DET MASK:\t{det_folder}")
+                logger.info(f"DET MASK (guessed):\t{det_folder}")
                 det_masks = self._load_tiffs(det_folder, dtype=np.int32)
                 det_masks = self._correct_gt_with_st(
                     det_folder, det_masks, dtype=np.int32
