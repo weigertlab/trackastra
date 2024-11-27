@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: If you use this software, please cite both the article from preferred-citation and the software itself.
+authors:
+  - family-names: Gallusser
+    given-names: Benjamin
+  - family-names: Weigert
+    given-names: Martin
+title: 'Trackastra: Transformer-based cell tracking for live-cell microscopy'
+version: 1.0.0
+date-released: '2024-11-27'
+preferred-citation:
+  authors:
+    - family-names: Gallusser
+      given-names: Benjamin
+    - family-names: Weigert
+      given-names: Martin
+  title: 'Trackastra: Transformer-based cell tracking for live-cell microscopy'
+  type: conference-paper
+  pages: 467--484
+  year: '2024'
+  collection-title: European Conference on Computer Vision
+  conference: {}
+  publisher: {}
