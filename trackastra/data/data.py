@@ -134,7 +134,7 @@ class CTCData(Dataset):
             "patch",
             "patch_regionprops",
             "wrfeat",
-        ] = "none",
+        ] = "wrfeat",
         sanity_dist: bool = False,
         crop_size: tuple | None = None,
         return_dense: bool = False,

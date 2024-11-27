@@ -9,8 +9,8 @@
 
 ![Overview](overview.png)
 
-If you are using this code in your research, please cite our [preprint](https://arxiv.org/abs/2405.15700):
-> Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> arXiv, 2024
+If you are using this code in your research, please cite our [paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf):
+> Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> European Conference on Computer Vision, 2024
 
 ## Examples
 Nuclei tracking | Bacteria tracking
@@ -69,7 +69,7 @@ The predicted assocations can then be used for linked with several modes:
 - `greedy`        (greedy linking with division) - fast, no additional dependencies
 - `ilp`          (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
 
-Otherwise, no hyperparameters to choose :)
+Apart from that, no hyperparameters to choose :)
 
 ```python
 import torch
