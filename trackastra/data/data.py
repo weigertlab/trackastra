@@ -320,7 +320,7 @@ class CTCData(Dataset):
 
     def _get_ndivs(self, windows):
         n_divs = []
-        for w in tqdm(windows, desc="Counting divisions", leave=True):
+        for w in tqdm(windows, desc="Counting divisions", leave=False):
             _n = (
                 (
                     blockwise_sum(
@@ -454,7 +454,7 @@ class CTCData(Dataset):
         return len(self.windows)
 
     def _load_gt(self):
-
+        logger.info("Loading ground truth")
         self.start_frame = int(
             len(list(self.gt_mask_folder.glob("*.tif"))) * self.slice_pct[0]
         )
@@ -832,7 +832,12 @@ class CTCData(Dataset):
         # cropping
         if self.cropper is not None:
             (img2, mask2, coords2), idx = self.cropper(img, mask, coords)
-            if len(idx) > 0:
+            cropped_timepoints = timepoints[idx]
+
+            # at least one detection in each timepoint to accept the crop
+            if len(np.unique(cropped_timepoints)) == self.window_size:
+                # at least two total detections to accept the crop
+                # if len(idx) >= 2:
                 img, mask, coords = img2, mask2, coords2
                 labels = labels[idx]
                 timepoints = timepoints[idx]
@@ -1196,13 +1201,13 @@ class CTCData(Dataset):
             return_dense = self.return_dense
 
         track = self.windows[n]
-        coords = track["coords"]
+        # coords = track["coords"]
         assoc_matrix = track["assoc_matrix"]
         labels = track["labels"]
         img = track["img"]
         mask = track["mask"]
         timepoints = track["timepoints"]
-        track["t1"]
+        # track["t1"]
         feat = track["wrfeat"]
 
         if return_dense and isinstance(mask, _CompressedArray):
@@ -1214,10 +1219,17 @@ class CTCData(Dataset):
 
         # cropping
         if self.cropper is not None:
-            feat, idx = self.cropper(feat)
-            labels = labels[idx]
-            timepoints = timepoints[idx]
-            assoc_matrix = assoc_matrix[idx][:, idx]
+            # Use only if there is at least one timepoint per detection
+            cropped_feat, cropped_idx = self.cropper(feat)
+            cropped_timepoints = timepoints[cropped_idx]
+            if len(np.unique(cropped_timepoints)) == self.window_size:
+                idx = cropped_idx
+                feat = cropped_feat
+                labels = labels[idx]
+                timepoints = timepoints[idx]
+                assoc_matrix = assoc_matrix[idx][:, idx]
+            else:
+                logger.debug("Skipping cropping")
 
         if self.augmenter is not None:
             feat = self.augmenter(feat)
