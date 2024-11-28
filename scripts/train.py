@@ -338,15 +338,20 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         # self.train_loss.append(loss)
-
-        self.log_dict(
-            {
-                "detections_per_sequence": batch["coords"].shape[1],
-                "padding_fraction": out["padding_fraction"],
-            },
-            on_step=True,
-            on_epoch=False,
-        )
+        if isinstance(self.logger, WandbLogger):
+            histogram = wandb.Histogram(
+                torch.sum(batch["timepoints"] != -1, dim=1).detach().cpu().numpy()
+            )
+            self.logger.log_metrics({"detections_per_sample": histogram})
+        else:
+            self.log_dict(
+                {
+                    "detections_per_sequence": batch["coords"].shape[1],
+                    "padding_fraction": out["padding_fraction"],
+                },
+                on_step=True,
+                on_epoch=False,
+            )
 
         return loss
 
@@ -1171,7 +1176,7 @@ def parse_train_args():
     parser.add_argument(
         "--crop_size",
         type=int,
-        required=True,
+        # required=True,
         nargs="+",
         default=None,
         help="random crop size for augmentation",
