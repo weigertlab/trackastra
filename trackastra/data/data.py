@@ -1025,10 +1025,10 @@ class CTCData(Dataset):
             self.imgs = self._check_dimensions(self.imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
-                self.imgs = np.stack(
+                self.imgs = np.stack([
                     _compress_img_mask_preproc(im, mask, self.features)
                     for im, mask in zip(self.imgs, self.gt_masks)
-                )
+                ])
 
         assert len(self.gt_masks) == len(self.imgs)
 
