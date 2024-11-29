@@ -952,7 +952,7 @@ class CTCData(Dataset):
             coords = coords[:n_elems]
             features = features[:n_elems]
             assoc_matrix = assoc_matrix[:n_elems, :n_elems]
-            logger.debug(
+            logger.info(
                 f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
             )
 
@@ -1240,6 +1240,18 @@ class CTCData(Dataset):
         features = torch.from_numpy(feat.features_stacked).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()
+
+        if self.max_tokens and len(timepoints) > self.max_tokens:
+            time_incs = np.where(timepoints - np.roll(timepoints, 1))[0]
+            n_elems = time_incs[np.searchsorted(time_incs, self.max_tokens) - 1]
+            timepoints = timepoints[:n_elems]
+            labels = labels[:n_elems]
+            coords0 = coords0[:n_elems]
+            features = features[:n_elems]
+            assoc_matrix = assoc_matrix[:n_elems, :n_elems]
+            logger.debug(
+                f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
+            )
 
         if self.augmenter is not None:
             coords = coords0.clone()
