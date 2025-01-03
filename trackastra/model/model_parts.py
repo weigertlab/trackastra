@@ -7,12 +7,14 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-
+import warnings
 from einops import rearrange
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
     _FLASH_ATTN = True
 except ImportError:
+    warnings.warn("flash_attn not found, falling back to normal attention.")
+    warnings.warn("Install with\n\npip install flash-attn --no-build-isolation\n\n")
     flash_attn_varlen_qkvpacked_func = None
     _FLASH_ATTN = False
     
