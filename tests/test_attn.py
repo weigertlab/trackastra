@@ -9,8 +9,9 @@ if __name__ == "__main__":
                                         embed_dim=64,
                                         n_head=1,
                                         mode='rope',
-                                        attn_dist_mode='v0')
+                                        attn_dist_mode='v2')
     
+    model.eval()
     model.to(device)
         
     B,N = 3,11
@@ -23,8 +24,15 @@ if __name__ == "__main__":
     pad_mask[2,-4:] = True
     
     
-    u1 = model(q[:1],q[:1],q[:1],coords=x[:1])  
-
+    
     u = model(q,q,q,coords=x, padding_mask=pad_mask)
+    mask = model.attn_mask
 
-    print(torch.allclose(u[:1],u1, atol=1e-6))
+    u1 = model(q[:1],q[:1],q[:1],coords=x[:1],padding_mask=pad_mask[:1])  
+    mask1 = model.attn_mask 
+
+    err = torch.abs(u[:1] - u1).mean() 
+    print(f'Error: {err:.4f}')
+    print('close: ', torch.allclose(u[:1],u1, atol=1e-6))
+    
+    

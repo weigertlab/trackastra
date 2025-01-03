@@ -85,9 +85,9 @@ class RotaryPositionalEncoding(nn.Module):
 if __name__ == "__main__":
     model = RotaryPositionalEncoding((256, 256), (32, 32))
 
-    x = 100 * torch.rand(1, 17, 2)
-    q = torch.rand(1, 4, 17, 64)
-    k = torch.rand(1, 4, 17, 64)
+    x = 100 * torch.randn(1, 17, 2)
+    q = torch.randn(1, 4, 17, 64)
+    k = torch.randn(1, 4, 17, 64)
 
     q1, k1 = model(q, k, x)
     A1 = q1[:, :, 0] @ k1[:, :, 0].transpose(-1, -2)
