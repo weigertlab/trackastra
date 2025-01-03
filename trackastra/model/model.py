@@ -32,7 +32,7 @@ class EncoderLayer(nn.Module):
         dropout=0.1,
         cutoff_spatial: int = 256,
         window: int = 16,
-        positional_bias: Literal["bias", "rope", "none"] = "bias",
+        positional_bias: Literal["bias", "rope", "none"] = "rope",
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
     ):

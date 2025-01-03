@@ -388,7 +388,8 @@ class CTCData(Dataset):
         # dont compress full imgs (as needed for patch features)
         self.imgs = _CompressedArray(self.imgs)
 
-    def _guess_root_and_gt_tra_folder(self, inp: Path):
+    @staticmethod
+    def _guess_root_and_gt_tra_folder(inp: Path):
         """Guesses the root and the ground truth folder from a given input path.
 
         Args:
@@ -410,15 +411,17 @@ class CTCData(Dataset):
             tra = ctc_tra if ctc_tra.exists() else inp / "TRA"
             # 01 --> 01, 01_GT/TRA or 01/TRA
             return inp, tra
-
-    def _guess_img_folder(self, root: Path):
+    
+    @staticmethod
+    def _guess_img_folder(root: Path):
         """Guesses the image folder corresponding to a root."""
         if (root / "img").exists():
             return root / "img"
         else:
             return root
 
-    def _guess_mask_folder(self, root: Path, gt_tra: Path):
+    @staticmethod
+    def _guess_mask_folder(root: Path, gt_tra: Path):
         """Guesses the mask folder corresponding to a root.
 
         In CTC format, we use silver truth segmentation masks.
@@ -964,7 +967,7 @@ class CTCData(Dataset):
 
         if self.augmenter is not None:
             coords = coords0.clone()
-            coords[:, 1:] += torch.randint(0, 256, (1, self.ndim))
+            coords[:, 1:] += torch.randint(-1024, 1024, (1, self.ndim))
         else:
             coords = coords0.clone()
         res = dict(

@@ -75,6 +75,7 @@ class RotaryPositionalEncoding(nn.Module):
 
         co = co.unsqueeze(1).repeat_interleave(2, dim=-1)
         si = si.unsqueeze(1).repeat_interleave(2, dim=-1)
+        
         q2 = q * co + _rotate_half(q) * si
         k2 = k * co + _rotate_half(k) * si
 
@@ -93,3 +94,5 @@ if __name__ == "__main__":
 
     q2, k2 = model(q, k, x + 10)
     A2 = q2[:, :, 0] @ k2[:, :, 0].transpose(-1, -2)
+
+    print("close", torch.allclose(A1, A2))

@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.seterr(all="ignore")
 
 
@@ -313,7 +313,7 @@ class WrappedLightningModule(pl.LightningModule):
             return None
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-5)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.01)
         return dict(
             optimizer=optimizer,
             lr_scheduler=WarmupCosineLRScheduler(
@@ -321,6 +321,13 @@ class WrappedLightningModule(pl.LightningModule):
             ),
         )
 
+    def on_before_optimizer_step(self, optimizer):
+        from lightning.pytorch.utilities import grad_norm
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self.model, norm_type=2)
+        self.log_dict(norms)
+        
     def training_step(self, batch, batch_idx):
         out = self._common_step(batch)
         loss = out["loss"]
@@ -879,7 +886,7 @@ def train(args):
         pin_memory=True,
         collate_fn=collate_sequence_padding,
     )
-
+    
     # Sampler gets wrapped with distributed sampler, which cannot sample with replacement
     datamodule = BalancedDataModule(
         input_train=args.input_train,
@@ -905,15 +912,15 @@ def train(args):
         )
 
     callbacks.append(pl.pytorch.callbacks.Timer(interval="epoch"))
-    # Mostly for stopping broken runs
-    callbacks.append(
-        pl.pytorch.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=args.epochs // 6,
-            mode="min",
-            verbose=True,
-        )
-    )
+    # # Mostly for stopping broken runs
+    # callbacks.append(
+    #     pl.pytorch.callbacks.EarlyStopping(
+    #         monitor="val_loss",
+    #         patience=args.epochs // 6,
+    #         mode="min",
+    #         verbose=True,
+    #     )
+    # )
 
     if args.example_images:
         callbacks.append(ExampleImages())
@@ -1004,7 +1011,7 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        accelerator="cuda",
+        accelerator="cuda" if torch.cuda.is_available() else 'cpu',
         strategy=strategy,
         devices=n_gpus,
         precision="16-mixed" if args.mixedp else 32,
@@ -1013,6 +1020,7 @@ def train(args):
         max_epochs=args.epochs,
         callbacks=callbacks,
         profiler=profiler,
+        gradient_clip_val=1.0,
     )
 
     t = default_timer()

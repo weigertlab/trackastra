@@ -169,6 +169,13 @@ class RelativePositionalAttention(nn.Module):
         mode: Literal["bias", "rope", "none"] = "bias",
         attn_dist_mode: str = 'v0'
     ):
+        """ 
+        
+        attn_dist_mode: str
+            v0: exponential decay
+            v1: exponential decay with cutoff_spatial
+            v2: no masking (except padding_mask)
+        """ 
         super().__init__()
 
         if not embed_dim % (2 * n_head) == 0:
@@ -243,11 +250,13 @@ class RelativePositionalAttention(nn.Module):
         # add negative value but not too large to keep mixed precision loss from becoming nan
         attn_ignore_val = -1e3
 
-        # spatial cutoff
-        yx = coords[..., 1:]
-        spatial_dist = torch.cdist(yx, yx)
-        spatial_mask = (spatial_dist > self.cutoff_spatial).unsqueeze(1)
-        attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
+
+        if self.attn_dist_mode != 'v2':
+            # spatial cutoff
+            yx = coords[..., 1:]
+            spatial_dist = torch.cdist(yx, yx)
+            spatial_mask = (spatial_dist > self.cutoff_spatial).unsqueeze(1)
+            attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
 
         # dont add positional bias to self-attention if coords is None
         if coords is not None:
@@ -263,6 +272,8 @@ class RelativePositionalAttention(nn.Module):
                 attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))
             elif self.attn_dist_mode == 'v1':
                 attn_mask += torch.exp(-5 * spatial_dist.unsqueeze(1) / self.cutoff_spatial)            
+            elif self.attn_dist_mode == 'v2':
+                pass
             else: 
                 raise ValueError(f"Unknown attn_dist_mode {self.attn_dist_mode}")
             
@@ -271,9 +282,12 @@ class RelativePositionalAttention(nn.Module):
             ignore_mask = torch.logical_or(
                 padding_mask.unsqueeze(1), padding_mask.unsqueeze(2)
             ).unsqueeze(1)
-            attn_mask.masked_fill_(ignore_mask, attn_ignore_val)
+            if self.attn_dist_mode == 'v2':
+                attn_mask = ~ignore_mask
+            else:
+                attn_mask.masked_fill_(ignore_mask, attn_ignore_val)
 
-        # self.attn_mask = attn_mask.clone()
+        self.attn_mask = attn_mask.clone()
 
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0
