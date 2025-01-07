@@ -9,14 +9,17 @@ import torch.nn.functional as F
 from torch import nn
 import warnings
 from einops import rearrange
+
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
-    _FLASH_ATTN = True
+    _FLASH_ATTN = True and torch.cuda.is_available()
 except ImportError:
-    warnings.warn("flash_attn not found, falling back to normal attention.")
-    warnings.warn("Install with\n\npip install flash-attn --no-build-isolation\n\n")
     flash_attn_varlen_qkvpacked_func = None
     _FLASH_ATTN = False
+
+if not _FLASH_ATTN:
+    warnings.warn("flash_attn not found or not available for device, falling back to normal attention.")
+    warnings.warn("Install with\n\npip install flash-attn --no-build-isolation\n\n")
     
 from .rope import RotaryPositionalEncoding
 
@@ -301,7 +304,7 @@ class RelativePositionalAttention(nn.Module):
 
         self.attn_mask = attn_mask.clone()
 
-        if _FLASH_ATTN and self.attn_dist_mode == 'v2':
+        if _FLASH_ATTN and self.attn_dist_mode == 'v2' and False: # Disable for now
             y = compute_attention_with_unpadding(q, k, v, padding_mask)
         else:
             y = F.scaled_dot_product_attention(
@@ -334,7 +337,7 @@ def compute_attention_with_unpadding(q, k, v, padding_mask):
     #Extract sequence lengths and create cumulative sequence lengths
     valid_tokens_mask = ~padding_mask  # Flip the mask so True means valid
     lens = valid_tokens_mask.sum(dim=-1).tolist()  # Length of each sequence
-    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lens), dim=0).tolist(), dtype=torch.int32)
+    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lens), dim=0).tolist(), dtype=torch.int32, device=q.device)
     
     # Unpad Q, K, V
     q_unpadded = q.transpose(1,2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
@@ -344,6 +347,7 @@ def compute_attention_with_unpadding(q, k, v, padding_mask):
     # Stack Q, K, V into a single tensor for FlashAttention
     qkv_unpadded = torch.stack([q_unpadded, k_unpadded, v_unpadded], dim=1)  # Shape: (total_tokens, 3, H, D)
 
+    qkv_unpadded = qkv_unpadded.bfloat16()
     # FlashAttention
     max_seqlen = max(lens)  # Maximum sequence length in the batch
     output_unpadded = flash_attn_varlen_qkvpacked_func(
@@ -354,8 +358,10 @@ def compute_attention_with_unpadding(q, k, v, padding_mask):
         causal=False,
     )  # Output: (total_tokens, H, D)
 
-    # Step 4: Re-pad to original dimensions
-    output_padded = torch.zeros((B, H, N, D), dtype=output_unpadded.dtype, device=output_unpadded.device)
+    output_unpadded = output_unpadded.to(q.dtype)
+    # Re-pad to original dimensions
+    output_padded = torch.zeros((B, N, H, D), dtype=output_unpadded.dtype, device=output_unpadded.device)
     output_padded[valid_tokens_mask] = output_unpadded
+    output_padded = output_padded.transpose(1, 2)  # Shape: (B, H, N, D)
 
     return output_padded

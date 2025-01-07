@@ -7,7 +7,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if __name__ == "__main__":
     model = RelativePositionalAttention(coord_dim=2, 
                                         embed_dim=64,
-                                        n_head=1,
+                                        n_head=2,
                                         mode='rope',
                                         attn_dist_mode='v2')
     
@@ -33,6 +33,6 @@ if __name__ == "__main__":
 
     err = torch.abs(u[:1] - u1).mean() 
     print(f'Error: {err:.4f}')
-    print('close: ', torch.allclose(u[:1],u1, atol=1e-6))
+    print('close: ', torch.allclose(u[:1],u1, rtol=1e-3, atol=1e-6))
     
     

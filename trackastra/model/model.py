@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-
+import math
 # from torch_geometric.nn import GATv2Conv
 import yaml
 from torch import nn
@@ -411,7 +411,7 @@ class TrackingTransformer(torch.nn.Module):
         y = self.head_y(y)
 
         # outer product is the association matrix (logits)
-        A = torch.einsum("bnd,bmd->bnm", x, y)
+        A = torch.einsum("bnd,bmd->bnm", x, y)#/math.sqrt(_D)
 
         return A
 
