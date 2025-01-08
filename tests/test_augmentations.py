@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from scipy.ndimage import maximum_filter
-from trackastra.data import AugmentationPipeline
+from trackastra.data import AugmentationPipeline, CTCData
 
 
 def plot_augs(b1, b2):
@@ -54,6 +54,8 @@ def test_augpipeline(plot=False):
 
 if __name__ == "__main__":
 
+
+    
     test_augpipeline(plot=True)
 
     # pipe = RandomCrop((30, 40, 10, 20), ensure_inside_points=True)

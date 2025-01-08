@@ -288,15 +288,22 @@ class WRRandomFlip(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
         ndim = features.ndim
         flip = self._rng.randint(0, 2, features.ndim)
+        M = np.eye(ndim)
         points = features.coords.copy()
         for i, f in enumerate(flip):
             if f == 1:
                 points[:, ndim - i - 1] *= -1
+                M[i, i] = -1
+        
+        feats = OrderedDict(
+            (k, _transform_affine(k, v, M)) for k, v in features.features.items()
+        )
+
         return WRFeatures(
             coords=points,
             labels=features.labels,
             timepoints=features.timepoints,
-            features=features.features,
+            features=feats,
         )
 
 
@@ -323,6 +330,7 @@ def _rotation_matrix(theta: float):
 
 def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     ndim = len(M)
+    
     if k == "area":
         v = np.linalg.det(M) * v
     elif k == "equivalent_diameter_area":
@@ -330,11 +338,13 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
 
     elif k == "inertia_tensor":
         # v' = M * v  * M^T
-        v = v.reshape(-1, ndim, ndim)
+        v = v.reshape(-1, ndim, ndim)        
+
         # v * M^T
         v = np.einsum("ijk, mk -> ijm", v, M)
         # M * v
         v = np.einsum("ij, kjm -> kim", M, v)
+        
         v = v.reshape(-1, ndim * ndim)
     elif k in (
         "intensity_mean",
@@ -356,16 +366,21 @@ class WRRandomAffine(WRBaseAugmentation):
         scale: float = (0.9, 1.1),
         shear: float = (0.1, 0.1),
         p: float = 0.5,
+        scale_isotropic: float = (1.,1.),
     ):
         super().__init__(p)
         self.degrees = degrees if degrees is not None else 0
         self.scale = scale if scale is not None else (1, 1)
         self.shear = shear if shear is not None else (0, 0)
-
+        self.scale_isotropic = scale_isotropic
+        
     def _augment(self, features: WRFeatures):
 
         degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
+        scale_iso = self._rng.uniform(*self.scale_isotropic)
         scale = self._rng.uniform(*self.scale, 3)
+        scale = scale*scale_iso
+        
         shy = self._rng.uniform(-self.shear[0], self.shear[0])
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
 

@@ -997,7 +997,9 @@ class CTCData(Dataset):
     ):
         # FIXME: hardcoded
         feat_dim = 7 if ndim == 2 else 12
-        if augment == 1:
+        if augment == 0:
+            augmenter = None
+        elif augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline(
                 [
                     wrfeat.WRRandomFlip(p=0.5),
@@ -1022,9 +1024,13 @@ class CTCData(Dataset):
         elif augment == 3:
             augmenter = wrfeat.WRAugmentationPipeline(
                 [
-                    wrfeat.WRRandomFlip(p=0.5),
+                    wrfeat.WRRandomFlip(p=.5),
                     wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                        p=.8, 
+                        degrees=180, 
+                        scale=(.9, 1.1), 
+                        shear=(0.1, 0.1), 
+                        scale_isotropic=(.5,2.)
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
                     wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
@@ -1032,7 +1038,7 @@ class CTCData(Dataset):
                 ]
             )
         else:
-            augmenter = None
+            raise ValueError(f"Invalid augment level {augment}")
 
         cropper = (
             wrfeat.WRRandomCrop(
@@ -1269,7 +1275,7 @@ class CTCData(Dataset):
             timepoints=timepoints,
             labels=labels,
         )
-
+        
         if return_dense:
             if all([x is not None for x in img]):
                 img = torch.from_numpy(img).float()
