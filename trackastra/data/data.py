@@ -1418,6 +1418,7 @@ def collate_sequence_padding(max_len: int | None = None):
             "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
         }
         n_pads = tuple(n_max_len - s for s in lens)
+        
         batch_new = dict(
             (
                 k,

@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from timeit import default_timer
-
+import matplotlib.pyplot as plt
 import configargparse
 import git
 import lightning as pl
@@ -30,6 +30,7 @@ import yaml
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.utilities import grad_norm
 from numerize import numerize
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
@@ -201,7 +202,7 @@ class WrappedLightningModule(pl.LightningModule):
         # self.val_loss = []
         self.batch_val_tb_idx = batch_val_tb_idx
         self.batch_val_tb = None
-
+        self.pos_encs = []
         self.lr = learning_rate
         self.tracking_frequency = tracking_frequency
         self.warmup_epochs = warmup_epochs
@@ -339,12 +340,15 @@ class WrappedLightningModule(pl.LightningModule):
             "train_loss",
             loss,
             prog_bar=True,
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             sync_dist=True,
         )
 
         # self.train_loss.append(loss)
+        _norm = grad_norm(self.model, 2).get('grad_2.0_norm_total',0)
+        self.log('grad_norm', _norm, on_step=True, prog_bar=False, sync_dist=False)
+        
 
         self.log_dict(
             {
@@ -402,6 +406,35 @@ class WrappedLightningModule(pl.LightningModule):
 
         # Hack to make lightning progress bars with loss values persistent
         print(" ")
+        encs = np.concatenate([
+                rot.inv_freq.cpu().numpy().copy()
+                for rot in self.model.encoder[0].attn.rot_pos_enc.rotary_pos_embs
+            ], 0)
+        encs = np.log1p(encs)        
+        self.pos_encs.append(encs)
+        if isinstance(self.logger, WandbLogger):
+            fig = plt.figure(figsize=(4,3), clear=True)
+            ax = fig.add_subplot(111)
+            
+            for enc in self.pos_encs[:-1]:
+                ax.plot(enc, color='gray', alpha=0.5)
+            ax.plot(self.pos_encs[-1], color='C0')
+            ax.set_title("Positional encoding encoder[0]")
+            ax.set_xlabel("i")
+            ax.set_ylabel("inv_freq")
+            ax.set_ylim(-.1, .8)
+            self.logger.experiment.log({"pos encs": wandb.Image(fig), "global_step": self.global_step})
+            plt.close(fig)
+            # data = list(list(a) for a in enumerate(encs))
+            # table = wandb.Table(data=data, columns=["i", "inv_freq"])
+            # self.logger.experiment.log(
+            #     {
+            #         "inv_freq": wandb.plot.line(
+            #             table, "i", "inv_freq", title="Positional encoding encoder[0]"
+            #         )
+            #     },
+            #     step=self.global_step
+            # )
 
         if (
             self.tracking_frequency > 0
@@ -1051,6 +1084,7 @@ def train(args):
         precision="16-mixed" if args.mixedp else 32,
         logger=train_logger,
         num_nodes=1,
+        gradient_clip_val=0.5,
         max_epochs=args.epochs,
         callbacks=callbacks,
         profiler=profiler,
