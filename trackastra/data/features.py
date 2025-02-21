@@ -1,8 +1,12 @@
 import itertools
+from abc import ABC, abstractmethod
+from typing import Literal
 
 import numpy as np
 import pandas as pd
+import torch
 from skimage.measure import regionprops_table
+from transformers import AutoImageProcessor
 
 # the property keys that are supported for 2 and 3 dim
 
@@ -48,6 +52,62 @@ _PROPERTIES = {
     },
 }
 
+##############
+##############
+# Feature extraction from pretrained models
+# Currently meant to wrap any transformers model
+
+
+class FeatureExtractor(ABC):
+    def __init__(self):
+        self.model = None
+        # Model specs
+        self.image_processor: AutoImageProcessor = None
+        self.input_size: int = None
+        self.n_channels: int = None
+        self.final_grid_size: int = None
+        # MParameters for embedding extraction
+        self.batch_size: int = None
+        self.device: str = None
+        self.mode: Literal[
+            "exact_patch",  # Uses the image patch centered on the detection for embedding
+            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+            "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = None
+        # Saving parameters
+        self.save_path: str = None
+    
+    @abstractmethod
+    def forward(self, imgs, masks, coords) -> torch.Tensor:  # (n_regions, embedding_size)
+        """Extracts embeddings from the model."""
+        pass
+    
+    @abstractmethod
+    def _get_embeddings(self, images) -> torch.Tensor:
+        """Extracts embeddings from the model."""
+        pass
+    
+    @abstractmethod
+    def _prepare_batches(self, images) -> torch.Tensor:
+        """Prepares batches of images for embedding extraction."""
+        # make batches if mode is exact_patch, otherwise prepare whole images and batch them
+        if self.mode == "exact_patch":
+            pass
+        else:
+            pass
+    
+    def _find_nearest_patch(self, coords):
+        """Finds the nearest patch to the detection in the embedding."""
+        pass
+    
+    def _mean_patch(self, coords):
+        """Averages the embeddings of all patches that intersect with the detection."""
+        pass
+    
+    def _exact_patch(self, imgs, coords):
+        """Uses the image patch centered on the detection for embedding."""
+        pass
+        
 
 def extract_features_regionprops(
     mask: np.ndarray,

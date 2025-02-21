@@ -177,3 +177,5 @@ cython_debug/
 #.idea/
 
 trackastra/_version.py
+
+CTC_DATA/*
