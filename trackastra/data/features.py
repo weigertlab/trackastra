@@ -82,6 +82,7 @@ PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 
 
 
 class FeatureExtractor(ABC):
+    model_name = None
     def __init__(
         self, 
         image_size: tuple[int, int],
@@ -134,6 +135,10 @@ class FeatureExtractor(ABC):
     def final_grid_size(self, value: int):
         self._final_grid_size = value
         self._set_model_patch_size()
+        
+    @property
+    def model_name_path(self):
+        return self.model_name.replace("/", "-")
     
     def _set_model_patch_size(self):
         if self.final_grid_size is not None and self.input_size is not None:
@@ -144,18 +149,9 @@ class FeatureExtractor(ABC):
     def _start_timer(self):
         self.start_time = time.time()
         
-    def stop_timer(self, step_name):
+    def _stop_timer(self, step_name):
         elapsed = time.time() - self.start_time
         logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
-    
-    def _check_existing_embeddings(self, timepoints):
-        """Checks if embeddings for all timepoints already exist."""
-        missing = []
-        for t in timepoints:
-            t = int(t)
-            if not (self.save_path / f"{t}_features.npy").exists() and t not in missing:
-                missing.append(t)
-        return missing
     
     def forward(
             self, 
@@ -166,16 +162,16 @@ class FeatureExtractor(ABC):
         """Extracts embeddings from the model."""
         self._start_timer()
         # pre-compute embeddings for all images
-        missing = self._check_existing_embeddings(coords[:, 0])
+        missing = self._check_existing_embeddings(coords[:, 0]) # TODO remove this fallback if we always precompute embeddings
         logger.debug(f"Missing embeddings: {missing}")
         if len(missing) > 0:
             for ts, batches in tqdm(self._prepare_batches(imgs[missing]), total=len(missing), desc="Computing embeddings"):
                 logger.debug(f"Time points: {ts}")
                 logger.debug(f"Batch size: {batches.shape}")
-                embeddings = self._get_embeddings(batches)
+                embeddings = self._run_model(batches)
                 for t, ft in zip(ts, embeddings):
                     self._save_features(ft, t)
-        self.stop_timer("precompute embeddings")
+        self._stop_timer("precompute embeddings")
         self.start_time = time.time()
         if self.mode == "nearest_patch":
             # find coordinate patches from detections
@@ -186,17 +182,28 @@ class FeatureExtractor(ABC):
             logger.debug(f"Patch indices: {patch_idxs}")
             # load the embeddings and extract the relevant ones
             feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
-            self.stop_timer("precompute patches")
+            self._stop_timer("precompute patches")
             self.start_time = time.time()
-            for i, (t, y, x) in tqdm(enumerate(patch_idxs), total=len(patch_idxs), desc="Retrieving embeddings"):
+            for i, (t, y, x) in enumerate(patch_idxs):
                 embeddings = self._load_features(t)  # (final_grid_size**2, hidden_state_size)
                 idx = y * self.final_grid_size + x
                 feats[i] = embeddings[idx]
-            self.stop_timer("embedding retrieval")
+            self._stop_timer("embedding retrieval")
             return feats  # (n_regions, embedding_size)
     
+    def precompute_embeddings(self, images):
+        """Precomputes embeddings for all images."""
+        missing = self._check_existing_embeddings(range(len(images)))
+        if len(missing) > 0:
+            for ts, batches in tqdm(self._prepare_batches(images[missing]), total=len(images) // self.batch_size, desc="Computing embeddings"):
+                logger.debug(f"Time points: {ts}")
+                logger.debug(f"Batch size: {batches.shape}")
+                embeddings = self._run_model(batches)
+                for t, ft in zip(ts, embeddings):
+                    self._save_features(ft, t)
+    
     @abstractmethod
-    def _get_embeddings(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
+    def _run_model(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
         """Extracts embeddings from the model."""
         pass
     
@@ -215,6 +222,7 @@ class FeatureExtractor(ABC):
                     for i, im in enumerate(b):
                         b[i] = (im - im.min()) / (im.max() - im.min())
                     return b
+                
                 batch = normalize_batch(batch)
                 logger.debug(f"Batch min {batch.min()} max {batch.max()}")
                 timepoints = range(i, end)
@@ -254,20 +262,29 @@ class FeatureExtractor(ABC):
     
     def _save_features(self, features, timepoint):
         """Saves the features to disk."""
-        save_path = self.save_path / f"{timepoint}_features.npy"
+        save_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
         np.save(save_path, features.cpu().numpy())
         assert save_path.exists(), f"Failed to save features to {save_path}"
     
     def _load_features(self, timepoint):
         """Loads the features from disk."""
-        load_path = self.save_path / f"{timepoint}_features.npy"
+        load_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
         features = np.load(load_path)
         assert features is not None, f"Failed to load features from {load_path}"
         return torch.tensor(features).to(self.device)
-
+   
+    def _check_existing_embeddings(self, timepoints):
+        """Checks if embeddings for all timepoints already exist."""
+        missing = []
+        for t in timepoints:
+            t = int(t)
+            if not (self.save_path / f"{t}_{self.model_name_path}_features.npy").exists() and t not in missing:
+                missing.append(t)
+        return missing
 
 ##############
 class HieraFeatures(FeatureExtractor):
+    model_name = "facebook/hiera-tiny-224-hf"
     def __init__(
         self, 
         image_size: tuple[int, int],
@@ -285,13 +302,12 @@ class HieraFeatures(FeatureExtractor):
         self.final_grid_size = 7  # 7x7 grid
         self.n_channels = 3  # expects RGB images
         self.hidden_state_size = 768
-        self.hf_id = "facebook/hiera-tiny-224-hf"
-        self.image_processor = AutoImageProcessor.from_pretrained(self.hf_id)
-        self.model = HieraModel.from_pretrained(self.hf_id)
+        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
+        self.model = HieraModel.from_pretrained(self.model_name)
         
         self.model.to(self.device)
         
-    def _get_embeddings(self, images) -> torch.Tensor:
+    def _run_model(self, images) -> torch.Tensor:
         """Extracts embeddings from the model."""
         inputs = self.image_processor(images, return_tensors="pt", use_fast=True).to(self.device)
         
@@ -301,7 +317,7 @@ class HieraFeatures(FeatureExtractor):
         return outputs.last_hidden_state
     
 
-_AVAILABLE_PRETRAINED_BACKBONES["facebook/hiera-tiny-224-hf"]["class"] = HieraFeatures
+_AVAILABLE_PRETRAINED_BACKBONES[HieraFeatures.model_name]["class"] = HieraFeatures
 ##############
 ##############
 

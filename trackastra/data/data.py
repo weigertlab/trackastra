@@ -119,6 +119,7 @@ def debug_function(f):
 
 
 class CTCData(Dataset):
+    feature_extractor = None
     def __init__(
         self,
         root: str = "",
@@ -201,7 +202,8 @@ class CTCData(Dataset):
             raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
         elif features == "pretrained_feats" and pretrained_backbone not in _AVAILABLE_PRETRAINED_BACKBONES.keys():
             raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(_AVAILABLE_PRETRAINED_BACKBONES.keys())}")
-        self.pretrained_backbone = pretrained_backbone
+        self.pretrained_model = pretrained_backbone
+
         
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
@@ -262,6 +264,9 @@ class CTCData(Dataset):
         if self.compress:
             self._compress_data()
 
+        if self.pretrained_model is not None:
+            self._init_feature_extractor()
+            self.feature_extractor.precompute_embeddings(self.imgs)
     # def from_ctc
 
     @classmethod
@@ -378,7 +383,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
-                "pretrained_feats": _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone]["feat_dim"],
+                "pretrained_feats": _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"],
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -733,6 +738,18 @@ class CTCData(Dataset):
             windows.extend(_w)
 
         return windows
+    
+    def _init_feature_extractor(self):
+        if self.pretrained_model is not None:
+            extractor_cls = _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["class"]
+            img = self.windows[0]["img"]
+            self.feature_extractor = extractor_cls(
+                image_size=img.shape[-2:],
+                save_path=self.img_folder / "embeddings",
+                batch_size=_PRETAINED_BACKBONE_BATCH_SIZE,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                mode="nearest_patch",
+            )
 
     def _build_windows(
         self,
@@ -971,19 +988,11 @@ class CTCData(Dataset):
                 else:
                     print("disable augmentation as no trajectories would be left")
                     
-            extractor_cls = _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone]["class"]
-            print(f"Image shape: {img.shape[-2:]}, coords shape: {coords.shape}")
-            extractor = extractor_cls(
-                image_size=img.shape[-2:],
-                save_path=self.img_folder / "embeddings",
-                batch_size=_PRETAINED_BACKBONE_BATCH_SIZE,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                mode="nearest_patch",
-            )
+           
             window_imgs = self.windows[n]["img"]
             window_coords = self.windows[n]["coords"]
             window_timepoints = self.windows[n]["timepoints"]
-            features = extractor.forward(
+            features = self.feature_extractor.forward(
                 window_imgs,
                 np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
                 )
