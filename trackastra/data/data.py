@@ -27,7 +27,9 @@ from trackastra.data.augmentations import (
     default_augmenter,
 )
 from trackastra.data.features import (
+    _AVAILABLE_PRETRAINED_BACKBONES,
     _PROPERTIES,
+    PretrainBackboneType,
     extract_features_patch,
     extract_features_regionprops,
 )
@@ -38,6 +40,8 @@ from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+_PRETAINED_BACKBONE_BATCH_SIZE = 16
 
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
@@ -134,11 +138,13 @@ class CTCData(Dataset):
             "patch",
             "patch_regionprops",
             "wrfeat",
+            "pretrained_feats",
         ] = "wrfeat",
         sanity_dist: bool = False,
         crop_size: tuple | None = None,
         return_dense: bool = False,
         compress: bool = False,
+        pretrained_backbone: PretrainBackboneType | None = None,
         **kwargs,
     ) -> None:
         """_summary_.
@@ -188,7 +194,15 @@ class CTCData(Dataset):
                 f"'{features}' not one of the supported {ndim}D features"
                 f" {tuple(_PROPERTIES[ndim].keys())}"
             )
-
+        
+        if features != "pretrained_feats" and pretrained_backbone is not None:
+            raise ValueError("Pretrained features extraction can only be used with the 'pretrained_feats' feature type.")
+        elif features == "pretrained_feats" and pretrained_backbone is None:
+            raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
+        elif features == "pretrained_feats" and pretrained_backbone not in _AVAILABLE_PRETRAINED_BACKBONES.keys():
+            raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(_AVAILABLE_PRETRAINED_BACKBONES.keys())}")
+        self.pretrained_backbone = pretrained_backbone
+        
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
         logger.info(f"ROOT (guessed): \t{self.root}")
@@ -364,6 +378,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
+                "pretrained_feats": _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone]["feat_dim"],
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -942,7 +957,31 @@ class CTCData(Dataset):
             )
 
             features = np.concatenate(features, axis=0)
-
+        elif self.features == "pretrained_feats":
+            if self.augmenter is not None:
+                (img2, mask2, coords2), idx = self.augmenter(
+                    img, mask, coords, timepoints - min_time
+                )
+                if len(idx) > 0:
+                    img, mask, coords = img2, mask2, coords2
+                    labels = labels[idx]
+                    timepoints = timepoints[idx]
+                    assoc_matrix = assoc_matrix[idx][:, idx]
+                    mask = mask.astype(int)
+                else:
+                    print("disable augmentation as no trajectories would be left")
+                    
+            extractor_cls = _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone]["class"]
+            print(f"Image shape: {img.shape[-2:]}, coords shape: {coords.shape}")
+            extractor = extractor_cls(
+                image_size=img.shape[-2:],
+                save_path=self.img_folder / "embeddings",
+                batch_size=_PRETAINED_BACKBONE_BATCH_SIZE,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                mode="nearest_patch",
+            )
+            
+            features = extractor.forward(img, coords)
         # remove temporal offset and add timepoints to coords
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
@@ -1030,7 +1069,7 @@ class CTCData(Dataset):
                         degrees=180, 
                         scale=(.9, 1.1), 
                         shear=(0.1, 0.1), 
-                        scale_isotropic=(.5,2.)
+                        scale_isotropic=(.5, 2.)
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
                     wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
