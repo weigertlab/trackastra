@@ -1,12 +1,22 @@
 import itertools
+import logging
+import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 import torch
 from skimage.measure import regionprops_table
-from transformers import AutoImageProcessor
+from tqdm import tqdm
+from transformers import (
+    AutoImageProcessor,
+    HieraModel,
+)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # the property keys that are supported for 2 and 3 dim
 
@@ -35,6 +45,7 @@ _PROPERTIES = {
             "intensity_mean",
             "inertia_tensor",
         ),
+        "pretrained_feats": (),
     },
     3: {
         "regionprops2": (
@@ -52,6 +63,18 @@ _PROPERTIES = {
     },
 }
 
+# forward declarations for indexing
+HieraFeatures = None
+
+_AVAILABLE_PRETRAINED_BACKBONES = {
+    "facebook/hiera-tiny-224-hf": {
+        "class": HieraFeatures, 
+        "feat_dim": 768,
+    },
+}
+PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
+    "facebook/hiera-tiny-224-hf",
+]
 ##############
 ##############
 # Feature extraction from pretrained models
@@ -59,55 +82,229 @@ _PROPERTIES = {
 
 
 class FeatureExtractor(ABC):
-    def __init__(self):
-        self.model = None
-        # Model specs
-        self.image_processor: AutoImageProcessor = None
-        self.input_size: int = None
-        self.n_channels: int = None
-        self.final_grid_size: int = None
-        # MParameters for embedding extraction
-        self.batch_size: int = None
-        self.device: str = None
-        self.mode: Literal[
-            "exact_patch",  # Uses the image patch centered on the detection for embedding
+    def __init__(
+        self, 
+        image_size: tuple[int, int],
+        save_path: str | Path,
+        batch_size: int = 4,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        mode: Literal[
+            # "exact_patch",  # Uses the image patch centered on the detection for embedding
             "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
-            ] = None
+            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = "nearest_patch",
+        ):
+        # Model specs
+        self.model = None
+        self._input_size: int = None
+        self._final_grid_size: int = None
+        self.n_channels: int = None
+        self.hidden_state_size: int = None
+        self.model_patch_size: int = None
+        # Data specs
+        self.orig_image_size = image_size
+        self.orig_n_channels = 1
+        # Parameters for embedding extraction
+        self.batch_size = batch_size
+        self.device = device
+        self.mode = mode
         # Saving parameters
-        self.save_path: str = None
+        self.save_path: str | Path = save_path
+        
+        if not isinstance(self.save_path, Path):
+            self.save_path = Path(self.save_path)
+        
+        if not self.save_path.exists():
+            self.save_path.mkdir(parents=False, exist_ok=True)
+    
+    @property
+    def input_size(self):
+        return self._input_size
+    
+    @input_size.setter
+    def input_size(self, value: int):
+        self._input_size = value
+        self._set_model_patch_size()
+        
+    @property
+    def final_grid_size(self):
+        return self._final_grid_size
+    
+    @final_grid_size.setter
+    def final_grid_size(self, value: int):
+        self._final_grid_size = value
+        self._set_model_patch_size()
+    
+    def _set_model_patch_size(self):
+        if self.final_grid_size is not None and self.input_size is not None:
+            self.model_patch_size = self.input_size // self.final_grid_size
+            if not self.input_size % self.final_grid_size == 0:
+                raise ValueError("The input size must be divisible by the final grid size.")
+    
+    def _start_timer(self):
+        self.start_time = time.time()
+        
+    def stop_timer(self, step_name):
+        elapsed = time.time() - self.start_time
+        logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
+    
+    def _check_existing_embeddings(self, timepoints):
+        """Checks if embeddings for all timepoints already exist."""
+        missing = []
+        for t in timepoints:
+            t = int(t)
+            if not (self.save_path / f"{t}_features.npy").exists() and t not in missing:
+                missing.append(t)
+        return missing
+    
+    def forward(
+            self, 
+            imgs, 
+            coords,
+            masks=None, 
+        ) -> torch.Tensor:  # (n_regions, embedding_size)
+        """Extracts embeddings from the model."""
+        self._start_timer()
+        # pre-compute embeddings for all images
+        missing = self._check_existing_embeddings(coords[:, 0])
+        logger.debug(f"Missing embeddings: {missing}")
+        if len(missing) > 0:
+            for ts, batches in tqdm(self._prepare_batches(imgs[missing]), total=len(missing), desc="Computing embeddings"):
+                logger.debug(f"Time points: {ts}")
+                logger.debug(f"Batch size: {batches.shape}")
+                embeddings = self._get_embeddings(batches)
+                for t, ft in zip(ts, embeddings):
+                    self._save_features(ft, t)
+        self.stop_timer("precompute embeddings")
+        self.start_time = time.time()
+        if self.mode == "nearest_patch":
+            # find coordinate patches from detections
+            patch_coords = self._map_coords_to_patches(coords)
+            patch_idxs = self._find_nearest_patch(patch_coords)
+            logger.debug(f"Coords: {coords}")
+            logger.debug(f"Patch coordinates: {patch_coords}")
+            logger.debug(f"Patch indices: {patch_idxs}")
+            # load the embeddings and extract the relevant ones
+            feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
+            self.stop_timer("precompute patches")
+            self.start_time = time.time()
+            for i, (t, y, x) in tqdm(enumerate(patch_idxs), total=len(patch_idxs), desc="Retrieving embeddings"):
+                embeddings = self._load_features(t)  # (final_grid_size**2, hidden_state_size)
+                idx = y * self.final_grid_size + x
+                feats[i] = embeddings[idx]
+            self.stop_timer("embedding retrieval")
+            return feats  # (n_regions, embedding_size)
     
     @abstractmethod
-    def forward(self, imgs, masks, coords) -> torch.Tensor:  # (n_regions, embedding_size)
+    def _get_embeddings(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
         """Extracts embeddings from the model."""
         pass
     
-    @abstractmethod
-    def _get_embeddings(self, images) -> torch.Tensor:
-        """Extracts embeddings from the model."""
-        pass
-    
-    @abstractmethod
-    def _prepare_batches(self, images) -> torch.Tensor:
+    def _prepare_batches(self, images):
         """Prepares batches of images for embedding extraction."""
         # make batches if mode is exact_patch, otherwise prepare whole images and batch them
         if self.mode == "exact_patch":
-            pass
+            raise NotImplementedError()
         else:
-            pass
+            for i in range(0, len(images), self.batch_size):
+                end = i + self.batch_size
+                end = len(images) if end > len(images) else end
+                batch = np.expand_dims(images[i:end], axis=1)  # (B, C, H, W)
+                
+                def normalize_batch(b):
+                    for i, im in enumerate(b):
+                        b[i] = (im - im.min()) / (im.max() - im.min())
+                    return b
+                batch = normalize_batch(batch)
+                logger.debug(f"Batch min {batch.min()} max {batch.max()}")
+                timepoints = range(i, end)
+                if self.n_channels > 1:  # repeat channels if needed
+                    if self.orig_n_channels > 1 and self.orig_n_channels != self.n_channels:
+                        raise ValueError("When more than one original channel is provided, the number of channels in the model must match the number of channels in the input.")
+                    batch = np.repeat(batch, self.n_channels, axis=1)
+                yield timepoints, batch
     
-    def _find_nearest_patch(self, coords):
+    def _map_coords_to_patches(self, coords):
+        """Maps the detection coordinates to the corresponding image patches."""
+        scale_x = self.input_size / self.orig_image_size[0]
+        scale_y = self.input_size / self.orig_image_size[1]
+        patch_coords = []
+        for t, x, y in coords:
+            patch_x = int(x * scale_x)
+            patch_y = int(y * scale_y)
+            patch_coords.append((int(t), patch_x, patch_y))
+        return patch_coords
+    
+    def _find_nearest_patch(self, patch_coords):
         """Finds the nearest patch to the detection in the embedding."""
-        pass
+        patch_idxs = []
+        for c in patch_coords:
+            x_idx = c[1] // self.model_patch_size
+            y_idx = c[2] // self.model_patch_size
+            patch_idxs.append((c[0], x_idx, y_idx))
+        return patch_idxs
     
-    def _mean_patch(self, coords):
+    def _mean_patch(self, masks):
         """Averages the embeddings of all patches that intersect with the detection."""
-        pass
+        raise NotImplementedError()
     
-    def _exact_patch(self, imgs, coords):
+    def _exact_patch(self, imgs, masks, coords):
         """Uses the image patch centered on the detection for embedding."""
-        pass
+        raise NotImplementedError()
+    
+    def _save_features(self, features, timepoint):
+        """Saves the features to disk."""
+        save_path = self.save_path / f"{timepoint}_features.npy"
+        np.save(save_path, features.cpu().numpy())
+        assert save_path.exists(), f"Failed to save features to {save_path}"
+    
+    def _load_features(self, timepoint):
+        """Loads the features from disk."""
+        load_path = self.save_path / f"{timepoint}_features.npy"
+        features = np.load(load_path)
+        assert features is not None, f"Failed to load features from {load_path}"
+        return torch.tensor(features).to(self.device)
+
+
+##############
+class HieraFeatures(FeatureExtractor):
+    def __init__(
+        self, 
+        image_size: tuple[int, int],
+        save_path: str | Path,
+        batch_size: int = 4,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        mode: Literal[
+            # "exact_patch",  # Uses the image patch centered on the detection for embedding
+            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = "nearest_patch",
+        ):
+        super().__init__(image_size, save_path, batch_size, device, mode)
+        self.input_size = 224
+        self.final_grid_size = 7  # 7x7 grid
+        self.n_channels = 3  # expects RGB images
+        self.hidden_state_size = 768
+        self.hf_id = "facebook/hiera-tiny-224-hf"
+        self.image_processor = AutoImageProcessor.from_pretrained(self.hf_id)
+        self.model = HieraModel.from_pretrained(self.hf_id)
         
+        self.model.to(self.device)
+        
+    def _get_embeddings(self, images) -> torch.Tensor:
+        """Extracts embeddings from the model."""
+        inputs = self.image_processor(images, return_tensors="pt", use_fast=True).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            
+        return outputs.last_hidden_state
+    
+
+_AVAILABLE_PRETRAINED_BACKBONES["facebook/hiera-tiny-224-hf"]["class"] = HieraFeatures
+##############
+##############
+
 
 def extract_features_regionprops(
     mask: np.ndarray,
