@@ -980,8 +980,13 @@ class CTCData(Dataset):
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 mode="nearest_patch",
             )
-            
-            features = extractor.forward(img, coords)
+            window_imgs = self.windows[n]["img"]
+            window_coords = self.windows[n]["coords"]
+            window_timepoints = self.windows[n]["timepoints"]
+            features = extractor.forward(
+                window_imgs,
+                np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
+                )
         # remove temporal offset and add timepoints to coords
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
@@ -999,7 +1004,7 @@ class CTCData(Dataset):
             )
 
         coords0 = torch.from_numpy(coords).float()
-        features = torch.from_numpy(features).float()
+        features = torch.from_numpy(features).float() if isinstance(features, np.ndarray) else features.float()
         assoc_matrix = torch.from_numpy(assoc_matrix.copy()).float()
         labels = torch.from_numpy(labels).long()
         timepoints = torch.from_numpy(timepoints).long()
