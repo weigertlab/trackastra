@@ -39,7 +39,8 @@ from trackastra.data.matching import matching
 from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 _PRETAINED_BACKBONE_BATCH_SIZE = 16
 
@@ -840,6 +841,32 @@ class CTCData(Dataset):
         logger.debug(f"Built {len(windows)} track windows from {det_folder}.\n")
         return windows
 
+    # TODO remove
+    def _start_timer(self):
+        import time
+        self.start_time = time.time()
+        
+    def _stop_timer(self, step_name):
+        import time
+        elapsed = time.time() - self.start_time
+        logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
+    
+    def _apply_transform_and_check(self, img, mask, coords, timepoints, min_time):
+        (img2, mask2, coords2), idx = self.augmenter(
+                    img, mask, coords, timepoints - min_time
+                )
+        if len(idx) > 0:
+            img, mask, coords = img2, mask2, coords2
+            labels = labels[idx]
+            timepoints = timepoints[idx]
+            assoc_matrix = assoc_matrix[idx][:, idx]
+            mask = mask.astype(int)
+        else:
+            logger.debug(
+                "disable augmentation as no trajectories would be left"
+            )
+        return img, labels, mask, coords, timepoints, assoc_matrix
+                    
     def __getitem__(self, n: int, return_dense=None):
         # if not set, use default
         if self.features == "wrfeat":
@@ -888,19 +915,9 @@ class CTCData(Dataset):
 
         elif self.features in ("regionprops", "regionprops2"):
             if self.augmenter is not None:
-                (img2, mask2, coords2), idx = self.augmenter(
-                    img, mask, coords, timepoints - min_time
+                img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
+                    img, mask, coords, timepoints, min_time
                 )
-                if len(idx) > 0:
-                    img, mask, coords = img2, mask2, coords2
-                    labels = labels[idx]
-                    timepoints = timepoints[idx]
-                    assoc_matrix = assoc_matrix[idx][:, idx]
-                    mask = mask.astype(int)
-                else:
-                    logger.debug(
-                        "disable augmentation as no trajectories would be left"
-                    )
 
             features = tuple(
                 extract_features_regionprops(
@@ -910,21 +927,11 @@ class CTCData(Dataset):
             )
             features = np.concatenate(features, axis=0)
             # features = np.zeros((len(coords), self.feat_dim))
-
         elif self.features == "patch":
             if self.augmenter is not None:
-                (img2, mask2, coords2), idx = self.augmenter(
-                    img, mask, coords, timepoints - min_time
+                img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
+                    img, mask, coords, timepoints, min_time
                 )
-                if len(idx) > 0:
-                    img, mask, coords = img2, mask2, coords2
-                    labels = labels[idx]
-                    timepoints = timepoints[idx]
-                    assoc_matrix = assoc_matrix[idx][:, idx]
-                    mask = mask.astype(int)
-                else:
-                    print("disable augmentation as no trajectories would be left")
-
             features = tuple(
                 extract_features_patch(
                     m,
@@ -937,18 +944,9 @@ class CTCData(Dataset):
             features = np.concatenate(features, axis=0)
         elif self.features == "patch_regionprops":
             if self.augmenter is not None:
-                (img2, mask2, coords2), idx = self.augmenter(
-                    img, mask, coords, timepoints - min_time
-                )
-                if len(idx) > 0:
-                    img, mask, coords = img2, mask2, coords2
-                    labels = labels[idx]
-                    timepoints = timepoints[idx]
-                    assoc_matrix = assoc_matrix[idx][:, idx]
-                    mask = mask.astype(int)
-                else:
-                    print("disable augmentation as no trajectories would be left")
-
+                img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
+                self.augmenter, img, mask, coords, timepoints, min_time
+            )
             features1 = tuple(
                 extract_features_patch(
                     m,
@@ -975,20 +973,14 @@ class CTCData(Dataset):
 
             features = np.concatenate(features, axis=0)
         elif self.features == "pretrained_feats":
+            self._start_timer()
             if self.augmenter is not None:
-                (img2, mask2, coords2), idx = self.augmenter(
-                    img, mask, coords, timepoints - min_time
+                img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
+                    self.augmenter, img, mask, coords, timepoints, min_time
                 )
-                if len(idx) > 0:
-                    img, mask, coords = img2, mask2, coords2
-                    labels = labels[idx]
-                    timepoints = timepoints[idx]
-                    assoc_matrix = assoc_matrix[idx][:, idx]
-                    mask = mask.astype(int)
-                else:
-                    print("disable augmentation as no trajectories would be left")
-                    
+            self._stop_timer("Augment")
            
+            self._start_timer()
             window_imgs = self.windows[n]["img"]
             window_coords = self.windows[n]["coords"]
             window_timepoints = self.windows[n]["timepoints"]
@@ -996,7 +988,9 @@ class CTCData(Dataset):
                 window_imgs,
                 np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
                 )
+            self._stop_timer("Obtain features")
         # remove temporal offset and add timepoints to coords
+        self._start_timer()
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
 
@@ -1040,6 +1034,7 @@ class CTCData(Dataset):
             mask = torch.from_numpy(mask.astype(int)).long()
             res["mask"] = mask
 
+        self._stop_timer("Postproc")
         return res
 
     # wrfeat functions...

@@ -146,13 +146,6 @@ class FeatureExtractor(ABC):
             if not self.input_size % self.final_grid_size == 0:
                 raise ValueError("The input size must be divisible by the final grid size.")
     
-    def _start_timer(self):
-        self.start_time = time.time()
-        
-    def _stop_timer(self, step_name):
-        elapsed = time.time() - self.start_time
-        logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
-    
     def forward(
             self, 
             imgs, 
@@ -160,19 +153,7 @@ class FeatureExtractor(ABC):
             masks=None, 
         ) -> torch.Tensor:  # (n_regions, embedding_size)
         """Extracts embeddings from the model."""
-        self._start_timer()
-        # pre-compute embeddings for all images
-        missing = self._check_existing_embeddings(coords[:, 0]) # TODO remove this fallback if we always precompute embeddings
-        logger.debug(f"Missing embeddings: {missing}")
-        if len(missing) > 0:
-            for ts, batches in tqdm(self._prepare_batches(imgs[missing]), total=len(missing), desc="Computing embeddings"):
-                logger.debug(f"Time points: {ts}")
-                logger.debug(f"Batch size: {batches.shape}")
-                embeddings = self._run_model(batches)
-                for t, ft in zip(ts, embeddings):
-                    self._save_features(ft, t)
-        self._stop_timer("precompute embeddings")
-        self.start_time = time.time()
+
         if self.mode == "nearest_patch":
             # find coordinate patches from detections
             patch_coords = self._map_coords_to_patches(coords)
@@ -182,13 +163,15 @@ class FeatureExtractor(ABC):
             logger.debug(f"Patch indices: {patch_idxs}")
             # load the embeddings and extract the relevant ones
             feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
-            self._stop_timer("precompute patches")
-            self.start_time = time.time()
-            for i, (t, y, x) in enumerate(patch_idxs):
-                embeddings = self._load_features(t)  # (final_grid_size**2, hidden_state_size)
-                idx = y * self.final_grid_size + x
-                feats[i] = embeddings[idx]
-            self._stop_timer("embedding retrieval")
+            indices = [y * self.final_grid_size + x for _, y, x in patch_idxs]
+
+            unique_timepoints = list(set(t for t, _, _ in patch_idxs))
+            embeddings_dict = {t: self._load_features(t) for t in unique_timepoints}
+            feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
+
+            for i, (t, _, _) in enumerate(patch_idxs):
+                feats[i] = embeddings_dict[t][indices[i]]
+
             return feats  # (n_regions, embedding_size)
     
     def precompute_embeddings(self, images):
