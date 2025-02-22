@@ -139,20 +139,19 @@ https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
   Docker images
 </h3>
 
-
-Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-prediction/general). Currently, we only provide CPU-based docker images.
+Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-track/general). Currently, we only provide CPU-based docker images.
 
 <h3>
   <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Command Line Interface
 </h3>
-After [installation](#Installation), simply run in your terminal 
+After [installation](#installation), simply run in your terminal
 
 ```
 trackastra track --help
 ```
 
-to track directly from images and corresponding instance segmentation masks saved as two series of TIF files.
+to build a command for tracking directly from images and corresponding instance segmentation masks saved on disk as two series of TIF files.
 
 
 
