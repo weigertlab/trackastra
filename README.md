@@ -66,21 +66,21 @@ For a quick try of Trackastra on your data, please use our [napari plugin](https
   <img src="https://s3.dualstack.us-east-2.amazonaws.com/pythondotorg-assets/media/community/logos/python-logo-only.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Python API
 </h3>
+
 All you need are the following two `numpy` arrays:
 - `imgs`: a microscopy time lapse of shape `time,(z),y,x`.
 - `masks`: corresponding instance segmentation of shape `time,(z),y,x`.
 
-<details>
-<summary> Show python example </summary>
+The predicted associations can then be used for linking with several modes:
 
-
-The predicted assocations can then be used for linked with several modes:
-
-- `greedy_nodiv`  (greedy linking with no division) - fast, no additional dependencies
-- `greedy`        (greedy linking with division) - fast, no additional dependencies
-- `ilp`          (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
+- `greedy_nodiv` (greedy linking with no division) - fast, no additional dependencies
+- `greedy` (greedy linking with division) - fast, no additional dependencies
+- `ilp` (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
 
 Apart from that, no hyperparameters to choose :)
+
+<details>
+<summary>📄 <i>Show python example </i></summary>
 
 ```python
 import torch
@@ -135,12 +135,29 @@ Trackastra is one of the available trackers in [TrackMate](https://imagej.net/pl
 https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
 
 <h3>
-  <img src="docs/docker-mark-blue.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  <img src="docs/icons/docker-mark-blue.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Docker images
 </h3>
 
 
 Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-prediction/general). Currently, we only provide CPU-based docker images.
+
+<h3>
+  <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Command Line Interface
+</h3>
+After [installation](#Installation), simply run in your terminal 
+
+```
+trackastra track --help
+```
+
+to track directly from images and corresponding instance segmentation masks saved as two series of TIF files.
+
+
+
+
+
 
 
 ## Training a model on your own data
