@@ -44,24 +44,35 @@ Notes:
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 - 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
 
-## Usage
+## Usage: Tracking with a pretrained model
 
 The input to Trackastra is a sequence of images and their corresponding cell (instance) segmentations.
 
-### Napari plugin 
-
-For a quick try of Trackastra on your data, please use our [napari plugin](https://github.com/weigertlab/napari-trackastra/), which already comes with pretrained models included.
-
 ![demo](https://github.com/weigertlab/napari-trackastra/assets/8866751/097eb82d-0fef-423e-9275-3fb528c20f7d)
-
-
-### Tracking with a pretrained model
 
 > The available pretrained models are described in detail [here](trackastra/model/pretrained.json).
 
-Consider the following python example script for tracking already segmented cells. All you need are the following two numpy arrays:
+Tracking with Trackastra can be done via:
+
+<h3>
+  <img src="https://avatars.githubusercontent.com/u/39813916?s=280&v=4" alt="icon" height="20" style="vertical-align: middle;"/>
+  Napari plugin
+</h3>
+
+For a quick try of Trackastra on your data, please use our [napari plugin](https://github.com/weigertlab/napari-trackastra/), which already comes with pretrained models included.
+</details>
+
+<h3>
+  <img src="https://s3.dualstack.us-east-2.amazonaws.com/pythondotorg-assets/media/community/logos/python-logo-only.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Python API
+</h3>
+All you need are the following two `numpy` arrays:
 - `imgs`: a microscopy time lapse of shape `time,(z),y,x`.
 - `masks`: corresponding instance segmentation of shape `time,(z),y,x`.
+
+<details>
+<summary> Show python example </summary>
+
 
 The predicted assocations can then be used for linked with several modes:
 
@@ -112,8 +123,27 @@ v.add_image(imgs)
 v.add_labels(masks_tracked)
 v.add_tracks(data=napari_tracks, graph=napari_tracks_graph)
 ```
+</details>
 
-### Training a model on your own data
+<h3>
+  <!-- <img src="https://camo.githubusercontent.com/5d68a2c2564bc50ca534f939922482779202499b14901e0671d5362def6ff59f/68747470733a2f2f696d6167656a2e6e65742f6d656469612f69636f6e732f747261636b6d6174652e706e67" alt="icon" height="20" style="vertical-align: middle;"/> -->
+  <img src="https://fiji.sc/site/logo.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Fiji (via TrackMate)
+</h3>
+
+Trackastra is one of the available trackers in [TrackMate](https://imagej.net/plugins/trackmate/). For installation and usage instructions take a look at this [tutorial](
+https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
+
+<h3>
+  <img src="docs/docker-mark-blue.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Docker images
+</h3>
+
+
+Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-prediction/general). Currently, we only provide CPU-based docker images.
+
+
+## Training a model on your own data
 
 To run an example
 - clone this repository and got into the scripts directory with `cd trackastra/scripts`.
