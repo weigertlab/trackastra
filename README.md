@@ -173,7 +173,7 @@ trackastra track --help
 to build a command for tracking directly from images and corresponding instance segmentation masks saved on disk as two series of TIF files.
 
 
-## Training a model on your own data
+## Usage: Training a model on your own data
 
 To run an example
 - clone this repository and got into the scripts directory with `cd trackastra/scripts`.
