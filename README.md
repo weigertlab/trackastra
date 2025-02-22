@@ -81,6 +81,7 @@ Apart from that, no hyperparameters to choose :)
 
 <details>
 <summary>📄 <i>Show python example </i></summary>
+<br>
 
 ```python
 import torch
@@ -141,22 +142,35 @@ https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
 
 Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-track/general). Currently, we only provide CPU-based docker images.
 
+Track within a docker container with the following command, filling the `<VARIABLES>`:
+
+```bash
+docker run -it -v <LOCAL_DATA_DIR>:/data -v <LOCAL_RESULTS_DIR>:/results bentaculum/trackastra-track:<MODEL_TAG> --input_test /data/<DATASET_IN_CTC_FORMAT> --detection_folder <TRA/SEG/ETC>"
+```
+<details>
+<summary>📄 <i>Show example with Cell Tracking Challenge model:</i></summary>
+<br>
+
+```bash
+wget http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DH-GOWT1.zip 
+chmod -R 775 Fluo-N2DH-GOWT1
+docker pull bentaculum/trackastra-track:model.ctc-linking.ilp 
+docker run -it -v ./:/data -v ./:/results bentaculum/trackastra-track:model.ctc-linking.ilp --input_test data/Fluo-N2DH-GOWT1/01 --detection_folder TRA
+```
+
+</details>
+
 <h3>
   <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Command Line Interface
 </h3>
-After [installation](#installation), simply run in your terminal
+After [installation](#installation), simply run in your terminal 
 
-```
+```bash
 trackastra track --help
 ```
 
 to build a command for tracking directly from images and corresponding instance segmentation masks saved on disk as two series of TIF files.
-
-
-
-
-
 
 
 ## Training a model on your own data
