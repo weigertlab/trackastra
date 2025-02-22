@@ -13,6 +13,9 @@ from tqdm import tqdm
 from transformers import (
     AutoImageProcessor,
     HieraModel,
+    AutoModel,
+    SamModel,
+    SamProcessor,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,16 +68,30 @@ _PROPERTIES = {
 
 # forward declarations for indexing
 HieraFeatures = None
+DinoV2Features = None
+SamFeatures = None
 
 _AVAILABLE_PRETRAINED_BACKBONES = {
     "facebook/hiera-tiny-224-hf": {
         "class": HieraFeatures, 
         "feat_dim": 768,
     },
+    "facebook/dinov2-base": {
+        "class": DinoV2Features, 
+        "feat_dim": 768,
+    },
+    "facebook/sam-vit-base": {
+        "class": SamFeatures, 
+        "feat_dim": 256,
+    },
 }
+
 PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
     "facebook/hiera-tiny-224-hf",
+    "facebook/dinov2-base",
+    "facebook/sam-vit-base",
 ]
+
 ##############
 ##############
 # Feature extraction from pretrained models
@@ -267,7 +284,7 @@ class FeatureExtractor(ABC):
 
 ##############
 class HieraFeatures(FeatureExtractor):
-    model_name = "facebook/hiera-tiny-224-hf"
+    model_name = list(_AVAILABLE_PRETRAINED_BACKBONES.keys())[0]
     def __init__(
         self, 
         image_size: tuple[int, int],
@@ -301,6 +318,78 @@ class HieraFeatures(FeatureExtractor):
     
 
 _AVAILABLE_PRETRAINED_BACKBONES[HieraFeatures.model_name]["class"] = HieraFeatures
+
+class DinoV2Features(FeatureExtractor):
+    model_name = list(_AVAILABLE_PRETRAINED_BACKBONES.keys())[1]
+    def __init__(
+        self, 
+        image_size: tuple[int, int],
+        save_path: str | Path,
+        batch_size: int = 4,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        mode: Literal[
+            # "exact_patch",  # Uses the image patch centered on the detection for embedding
+            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = "nearest_patch",
+        ):
+        super().__init__(image_size, save_path, batch_size, device, mode)
+        self.input_size = 224
+        self.final_grid_size = 16 # 16x16 grid
+        self.n_channels = 3  # expects RGB images
+        self.hidden_state_size = 768
+        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
+        self.model = AutoModel.from_pretrained(self.model_name)
+        
+        self.model.to(self.device)
+        
+    def _run_model(self, images) -> torch.Tensor:
+        """Extracts embeddings from the model."""
+        inputs = self.image_processor(images, return_tensors="pt", use_fast=True).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # ignore the CLS token (not classifying)
+        # this way we get only the patch embeddings
+        # which are compatible with finding the relevant patches directly
+        # in the rest of the code
+        return outputs.last_hidden_state[:, 1:, :]
+    
+_AVAILABLE_PRETRAINED_BACKBONES[DinoV2Features.model_name]["class"] = DinoV2Features
+
+class SamFeatures(FeatureExtractor):
+    model_name = list(_AVAILABLE_PRETRAINED_BACKBONES.keys())[2]
+    def __init__(
+        self, 
+        image_size: tuple[int, int],
+        save_path: str | Path,
+        batch_size: int = 4,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        mode: Literal[
+            # "exact_patch",  # Uses the image patch centered on the detection for embedding
+            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = "nearest_patch",
+        ):
+        super().__init__(image_size, save_path, batch_size, device, mode)
+        self.input_size = 1024
+        self.final_grid_size = 64 # 64x64 grid
+        self.n_channels = 3
+        self.hidden_state_size = 256
+        self.image_processor = SamProcessor.from_pretrained(self.model_name)
+        self.model = SamModel.from_pretrained(self.model_name)
+        
+        self.model.to(self.device)
+        
+    def _run_model(self, images) -> torch.Tensor:
+        """Extracts embeddings from the model."""
+        inputs = self.image_processor(images, return_tensors="pt").to(self.device)
+        outputs = self.model.get_image_embeddings(inputs['pixel_values'])
+        B, N, H, W = outputs.shape
+        return outputs.permute(0, 2, 3, 1).reshape(B, H*W, N) # (B, grid_size**2, hidden_state_size)
+        
+_AVAILABLE_PRETRAINED_BACKBONES[SamFeatures.model_name]["class"] = SamFeatures        
 ##############
 ##############
 
