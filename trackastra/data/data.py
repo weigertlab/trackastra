@@ -746,7 +746,7 @@ class CTCData(Dataset):
                 image_size=img.shape[-2:],
                 save_path=self.img_folder / "embeddings",
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                mode="nearest_patch",
+                mode="mean_patches",
             )
 
     def _build_windows(
@@ -981,9 +981,14 @@ class CTCData(Dataset):
             window_imgs = self.windows[n]["img"]
             window_coords = self.windows[n]["coords"]
             window_timepoints = self.windows[n]["timepoints"]
+            window_masks = self.windows[n]["mask"]
+            window_labels = self.windows[n]["labels"]
             features = self.feature_extractor.forward(
-                window_imgs,
-                np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
+                imgs=window_imgs,
+                coords=np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
+                masks=window_masks,
+                timepoints=window_timepoints,
+                labels=window_labels,
                 )
             self._stop_timer("Obtain features")
         # remove temporal offset and add timepoints to coords

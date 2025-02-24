@@ -109,7 +109,7 @@ class FeatureExtractor(ABC):
         mode: Literal[
             # "exact_patch",  # Uses the image patch centered on the detection for embedding
             "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
             ] = "nearest_patch",
         ):
         # Image processor extra args
@@ -187,7 +187,7 @@ class FeatureExtractor(ABC):
         """
         feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
         
-        if self.mode == "nearest_patch":
+        if self.mode == "nearest_patch":  # TODO move to func
             # find coordinate patches from detections
             patch_coords = self._map_coords_to_cells(coords)
             patch_idxs = self._find_nearest_cell(patch_coords)
@@ -201,10 +201,10 @@ class FeatureExtractor(ABC):
             for i, (t, _, _) in enumerate(patch_idxs):
                 feats[i] = embeddings_dict[t][indices[i]]
                 
-        elif self.mode == "mean_patch":
+        elif self.mode == "mean_patches":
             if masks is None or labels is None or timepoints is None:
                 raise ValueError("Masks and labels must be provided for mean patch mode.")
-            feats = self._mean_patch(masks, timepoints, labels)
+            feats = self._mean_patches(masks, timepoints, labels)
             
         return feats  # (n_regions, embedding_size)
     
@@ -269,17 +269,16 @@ class FeatureExtractor(ABC):
             patch_idxs.append((c[0], x_idx, y_idx))
         return patch_idxs
     
-    def _find_patches_for_masks(image_mask: np.ndarray, grid_size: int) -> dict:
+    def _find_patches_for_masks(self, image_mask: np.ndarray) -> dict:
         """Find which patches in a grid each mask belongs to using regionprops.
         
         Args:
         - image_masks (np.ndarray): Masks where each region has a unique label.
-        - grid_size (int) : The grid_size x grid_size grid size of the patches. Image is evenly divided into patches.
-        
+                
         Returns:
         - mask_patches (dict): Dictionary with region labels as keys and lists of patch indices as values.
         """
-        patch_height, patch_width = image_mask.shape[0] // grid_size, image_mask.shape[1] // grid_size
+        patch_height, patch_width = image_mask.shape[0] // self.final_grid_size, image_mask.shape[1] // self.final_grid_size
         regions = regionprops(image_mask)
         mask_patches = {}
         
@@ -298,7 +297,7 @@ class FeatureExtractor(ABC):
         
         return mask_patches
     
-    def _mean_patch(self, masks, timepoints, labels):
+    def _mean_patches(self, masks, timepoints, labels):
         """Averages the embeddings of all patches that intersect with the detection.
         
         Args:
@@ -306,14 +305,16 @@ class FeatureExtractor(ABC):
             - timepoints (np.ndarray): For each region, contains the corresponding timepoint. (n_regions)
             - labels (np.ndarray): Unique labels of the regions. (n_regions)
         """
-        n_regions = np.unique(masks).shape[0] - 1
+        n_regions = len(timepoints)
         embeddings = torch.zeros(n_regions, self.hidden_state_size, device=self.device)
-        
+        timepoints_s = timepoints - timepoints.min()
+        logger.debug(f"Timepoints: {timepoints}")
+        logger.debug(f"n_regions: {n_regions}")
         patches = []
-        for t in np.unique(timepoints):
-            patches.append(self._find_patches_for_masks(masks[t], self.final_grid_size))
-
-        for i, t in enumerate(timepoints):
+        for t in np.unique(timepoints_s):
+            patches.append(self._find_patches_for_masks(masks[t]))
+        logger.debug(f"Patch indices: {patches}")
+        for i, t in enumerate(timepoints_s):
             patches_feats = []
             for patch in patches[t][labels[i]]:
                 patches_feats.append(self._load_features(t)[patch[0] * self.final_grid_size + patch[1]])    
@@ -361,7 +362,7 @@ class HieraFeatures(FeatureExtractor):
         mode: Literal[
             # "exact_patch",  # Uses the image patch centered on the detection for embedding
             "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
             ] = "nearest_patch",
         ):
         super().__init__(image_size, save_path, batch_size, device, mode)
@@ -400,7 +401,7 @@ class DinoV2Features(FeatureExtractor):
         mode: Literal[
             # "exact_patch",  # Uses the image patch centered on the detection for embedding
             "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
             ] = "nearest_patch",
         ):
         super().__init__(image_size, save_path, batch_size, device, mode)
@@ -442,7 +443,7 @@ class SamFeatures(FeatureExtractor):
         mode: Literal[
             # "exact_patch",  # Uses the image patch centered on the detection for embedding
             "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            # "mean_patch"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
             ] = "nearest_patch",
         ):
         super().__init__(image_size, save_path, batch_size, device, mode)
