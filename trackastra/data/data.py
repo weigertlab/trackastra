@@ -42,8 +42,6 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
 logger.setLevel(logging.DEBUG)
 
-_PRETAINED_BACKBONE_BATCH_SIZE = 16
-
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
     """Only keep tracklets that are present in the given time interval."""
@@ -121,6 +119,7 @@ def debug_function(f):
 
 class CTCData(Dataset):
     feature_extractor = None
+
     def __init__(
         self,
         root: str = "",
@@ -205,7 +204,6 @@ class CTCData(Dataset):
             raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(_AVAILABLE_PRETRAINED_BACKBONES.keys())}")
         self.pretrained_model = pretrained_backbone
 
-        
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
         logger.info(f"ROOT (guessed): \t{self.root}")
@@ -747,7 +745,6 @@ class CTCData(Dataset):
             self.feature_extractor = extractor_cls(
                 image_size=img.shape[-2:],
                 save_path=self.img_folder / "embeddings",
-                batch_size=_PRETAINED_BACKBONE_BATCH_SIZE,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 mode="nearest_patch",
             )
@@ -851,7 +848,7 @@ class CTCData(Dataset):
         elapsed = time.time() - self.start_time
         logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
     
-    def _apply_transform_and_check(self, img, mask, coords, timepoints, min_time):
+    def _apply_transform_and_check(self, img, labels, mask, coords, timepoints, min_time, assoc_matrix):
         (img2, mask2, coords2), idx = self.augmenter(
                     img, mask, coords, timepoints - min_time
                 )
@@ -916,7 +913,7 @@ class CTCData(Dataset):
         elif self.features in ("regionprops", "regionprops2"):
             if self.augmenter is not None:
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
-                    img, mask, coords, timepoints, min_time
+                    img, labels, mask, coords, timepoints, min_time, assoc_matrix
                 )
 
             features = tuple(
@@ -930,7 +927,7 @@ class CTCData(Dataset):
         elif self.features == "patch":
             if self.augmenter is not None:
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
-                    img, mask, coords, timepoints, min_time
+                    img, labels, mask, coords, timepoints, min_time, assoc_matrix
                 )
             features = tuple(
                 extract_features_patch(
@@ -945,8 +942,8 @@ class CTCData(Dataset):
         elif self.features == "patch_regionprops":
             if self.augmenter is not None:
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
-                self.augmenter, img, mask, coords, timepoints, min_time
-            )
+                    img, labels, mask, coords, timepoints, min_time, assoc_matrix
+                )
             features1 = tuple(
                 extract_features_patch(
                     m,
@@ -976,7 +973,7 @@ class CTCData(Dataset):
             self._start_timer()
             if self.augmenter is not None:
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
-                    self.augmenter, img, mask, coords, timepoints, min_time
+                    img, labels, mask, coords, timepoints, min_time, assoc_matrix
                 )
             self._stop_timer("Augment")
            
