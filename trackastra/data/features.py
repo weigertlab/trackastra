@@ -1,6 +1,5 @@
 import itertools
 import logging
-import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
@@ -83,6 +82,7 @@ PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 
 
 class FeatureExtractor(ABC):
     model_name = None
+
     def __init__(
         self, 
         image_size: tuple[int, int],
@@ -153,7 +153,6 @@ class FeatureExtractor(ABC):
             masks=None, 
         ) -> torch.Tensor:  # (n_regions, embedding_size)
         """Extracts embeddings from the model."""
-
         if self.mode == "nearest_patch":
             # find coordinate patches from detections
             patch_coords = self._map_coords_to_patches(coords)
@@ -201,13 +200,13 @@ class FeatureExtractor(ABC):
                 end = len(images) if end > len(images) else end
                 batch = np.expand_dims(images[i:end], axis=1)  # (B, C, H, W)
                 
-                def normalize_batch(b):
-                    for i, im in enumerate(b):
-                        b[i] = (im - im.min()) / (im.max() - im.min())
-                    return b
+                # def normalize_batch(b):
+                #     for i, im in enumerate(b):
+                #         b[i] = (im - im.min()) / (im.max() - im.min())
+                #     return b
                 
-                batch = normalize_batch(batch)
-                logger.debug(f"Batch min {batch.min()} max {batch.max()}")
+                # batch = normalize_batch(batch)
+                # logger.debug(f"Batch min {batch.min()} max {batch.max()}")
                 timepoints = range(i, end)
                 if self.n_channels > 1:  # repeat channels if needed
                     if self.orig_n_channels > 1 and self.orig_n_channels != self.n_channels:
@@ -265,9 +264,11 @@ class FeatureExtractor(ABC):
                 missing.append(t)
         return missing
 
+
 ##############
 class HieraFeatures(FeatureExtractor):
     model_name = "facebook/hiera-tiny-224-hf"
+
     def __init__(
         self, 
         image_size: tuple[int, int],
@@ -285,13 +286,20 @@ class HieraFeatures(FeatureExtractor):
         self.final_grid_size = 7  # 7x7 grid
         self.n_channels = 3  # expects RGB images
         self.hidden_state_size = 768
-        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
+        self.image_processor = AutoImageProcessor.from_pretrained(self.model_name, do_rescale=False)
         self.model = HieraModel.from_pretrained(self.model_name)
         
         self.model.to(self.device)
+    
+    def _normalize_batch(self, b):
+        for i, im in enumerate(b):
+            b[i] = (im - im.min()) / (im.max() - im.min())
+
+        return b
         
     def _run_model(self, images) -> torch.Tensor:
         """Extracts embeddings from the model."""
+        images = self._normalize_batch(images)
         inputs = self.image_processor(images, return_tensors="pt", use_fast=True).to(self.device)
         
         with torch.no_grad():
