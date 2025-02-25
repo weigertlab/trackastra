@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
 
+import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -95,6 +96,30 @@ PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 
 ##############
 # Feature extraction from pretrained models
 # Currently meant to wrap any transformers model
+import time
+from functools import wraps
+
+
+def average_time_decorator(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not hasattr(wrapper, 'total_time'):
+            wrapper.total_time = 0
+            wrapper.call_count = 0
+        
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        elapsed_time = time.time() - start_time
+        
+        wrapper.total_time += elapsed_time
+        wrapper.call_count += 1
+        average_time = wrapper.total_time / wrapper.call_count
+        
+        print(f"Average time taken by {func.__name__}: {average_time:.6f} seconds over {wrapper.call_count} calls")
+        
+        return result
+    
+    return wrapper
 
 
 class FeatureExtractor(ABC):
@@ -187,25 +212,16 @@ class FeatureExtractor(ABC):
         """
         feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
         
-        if self.mode == "nearest_patch":  # TODO move to func
-            # find coordinate patches from detections
-            patch_coords = self._map_coords_to_cells(coords)
-            patch_idxs = self._find_nearest_cell(patch_coords)
-            # load the embeddings and extract the relevant ones
-            feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
-            indices = [y * self.final_grid_size + x for _, y, x in patch_idxs]
-
-            unique_timepoints = list(set(t for t, _, _ in patch_idxs))
-            embeddings_dict = {t: self._load_features(t) for t in unique_timepoints}
-
-            for i, (t, _, _) in enumerate(patch_idxs):
-                feats[i] = embeddings_dict[t][indices[i]]
-                
+        if self.mode == "nearest_patch":
+            feats = self._nearest_patches(coords)    
         elif self.mode == "mean_patches":
             if masks is None or labels is None or timepoints is None:
                 raise ValueError("Masks and labels must be provided for mean patch mode.")
             feats = self._mean_patches(masks, timepoints, labels)
-            
+        else:
+            raise NotImplementedError(f"Mode {self.mode} is not implemented.")
+        
+        assert feats.shape == (len(coords), self.hidden_state_size)
         return feats  # (n_regions, embedding_size)
     
     def precompute_embeddings(self, images):
@@ -249,7 +265,7 @@ class FeatureExtractor(ABC):
                     batch = np.repeat(batch, self.n_channels, axis=1)
                 yield timepoints, batch
     
-    def _map_coords_to_cells(self, coords):
+    def _map_coords_to_model_grid(self, coords):
         """Maps the detection coordinates to the corresponding image patches."""
         scale_x = self.input_size / self.orig_image_size[0]
         scale_y = self.input_size / self.orig_image_size[1]
@@ -269,6 +285,37 @@ class FeatureExtractor(ABC):
             patch_idxs.append((c[0], x_idx, y_idx))
         return patch_idxs
     
+    def _find_bbox_cells(self, regions: dict, cell_height: int, cell_width: int):
+        """Finds the cells in a grid that a bounding box belongs to.
+        
+        Args:
+        - regions (dict): Dictionary from regionprops. Must contain bbox.
+        - cell_height (int): Height of a cell in the grid.
+        - cell_width (int): Width of a cell in the grid.
+    
+        Returns:
+        - tuple: A tuple containing the grid cell indices that the bounding box intersects.
+        """
+        mask_patches = {}
+        for region in regions:
+            minr, minc, maxr, maxc = region.bbox
+            patches = self._find_region_cells(minr, minc, maxr, maxc, cell_height, cell_width)
+            mask_patches[region.label] = patches
+            
+        return mask_patches
+    
+    @staticmethod
+    def _find_region_cells(minr, minc, maxr, maxc, cell_height, cell_width):
+        start_patch_y = minr // cell_height
+        end_patch_y = (maxr - 1) // cell_height
+        start_patch_x = minc // cell_width
+        end_patch_x = (maxc - 1) // cell_width
+        patches = []
+        for i in range(start_patch_y, end_patch_y + 1):
+            for j in range(start_patch_x, end_patch_x + 1):
+                patches.append((i, j))
+        return patches
+    
     def _find_patches_for_masks(self, image_mask: np.ndarray) -> dict:
         """Find which patches in a grid each mask belongs to using regionprops.
         
@@ -280,45 +327,59 @@ class FeatureExtractor(ABC):
         """
         patch_height, patch_width = image_mask.shape[0] // self.final_grid_size, image_mask.shape[1] // self.final_grid_size
         regions = regionprops(image_mask)
-        mask_patches = {}
-        
-        for region in regions:
-            minr, minc, maxr, maxc = region.bbox
-            start_patch_y = minr // patch_height
-            end_patch_y = (maxr - 1) // patch_height
-            start_patch_x = minc // patch_width
-            end_patch_x = (maxc - 1) // patch_width
-            patches = []
-            for i in range(start_patch_y, end_patch_y + 1):
-                for j in range(start_patch_x, end_patch_x + 1):
-                    patches.append((i, j))
-            
-            mask_patches[region.label] = patches
-        
-        return mask_patches
+        return self._find_bbox_cells(regions, patch_height, patch_width)
     
-    def _mean_patches(self, masks, timepoints, labels):
+    def _nearest_patches(self, coords):
+        """Finds the nearest patches to the detections in the embedding."""
+        # find coordinate patches from detections
+        patch_coords = self._map_coords_to_model_grid(coords)
+        patch_idxs = self._find_nearest_cell(patch_coords)
+        # load the embeddings and extract the relevant ones
+        feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
+        indices = [y * self.final_grid_size + x for _, y, x in patch_idxs]
+
+        unique_timepoints = list(set(t for t, _, _ in patch_idxs))
+        embeddings_dict = {t: self._load_features(t) for t in unique_timepoints}
+
+        for i, (t, _, _) in enumerate(patch_idxs):
+            feats[i] = embeddings_dict[t][indices[i]]
+            
+        return feats
+    
+    # @average_time_decorator
+    def _mean_patches(self, masks, timepoints, labels, agg=torch.mean):
         """Averages the embeddings of all patches that intersect with the detection.
         
         Args:
             - masks (np.ndarray): Masks where each region has a unique label (t x H x W).
             - timepoints (np.ndarray): For each region, contains the corresponding timepoint. (n_regions)
             - labels (np.ndarray): Unique labels of the regions. (n_regions)
+            - agg (callable): Aggregation function to use for averaging the embeddings.
         """
         n_regions = len(timepoints)
+        timepoints_shifted = timepoints - timepoints.min()
         embeddings = torch.zeros(n_regions, self.hidden_state_size, device=self.device)
-        timepoints_s = timepoints - timepoints.min()
-        logger.debug(f"Timepoints: {timepoints}")
-        logger.debug(f"n_regions: {n_regions}")
         patches = []
-        for t in np.unique(timepoints_s):
-            patches.append(self._find_patches_for_masks(masks[t]))
-        logger.debug(f"Patch indices: {patches}")
-        for i, t in enumerate(timepoints_s):
+        times = np.unique(timepoints_shifted)
+        patches_res = joblib.Parallel(n_jobs=8, backend="threading")(
+            joblib.delayed(self._find_patches_for_masks)(masks[t]) for t in times
+        )   
+        patches = {t: patch for t, patch in zip(times, patches_res)}
+        logger.debug(f"Patches : {patches}")
+            
+        def process_region(i, t):
             patches_feats = []
             for patch in patches[t][labels[i]]:
-                patches_feats.append(self._load_features(t)[patch[0] * self.final_grid_size + patch[1]])    
-            embeddings[i] = torch.mean(torch.stack(patches_feats), dim=0)
+                features = self._load_features(t)    
+                patches_feats.append(features[patch[1] * self.final_grid_size + patch[0]])
+            return agg(torch.stack(patches_feats), dim=0)
+        
+        res = joblib.Parallel(n_jobs=8, backend="threading")(
+            joblib.delayed(process_region)(i, t) for i, t in enumerate(timepoints_shifted)
+        )
+
+        for i, r in enumerate(res):
+            embeddings[i] = r
 
         return embeddings
 
