@@ -746,8 +746,8 @@ class CTCData(Dataset):
                 image_size=img.shape[-2:],
                 save_path=self.img_folder / "embeddings",
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                mode="nearest_patch",
-                # mode="mean_patches",
+                # mode="nearest_patch",
+                mode="mean_patches",
             )
 
     def _build_windows(

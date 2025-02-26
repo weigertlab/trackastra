@@ -168,6 +168,7 @@ class FeatureExtractor(ABC):
         self.mode = mode
         # Saving parameters
         self.save_path: str | Path = save_path
+        self.embeddings = None
         
         if not isinstance(self.save_path, Path):
             self.save_path = Path(self.save_path)
@@ -237,14 +238,18 @@ class FeatureExtractor(ABC):
     def precompute_embeddings(self, images):
         """Precomputes embeddings for all images."""
         missing = self._check_existing_embeddings(range(len(images)))
+        all_embeddings = torch.zeros(len(images), self.final_grid_size**2, self.hidden_state_size, device=self.device)
         if len(missing) > 0:
             for ts, batches in tqdm(self._prepare_batches(images[missing]), total=len(images) // self.batch_size, desc="Computing embeddings"):
                 # logger.debug(f"Time points: {ts}")
                 # logger.debug(f"Batch size: {batches.shape}")
                 embeddings = self._run_model(batches)
-                for t, ft in zip(ts, embeddings):
-                    self._save_features(ft, t)
-    
+                all_embeddings[ts] = embeddings
+                # for t, ft in zip(ts, embeddings):
+                #     self._save_features(ft, t)
+        
+        self._save_features(all_embeddings)
+
     @abstractmethod
     def _run_model(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
         """Extracts embeddings from the model."""
@@ -277,23 +282,18 @@ class FeatureExtractor(ABC):
             yield timepoints, batch
     
     def _map_coords_to_model_grid(self, coords):
-        """Maps the detection coordinates to the corresponding image patches."""
         scale_x = self.input_size / self.orig_image_size[0]
         scale_y = self.input_size / self.orig_image_size[1]
-        patch_coords = []
-        for t, x, y in coords:
-            patch_x = int(x * scale_x)
-            patch_y = int(y * scale_y)
-            patch_coords.append((int(t), patch_x, patch_y))
+        coords = np.array(coords)
+        patch_x = (coords[:, 1] * scale_x).astype(int)
+        patch_y = (coords[:, 2] * scale_y).astype(int)
+        patch_coords = np.column_stack((coords[:, 0], patch_x, patch_y))
         return patch_coords
     
     def _find_nearest_cell(self, patch_coords):
-        """Finds the nearest patch to the detection in the embedding."""
-        patch_idxs = []
-        for c in patch_coords:
-            x_idx = c[1] // self.model_patch_size
-            y_idx = c[2] // self.model_patch_size
-            patch_idxs.append((c[0], x_idx, y_idx))
+        x_idxs = patch_coords[:, 1] // self.model_patch_size
+        y_idxs = patch_coords[:, 2] // self.model_patch_size
+        patch_idxs = np.column_stack((patch_coords[:, 0], x_idxs, y_idxs))
         return patch_idxs
     
     def _find_bbox_cells(self, regions: dict, cell_height: int, cell_width: int):
@@ -321,10 +321,7 @@ class FeatureExtractor(ABC):
         end_patch_y = (maxr - 1) // cell_height
         start_patch_x = minc // cell_width
         end_patch_x = (maxc - 1) // cell_width
-        patches = []
-        for i in range(start_patch_y, end_patch_y + 1):
-            for j in range(start_patch_x, end_patch_x + 1):
-                patches.append((i, j))
+        patches = np.array([(i, j) for i in range(start_patch_y, end_patch_y + 1) for j in range(start_patch_x, end_patch_x + 1)])
         return patches
     
     def _find_patches_for_masks(self, image_mask: np.ndarray) -> dict:
@@ -345,12 +342,14 @@ class FeatureExtractor(ABC):
         # find coordinate patches from detections
         patch_coords = self._map_coords_to_model_grid(coords)
         patch_idxs = self._find_nearest_cell(patch_coords)
+
         # load the embeddings and extract the relevant ones
         feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
         indices = [y * self.final_grid_size + x for _, y, x in patch_idxs]
 
         unique_timepoints = list(set(t for t, _, _ in patch_idxs))
-        embeddings_dict = {t: self._load_features(t) for t in unique_timepoints}
+        embeddings = self._load_features()
+        embeddings_dict = {t: embeddings[t] for t in unique_timepoints}
 
         for i, (t, _, _) in enumerate(patch_idxs):
             feats[i] = embeddings_dict[t][indices[i]]
@@ -369,20 +368,21 @@ class FeatureExtractor(ABC):
         """
         n_regions = len(timepoints)
         timepoints_shifted = timepoints - timepoints.min()
-        embeddings = torch.zeros(n_regions, self.hidden_state_size, device=self.device)
+        feats = torch.zeros(n_regions, self.hidden_state_size, device=self.device)
         patches = []
         times = np.unique(timepoints_shifted)
         patches_res = joblib.Parallel(n_jobs=8, backend="threading")(
             joblib.delayed(self._find_patches_for_masks)(masks[t]) for t in times
         )   
         patches = {t: patch for t, patch in zip(times, patches_res)}
-        logger.debug(f"Patches : {patches}")
+        # logger.debug(f"Patches : {patches}")
             
+        embeddings = self._load_features()    
+
         def process_region(i, t):
             patches_feats = []
             for patch in patches[t][labels[i]]:
-                features = self._load_features(t)    
-                patches_feats.append(features[patch[1] * self.final_grid_size + patch[0]])
+                patches_feats.append(embeddings[t][patch[1] * self.final_grid_size + patch[0]])
             return agg(torch.stack(patches_feats), dim=0)
         
         res = joblib.Parallel(n_jobs=8, backend="threading")(
@@ -390,26 +390,31 @@ class FeatureExtractor(ABC):
         )
 
         for i, r in enumerate(res):
-            embeddings[i] = r
+            feats[i] = r
 
-        return embeddings
+        return feats
 
     def _exact_patch(self, imgs, masks, coords):
         """Uses the image patch centered on the detection for embedding."""
         raise NotImplementedError()
     
-    def _save_features(self, features, timepoint):
+    def _save_features(self, features):  # , timepoint):
         """Saves the features to disk."""
-        save_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
+        # save_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
+        self.embeddings = features
+        save_path = self.save_path / f"{self.model_name_path}_features.npy"
         np.save(save_path, features.cpu().numpy())
         assert save_path.exists(), f"Failed to save features to {save_path}"
     
-    def _load_features(self, timepoint):
+    def _load_features(self):  # , timepoint):
         """Loads the features from disk."""
-        load_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
-        features = np.load(load_path)
-        assert features is not None, f"Failed to load features from {load_path}"
-        return torch.tensor(features).to(self.device)
+        # load_path = self.save_path / f"{timepoint}_{self.model_name_path}_features.npy"
+        if self.embeddings is None:
+            load_path = self.save_path / f"{self.model_name_path}_features.npy"
+            features = np.load(load_path)
+            assert features is not None, f"Failed to load features from {load_path}"
+            self.embeddings = torch.tensor(features).to(self.device)
+        return self.embeddings
    
     def _check_existing_embeddings(self, timepoints):
         """Checks if embeddings for all timepoints already exist."""
