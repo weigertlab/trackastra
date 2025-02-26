@@ -8,6 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
 from transformers import (
@@ -69,7 +70,8 @@ _PROPERTIES = {
 # forward declarations for indexing
 HieraFeatures = None
 DinoV2Features = None
-SamFeatures = None
+SAMFeatures = None
+SAM2Features = None
 
 _AVAILABLE_PRETRAINED_BACKBONES = {
     "facebook/hiera-tiny-224-hf": {
@@ -81,8 +83,12 @@ _AVAILABLE_PRETRAINED_BACKBONES = {
         "feat_dim": 768,
     },
     "facebook/sam-vit-base": {
-        "class": SamFeatures, 
+        "class": SAMFeatures, 
         "feat_dim": 256,
+    },
+    "facebook/sam2-hiera-large": {
+        "class": SAM2Features, 
+        "feat_dim": 256,  # FIXME figure out the feature dimension
     },
 }
 
@@ -90,6 +96,7 @@ PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 
     "facebook/hiera-tiny-224-hf",
     "facebook/dinov2-base",
     "facebook/sam-vit-base",
+    "facebook/sam2-hiera-large",
 ]
 
 ##############
@@ -152,6 +159,9 @@ class FeatureExtractor(ABC):
         # Data specs
         self.orig_image_size = image_size
         self.orig_n_channels = 1
+        self.do_rescale = True
+        self.channel_first = True
+        self.batch_return_type: Literal["list[np.ndarray]", "np.ndarray"] = "np.ndarray"
         # Parameters for embedding extraction
         self.batch_size = batch_size
         self.device = device
@@ -229,8 +239,8 @@ class FeatureExtractor(ABC):
         missing = self._check_existing_embeddings(range(len(images)))
         if len(missing) > 0:
             for ts, batches in tqdm(self._prepare_batches(images[missing]), total=len(images) // self.batch_size, desc="Computing embeddings"):
-                logger.debug(f"Time points: {ts}")
-                logger.debug(f"Batch size: {batches.shape}")
+                # logger.debug(f"Time points: {ts}")
+                # logger.debug(f"Batch size: {batches.shape}")
                 embeddings = self._run_model(batches)
                 for t, ft in zip(ts, embeddings):
                     self._save_features(ft, t)
@@ -247,23 +257,24 @@ class FeatureExtractor(ABC):
     
     def _prepare_batches(self, images):
         """Prepares batches of images for embedding extraction."""
-        # make batches if mode is exact_patch, otherwise prepare whole images and batch them
-        if self.mode == "exact_patch":
-            raise NotImplementedError()
-        else:
-            for i in range(0, len(images), self.batch_size):
-                end = i + self.batch_size
-                end = len(images) if end > len(images) else end
-                batch = np.expand_dims(images[i:end], axis=1)  # (B, C, H, W)
-                
-                # required by AutoImageProcessor (PIL Image needs [0, 1] range)
+        for i in range(0, len(images), self.batch_size):
+            end = i + self.batch_size
+            end = len(images) if end > len(images) else end
+            batch = np.expand_dims(images[i:end], axis=1)  # (B, C, H, W)
+            
+            # required by AutoImageProcessor (PIL Image needs [0, 1] range)
+            if self.do_rescale:
                 batch = self._rescale_batch(batch)  # TODO check if this is okay to do 
-                timepoints = range(i, end)
-                if self.n_channels > 1:  # repeat channels if needed
-                    if self.orig_n_channels > 1 and self.orig_n_channels != self.n_channels:
-                        raise ValueError("When more than one original channel is provided, the number of channels in the model must match the number of channels in the input.")
-                    batch = np.repeat(batch, self.n_channels, axis=1)
-                yield timepoints, batch
+            timepoints = range(i, end)
+            if self.n_channels > 1:  # repeat channels if needed
+                if self.orig_n_channels > 1 and self.orig_n_channels != self.n_channels:
+                    raise ValueError("When more than one original channel is provided, the number of channels in the model must match the number of channels in the input.")
+                batch = np.repeat(batch, self.n_channels, axis=1)
+            if not self.channel_first:
+                batch = np.moveaxis(batch, 1, -1)
+            if self.batch_return_type == "list[np.ndarray]":
+                batch = list([im for im in batch])
+            yield timepoints, batch
     
     def _map_coords_to_model_grid(self, coords):
         """Maps the detection coordinates to the corresponding image patches."""
@@ -492,7 +503,7 @@ class DinoV2Features(FeatureExtractor):
 _AVAILABLE_PRETRAINED_BACKBONES[DinoV2Features.model_name]["class"] = DinoV2Features
 
 
-class SamFeatures(FeatureExtractor):
+class SAMFeatures(FeatureExtractor):
     model_name = list(_AVAILABLE_PRETRAINED_BACKBONES.keys())[2]
 
     def __init__(
@@ -525,7 +536,45 @@ class SamFeatures(FeatureExtractor):
         return outputs.permute(0, 2, 3, 1).reshape(B, H * W, N)  # (B, grid_size**2, hidden_state_size)
         
 
-_AVAILABLE_PRETRAINED_BACKBONES[SamFeatures.model_name]["class"] = SamFeatures        
+_AVAILABLE_PRETRAINED_BACKBONES[SAMFeatures.model_name]["class"] = SAMFeatures
+
+
+class SAM2Features(FeatureExtractor):
+    model_name = list(_AVAILABLE_PRETRAINED_BACKBONES.keys())[3]
+    
+    def __init__(
+        self, 
+        image_size: tuple[int, int],
+        save_path: str | Path,
+        batch_size: int = 4,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        mode: Literal[
+            # "exact_patch",  # Uses the image patch centered on the detection for embedding
+            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+            ] = "nearest_patch",
+        ):
+        super().__init__(image_size, save_path, batch_size, device, mode)
+        self.input_size = 1024
+        self.final_grid_size = 64  # 64x64 grid
+        self.n_channels = 3   
+        self.hidden_state_size = 256        
+        self.model = SAM2ImagePredictor.from_pretrained(self.model_name)
+        
+        self.batch_return_type = "list[np.ndarray]"
+        self.channel_first = False
+    
+    def _run_model(self, images: list[np.ndarray]) -> torch.Tensor:
+        """Extracts embeddings from the model."""
+        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.bfloat16):
+            self.model.set_image_batch(images)
+            
+        features = self.model._features['image_embed']  # (B, hidden_state_size, grid_size, grid_size)
+        B, N, H, W = features.shape
+        return features.permute(0, 2, 3, 1).reshape(B, H * W, N)  # (B, grid_size**2, hidden_state_size)
+
+
+_AVAILABLE_PRETRAINED_BACKBONES[SAM2Features.model_name]["class"] = SAM2Features
 ##############
 ##############
 
