@@ -171,7 +171,6 @@ class FeatureExtractor(ABC):
     
     def forward(
             self, 
-            imgs, 
             coords,
             masks=None, 
             timepoints=None,
@@ -180,7 +179,6 @@ class FeatureExtractor(ABC):
         """Extracts embeddings from the model.
         
         Args:
-        - imgs (np.ndarray): Images to extract embeddings from.
         - coords (np.ndarray): Coordinates of the detections.
         - masks (np.ndarray): Masks where each region has a unique label for each timepoint.
         - timepoints (np.ndarray): For each region, contains the corresponding timepoint.
@@ -205,53 +203,42 @@ class FeatureExtractor(ABC):
         missing = self._check_existing_embeddings(len(images))
         all_embeddings = torch.zeros(len(images), self.final_grid_size**2, self.hidden_state_size, device=self.device)
         if missing:
-            for ts, batches in tqdm(self._prepare_batches(images[missing]), total=len(images) // self.batch_size, desc="Computing embeddings"):
+            for ts, batches in tqdm(self._prepare_batches(images), total=len(images) // self.batch_size, desc="Computing embeddings"):
                 embeddings = self._run_model(batches)
                 all_embeddings[ts] = embeddings
-                # for t, ft in zip(ts, embeddings):
-                #     self._save_features(ft, t)
             self._save_features(all_embeddings)
 
         region_embeddings = {}
         for n in tqdm(range(0, len(windows), window_size), desc="Extracting region embeddings"):
-            window_imgs = windows[n]["img"]
-            window_coords = windows[n]["coords"]
-            window_timepoints = windows[n]["timepoints"]
-            window_masks = windows[n]["mask"]
-            window_labels = windows[n]["labels"]
-            n_objects = np.unique(window_timepoints, return_counts=True)[1]
-            features = self.forward(
-                imgs=window_imgs,
-                coords=np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
-                masks=window_masks,
-                timepoints=window_timepoints,
-                labels=window_labels,
-                )  # (n_regions, embedding_size)
-            for t, obj_per_frame in enumerate(n_objects):
-                logger.debug(f"Frame {n + t} has {obj_per_frame} objects. n : {n}, t : {t}")
-                region_embeddings[n + t] = features[:obj_per_frame]
-                features = features[obj_per_frame:]
+            self._extract_region_embeddings(region_embeddings, windows[n], n)
+
         remaining = len(images) - len(region_embeddings)
         logger.debug(f"Remaining frames: {remaining}")
         if remaining > 0:
-            # process the n remaining frames in the last window
-            window = windows[-1]
-            n_objects = np.unique(window["timepoints"], return_counts=True)[1]
-            features = self.forward(
-                imgs=window["img"],
-                coords=np.concatenate((window["timepoints"][:, None], window["coords"]), axis=-1),
-                masks=window["mask"],
-                timepoints=window["timepoints"],
-                labels=window["labels"],
-                )
-            for i in range(remaining):
-                obj_per_frame = n_objects[-i - 1]
-                logger.debug(f"Frame {len(images) - i - 1} has {obj_per_frame} objects.")
-                region_embeddings[len(images) - i - 1] = features[:obj_per_frame]
-                features = features[obj_per_frame:]
-        
+            self._extract_region_embeddings(region_embeddings, windows[-1], len(images) - remaining, remaining)
+
         self.embeddings = None  # clear embeddings from memory
         return region_embeddings
+
+    def _extract_region_embeddings(self, region_embeddings, window, start_index, remaining=None):
+        window_coords = window["coords"]
+        window_timepoints = window["timepoints"]
+        window_masks = window["mask"]
+        window_labels = window["labels"]
+        n_objects = np.unique(window_timepoints, return_counts=True)[1]
+        features = self.forward(
+            coords=np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
+            masks=window_masks,
+            timepoints=window_timepoints,
+            labels=window_labels,
+        )  # (n_regions, embedding_size)
+        for i in range(remaining or len(n_objects)):
+            # if computing remaining frames' embeddings, start from the end
+            obj_per_frame = n_objects[-i - 1] if remaining else n_objects[i]
+            frame_index = start_index + i if not remaining else np.max(window_timepoints) - i
+            logger.debug(f"Frame {frame_index} has {obj_per_frame} objects.")
+            region_embeddings[frame_index] = features[:obj_per_frame]
+            features = features[obj_per_frame:]
     
     @abstractmethod
     def _run_model(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
@@ -263,6 +250,7 @@ class FeatureExtractor(ABC):
             # b[i] = (im - im.min()) / (im.max() - im.min())
             p1, p99 = np.percentile(im, (1, 99.8))
             b[i] = (im - p1) / (p99 - p1)
+            b[i] = np.clip(b[i], 0, 1)
         return b
     
     def _prepare_batches(self, images):
@@ -423,7 +411,10 @@ class FeatureExtractor(ABC):
    
     def _check_existing_embeddings(self, n_images):
         """Checks if embeddings for the model already exist."""
-        self._load_features()
+        try:
+            self._load_features()
+        except FileNotFoundError:
+            return True
         missing = (self.embeddings.shape[0] != n_images)
         if not missing:
             logger.info(f"Embeddings for {self.model_name} already exist. Skipping embedding extraction.")
@@ -459,6 +450,7 @@ class HieraFeatures(FeatureExtractor):
     def _run_model(self, images) -> torch.Tensor:
         """Extracts embeddings from the model."""
         images = self._rescale_batch(images)
+        logger.debug(f"Images shape: {images.shape}")
         inputs = self.image_processor(images, **self.im_proc_kwargs).to(self.device)
         
         with torch.no_grad():
