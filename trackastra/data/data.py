@@ -2,7 +2,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import joblib
 import lz4.frame
@@ -27,13 +27,16 @@ from trackastra.data.augmentations import (
     default_augmenter,
 )
 from trackastra.data.features import (
-    _AVAILABLE_PRETRAINED_BACKBONES,
     _PROPERTIES,
-    PretrainBackboneType,
     extract_features_patch,
     extract_features_regionprops,
 )
 from trackastra.data.matching import matching
+from trackastra.data.pretrained_features import (
+    AVAILABLE_PRETRAINED_BACKBONES,
+    FeatureExtractor,
+    PretrainBackboneType,
+)
 
 # from ..utils import blockwise_sum, normalize
 from trackastra.utils import blockwise_sum, normalize
@@ -196,12 +199,24 @@ class CTCData(Dataset):
                 f" {tuple(_PROPERTIES[ndim].keys())}"
             )
         
+        if features == "pretrained_feats":
+            try:
+                if TYPE_CHECKING:
+                    import transformers
+                    transformers.__version__
+            except ImportError as e:
+                msg = """Please install pretrained_feats extra requirements to use pretrained features mode.\n
+                Run :
+                    pip install trackastra[pretrained_feats]
+                to install the required dependencies.
+                """
+                raise ImportError(msg) from e        
         if features != "pretrained_feats" and pretrained_backbone is not None:
             raise ValueError("Pretrained features extraction can only be used with the 'pretrained_feats' feature type.")
         elif features == "pretrained_feats" and pretrained_backbone is None:
             raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
-        elif features == "pretrained_feats" and pretrained_backbone not in _AVAILABLE_PRETRAINED_BACKBONES.keys():
-            raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(_AVAILABLE_PRETRAINED_BACKBONES.keys())}")
+        elif features == "pretrained_feats" and pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
+            raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
         self.pretrained_model = pretrained_backbone
 
         logger.info(f"ROOT (config): \t{self.root}")
@@ -264,8 +279,13 @@ class CTCData(Dataset):
             self._compress_data()
 
         if self.pretrained_model is not None:
-            self._init_feature_extractor()
-            self.feature_extractor.precompute_embeddings(self.imgs)
+            img_shape = self.windows[0]["img"].shape[-2:]
+            self.feature_extractor = FeatureExtractor.from_model_name(self.pretrained_model, img_shape, save_path=self.img_folder / "embeddings")
+            self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
+            # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
+            self.feature_extractor = None
+        else:
+            self.pretrained_features = None
     # def from_ctc
 
     @classmethod
@@ -382,7 +402,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
-                "pretrained_feats": _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"],
+                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"] + 2,
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -737,18 +757,6 @@ class CTCData(Dataset):
             windows.extend(_w)
 
         return windows
-    
-    def _init_feature_extractor(self):
-        if self.pretrained_model is not None:
-            extractor_cls = _AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["class"]
-            img = self.windows[0]["img"]
-            self.feature_extractor = extractor_cls(
-                image_size=img.shape[-2:],
-                save_path=self.img_folder / "embeddings",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                # mode="nearest_patch",
-                mode="mean_patches",
-            )
 
     def _build_windows(
         self,
@@ -838,16 +846,6 @@ class CTCData(Dataset):
 
         logger.debug(f"Built {len(windows)} track windows from {det_folder}.\n")
         return windows
-
-    # TODO remove
-    def _start_timer(self):
-        import time
-        self.start_time = time.time()
-        
-    def _stop_timer(self, step_name):
-        import time
-        elapsed = time.time() - self.start_time
-        logger.debug(f"Time for {step_name}: {elapsed:.2f}s")
     
     def _apply_transform_and_check(self, img, labels, mask, coords, timepoints, min_time, assoc_matrix):
         (img2, mask2, coords2), idx = self.augmenter(
@@ -971,29 +969,17 @@ class CTCData(Dataset):
 
             features = np.concatenate(features, axis=0)
         elif self.features == "pretrained_feats":
-            self._start_timer()
             if self.augmenter is not None:
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
                     img, labels, mask, coords, timepoints, min_time, assoc_matrix
                 )
-            self._stop_timer("Augment")
-           
-            self._start_timer()
-            window_imgs = self.windows[n]["img"]
-            window_coords = self.windows[n]["coords"]
-            window_timepoints = self.windows[n]["timepoints"]
-            window_masks = self.windows[n]["mask"]
-            window_labels = self.windows[n]["labels"]
-            features = self.feature_extractor.forward(
-                imgs=window_imgs,
-                coords=np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
-                masks=window_masks,
-                timepoints=window_timepoints,
-                labels=window_labels,
-                )
-            self._stop_timer("Obtain features")
+            ts = np.unique(timepoints)
+            features = self.pretrained_features[0]
+            for t in ts[ts != 0]:
+                feat = self.pretrained_features[t]  # (timepoints -> (n_regions, n_features)) for a SINGLE timepoint
+                features = torch.cat((features, feat), dim=0)
+                
         # remove temporal offset and add timepoints to coords
-        self._start_timer()
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
 
@@ -1036,8 +1022,6 @@ class CTCData(Dataset):
 
             mask = torch.from_numpy(mask.astype(int)).long()
             res["mask"] = mask
-
-        self._stop_timer("Postproc")
         return res
 
     # wrfeat functions...
