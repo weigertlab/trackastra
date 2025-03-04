@@ -45,6 +45,11 @@ AVAILABLE_PRETRAINED_BACKBONES = {
         "feat_dim": 256,
     },
 }
+PretrainedFeatsExtractionMode = Literal[
+    # "exact_patch",  # Uses the image patch centered on the detection for embedding
+    "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
+    "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
+]
 
 PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
     "facebook/hiera-tiny-224-hf",
@@ -91,11 +96,7 @@ class FeatureExtractor(ABC):
         save_path: str | Path,
         batch_size: int = 4,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        mode: Literal[
-            # "exact_patch",  # Uses the image patch centered on the detection for embedding
-            "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
-            "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
-            ] = "nearest_patch",
+        mode: PretrainedFeatsExtractionMode  = "nearest_patch",
         ):
         # Image processor extra args
         self.im_proc_kwargs = {
@@ -158,9 +159,10 @@ class FeatureExtractor(ABC):
                         image_shape: tuple[int, int], 
                         save_path: str | Path, 
                         device: torch.device = "cuda" if torch.cuda.is_available() else "cpu",
-                        # mode="nearest_patch"
-                        mode="mean_patches"
+                        mode="nearest_patch"
+                        # mode="mean_patches"
                         ):
+        logger.info(f"Using model {model_name} with mode {mode} for pretrained feature extraction.")
         backbone = FeatureExtractor._available_backbones[model_name]["class"]
         return backbone(image_shape, save_path, device=device, mode=mode)
     

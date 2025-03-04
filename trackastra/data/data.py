@@ -36,6 +36,7 @@ from trackastra.data.pretrained_features import (
     AVAILABLE_PRETRAINED_BACKBONES,
     FeatureExtractor,
     PretrainBackboneType,
+    PretrainedFeatsExtractionMode
 )
 
 # from ..utils import blockwise_sum, normalize
@@ -149,6 +150,7 @@ class CTCData(Dataset):
         return_dense: bool = False,
         compress: bool = False,
         pretrained_backbone: PretrainBackboneType | None = None,
+        pretrained_features_extraction: PretrainedFeatsExtractionMode | None = "nearest_patch",
         **kwargs,
     ) -> None:
         """_summary_.
@@ -178,6 +180,12 @@ class CTCData(Dataset):
                 Return dense masks and images in the data samples.
             compress (bool):
                 Compress elements/remove img if not needed to save memory for large datasets
+            pretrained_backbone (str):
+                If features is set to "pretrained_feats", specify the pretrained backbone to use.
+                Required if features is set to "pretrained_feats", otherwise ignored.
+            pretrained_features_extraction (str):
+                If features is set to "pretrained_feats", specify the extraction mode to use.
+                Required if features is set to "pretrained_feats", otherwise ignored
         """
         super().__init__()
 
@@ -211,13 +219,15 @@ class CTCData(Dataset):
                 to install the required dependencies.
                 """
                 raise ImportError(msg) from e        
-        if features != "pretrained_feats" and pretrained_backbone is not None:
-            raise ValueError("Pretrained features extraction can only be used with the 'pretrained_feats' feature type.")
-        elif features == "pretrained_feats" and pretrained_backbone is None:
-            raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
-        elif features == "pretrained_feats" and pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
-            raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
+        if features == "pretrained_feats":
+            if pretrained_features_extraction is None:
+                raise ValueError("Pretrained features extraction mode must be specified.")
+            if pretrained_backbone is None:
+                raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
+            if pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
+                raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
         self.pretrained_model = pretrained_backbone
+        self.pretrained_feature_extraction = pretrained_features_extraction
 
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
@@ -280,7 +290,12 @@ class CTCData(Dataset):
 
         if self.pretrained_model is not None:
             img_shape = self.windows[0]["img"].shape[-2:]
-            self.feature_extractor = FeatureExtractor.from_model_name(self.pretrained_model, img_shape, save_path=self.img_folder / "embeddings")
+            self.feature_extractor = FeatureExtractor.from_model_name(
+                self.pretrained_model, 
+                img_shape, 
+                save_path=self.img_folder / "embeddings",
+                mode=self.pretrained_feature_extraction
+                )
             self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
             # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
             self.feature_extractor = None
