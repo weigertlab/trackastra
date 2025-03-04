@@ -158,7 +158,8 @@ class FeatureExtractor(ABC):
                         image_shape: tuple[int, int], 
                         save_path: str | Path, 
                         device: torch.device = "cuda" if torch.cuda.is_available() else "cpu",
-                        mode="nearest_patch"
+                        # mode="nearest_patch"
+                        mode="mean_patches"
                         ):
         backbone = FeatureExtractor._available_backbones[model_name]["class"]
         return backbone(image_shape, save_path, device=device, mode=mode)
@@ -225,18 +226,24 @@ class FeatureExtractor(ABC):
         window_timepoints = window["timepoints"]
         window_masks = window["mask"]
         window_labels = window["labels"]
-        n_objects = np.unique(window_timepoints, return_counts=True)[1]
+        n_regions_per_frame = np.unique(window_timepoints, return_counts=True)[1]
+        tot_regions = n_regions_per_frame.sum()
+        coords_txy = np.concatenate((window_timepoints[:, None], window_coords), axis=-1)
+        if coords_txy.shape[0] != tot_regions:
+            raise RuntimeError(f"Number of coords ({coords_txy.shape[0]}) does not match the number of coordinates ({window_timepoints.shape[0]}).")
         features = self.forward(
-            coords=np.concatenate((window_timepoints[:, None], window_coords), axis=-1),
+            coords=coords_txy,
             masks=window_masks,
             timepoints=window_timepoints,
             labels=window_labels,
         )  # (n_regions, embedding_size)
-        for i in range(remaining or len(n_objects)):
+        if tot_regions != features.shape[0]:
+            raise RuntimeError(f"Number of regions ({n_regions_per_frame}) does not match the number of embeddings ({features.shape[0]}).")
+        for i in range(remaining or len(n_regions_per_frame)):
             # if computing remaining frames' embeddings, start from the end
-            obj_per_frame = n_objects[-i - 1] if remaining else n_objects[i]
+            obj_per_frame = n_regions_per_frame[-i - 1] if remaining else n_regions_per_frame[i]
             frame_index = start_index + i if not remaining else np.max(window_timepoints) - i
-            logger.debug(f"Frame {frame_index} has {obj_per_frame} objects.")
+            # logger.debug(f"Frame {frame_index} has {obj_per_frame} objects.")
             region_embeddings[frame_index] = features[:obj_per_frame]
             features = features[obj_per_frame:]
     
@@ -560,7 +567,7 @@ class SAM2Features(FeatureExtractor):
         self.final_grid_size = 64  # 64x64 grid
         self.n_channels = 3   
         self.hidden_state_size = 256        
-        self.model = SAM2ImagePredictor.from_pretrained(self.model_name)
+        self.model = SAM2ImagePredictor.from_pretrained(self.model_name, device=self.device)
         
         self.batch_return_type = "list[np.ndarray]"
         self.channel_first = False

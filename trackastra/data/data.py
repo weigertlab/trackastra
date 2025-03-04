@@ -402,7 +402,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
-                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"] + 2,
+                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"],
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -973,12 +973,20 @@ class CTCData(Dataset):
                 img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
                     img, labels, mask, coords, timepoints, min_time, assoc_matrix
                 )
-            ts = np.unique(timepoints)
-            features = self.pretrained_features[0]
-            for t in ts[ts != 0]:
+            ts, n_obj = np.unique(timepoints, return_counts=True)
+            features = torch.zeros((n_obj.sum(), self.feat_dim))
+            offset = 0
+
+            for t, count in zip(ts, n_obj):
                 feat = self.pretrained_features[t]  # (timepoints -> (n_regions, n_features)) for a SINGLE timepoint
-                features = torch.cat((features, feat), dim=0)
-                
+                if feat.shape[0] != count:
+                    raise ValueError(f"Feature mismatch at time {t}: expected {count}, got {feat.shape[0]}")
+                features[offset:offset + count] = feat
+                offset += count
+
+            if features.shape[0] != len(timepoints):
+                raise ValueError(f"Pretrained features shape mismatch: {features.shape[0]} != {len(timepoints)}")
+
         # remove temporal offset and add timepoints to coords
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
