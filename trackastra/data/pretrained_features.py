@@ -96,7 +96,7 @@ class FeatureExtractor(ABC):
         save_path: str | Path,
         batch_size: int = 4,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        mode: PretrainedFeatsExtractionMode  = "nearest_patch",
+        mode: PretrainedFeatsExtractionMode = "nearest_patch",
         ):
         # Image processor extra args
         self.im_proc_kwargs = {
@@ -426,7 +426,7 @@ class FeatureExtractor(ABC):
             return True
         missing = (self.embeddings.shape[0] != n_images)
         if not missing:
-            logger.info(f"Embeddings for {self.model_name} already exist. Skipping embedding extraction.")
+            logger.info(f"Embeddings for {self.model_name} already exist. Skipping embedding computation.")
         return missing
 
 
