@@ -27,24 +27,9 @@ SAMFeatures = None
 SAM2Features = None
 
 # Updated with actual class after each definition
-AVAILABLE_PRETRAINED_BACKBONES = {
-    "facebook/hiera-tiny-224-hf": {
-        "class": HieraFeatures, 
-        "feat_dim": 768,
-    },
-    "facebook/dinov2-base": {
-        "class": DinoV2Features, 
-        "feat_dim": 768,
-    },
-    "facebook/sam-vit-base": {
-        "class": SAMFeatures, 
-        "feat_dim": 256,
-    },
-    "facebook/sam2-hiera-large": {
-        "class": SAM2Features, 
-        "feat_dim": 256,
-    },
-}
+# See register_backbone decorator
+AVAILABLE_PRETRAINED_BACKBONES = {}
+
 PretrainedFeatsExtractionMode = Literal[
     # "exact_patch",  # Uses the image patch centered on the detection for embedding
     "nearest_patch",  # Runs on whole image, then finds the nearest patch to the detection in the embedding
@@ -52,11 +37,23 @@ PretrainedFeatsExtractionMode = Literal[
 ]
 
 PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
-    "facebook/hiera-tiny-224-hf",
-    "facebook/dinov2-base",
-    "facebook/sam-vit-base",
-    "facebook/sam2-hiera-large",
+    "facebook/hiera-tiny-224-hf",  # 768
+    "facebook/dinov2-base",  # 768
+    "facebook/sam-vit-base",  # 256
+    "facebook/sam2-hiera-large",  # 256
+    "facebook/sam2.1-hiera-base-plus",  # 256
 ]
+
+
+def register_backbone(model_name, feat_dim):
+    def decorator(cls):
+        AVAILABLE_PRETRAINED_BACKBONES[model_name] = {
+            "class": cls,
+            "feat_dim": feat_dim,
+        }
+        return cls
+    return decorator
+
 
 # Feature extraction from pretrained models
 # Currently meant to wrap any transformers model
@@ -88,7 +85,7 @@ def average_time_decorator(func):
 
 class FeatureExtractor(ABC):
     model_name = None
-    _available_backbones = AVAILABLE_PRETRAINED_BACKBONES
+    _available_backbones = None
 
     def __init__(
         self, 
@@ -162,8 +159,12 @@ class FeatureExtractor(ABC):
                         mode="nearest_patch"
                         # mode="mean_patches"
                         ):
+        cls._available_backbones = AVAILABLE_PRETRAINED_BACKBONES
+        if model_name not in cls._available_backbones:
+            raise ValueError(f"Model {model_name} is not available for feature extraction.")
         logger.info(f"Using model {model_name} with mode {mode} for pretrained feature extraction.")
-        backbone = FeatureExtractor._available_backbones[model_name]["class"]
+        backbone = cls._available_backbones[model_name]["class"]
+        backbone.model_name = model_name
         return backbone(image_shape, save_path, device=device, mode=mode)
     
     def _set_model_patch_size(self):
@@ -171,7 +172,7 @@ class FeatureExtractor(ABC):
             self.model_patch_size = self.input_size // self.final_grid_size
             if not self.input_size % self.final_grid_size == 0:
                 raise ValueError("The input size must be divisible by the final grid size.")
-    
+
     def forward(
             self, 
             coords,
@@ -431,8 +432,9 @@ class FeatureExtractor(ABC):
 
 
 ##############
+@register_backbone("facebook/hiera-tiny-224-hf", 768)
 class HieraFeatures(FeatureExtractor):
-    model_name = next(iter(AVAILABLE_PRETRAINED_BACKBONES.keys()))
+    model_name = "facebook/hiera-tiny-224-hf"
 
     def __init__(
         self, 
@@ -468,11 +470,9 @@ class HieraFeatures(FeatureExtractor):
         return outputs.last_hidden_state
     
 
-AVAILABLE_PRETRAINED_BACKBONES[HieraFeatures.model_name]["class"] = HieraFeatures
-
-
+@register_backbone("facebook/dinov2-base", 768)
 class DinoV2Features(FeatureExtractor):
-    model_name = list(AVAILABLE_PRETRAINED_BACKBONES.keys())[1]
+    model_name = "facebook/dinov2-base"
 
     def __init__(
         self, 
@@ -510,11 +510,9 @@ class DinoV2Features(FeatureExtractor):
         return outputs.last_hidden_state[:, 1:, :]
     
 
-AVAILABLE_PRETRAINED_BACKBONES[DinoV2Features.model_name]["class"] = DinoV2Features
-
-
+@register_backbone("facebook/sam-vit-base", 256)
 class SAMFeatures(FeatureExtractor):
-    model_name = list(AVAILABLE_PRETRAINED_BACKBONES.keys())[2]
+    model_name = "facebook/sam-vit-base"
 
     def __init__(
         self, 
@@ -546,11 +544,10 @@ class SAMFeatures(FeatureExtractor):
         return outputs.permute(0, 2, 3, 1).reshape(B, H * W, N)  # (B, grid_size**2, hidden_state_size)
         
 
-AVAILABLE_PRETRAINED_BACKBONES[SAMFeatures.model_name]["class"] = SAMFeatures
-
-
+@register_backbone("facebook/sam2-hiera-large", 256)
+@register_backbone("facebook/sam2.1-hiera-base-plus", 256)
 class SAM2Features(FeatureExtractor):
-    model_name = list(AVAILABLE_PRETRAINED_BACKBONES.keys())[3]
+    model_name = "facebook/sam2.1-hiera-base-plus"
     
     def __init__(
         self, 
@@ -582,9 +579,6 @@ class SAM2Features(FeatureExtractor):
         features = self.model._features['image_embed']  # (B, hidden_state_size, grid_size, grid_size)
         B, N, H, W = features.shape
         return features.permute(0, 2, 3, 1).reshape(B, H * W, N)  # (B, grid_size**2, hidden_state_size)
-
-
-AVAILABLE_PRETRAINED_BACKBONES[SAM2Features.model_name]["class"] = SAM2Features
-
+    
 
 FeatureExtractor._available_backbones = AVAILABLE_PRETRAINED_BACKBONES
