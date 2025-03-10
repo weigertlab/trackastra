@@ -11,7 +11,10 @@ from skimage.measure import regionprops
 from tqdm import tqdm
 from transformers import (
     AutoImageProcessor,
+    # Dinov2Config,
+    # Dinov2Model,
     AutoModel,
+    HieraConfig,
     HieraModel,
     SamModel,
     SamProcessor,
@@ -97,9 +100,11 @@ class FeatureExtractor(ABC):
         ):
         # Image processor extra args
         self.im_proc_kwargs = {
-            "do_rescale": False,  # both steps are replaced by percentile normalization
+            "do_rescale": False,
             "do_normalize": False,
+            "do_resize": True,
             "return_tensors": "pt",
+            "do_center_crop": False,
         }
         # Model specs
         self.model = None
@@ -170,8 +175,8 @@ class FeatureExtractor(ABC):
     def _set_model_patch_size(self):
         if self.final_grid_size is not None and self.input_size is not None:
             self.model_patch_size = self.input_size // self.final_grid_size
-            if not self.input_size % self.final_grid_size == 0:
-                raise ValueError("The input size must be divisible by the final grid size.")
+            # if not self.input_size % self.final_grid_size == 0:
+            # raise ValueError("The input size must be divisible by the final grid size.")
 
     def forward(
             self, 
@@ -209,6 +214,7 @@ class FeatureExtractor(ABC):
         if missing:
             for ts, batches in tqdm(self._prepare_batches(images), total=len(images) // self.batch_size, desc="Computing embeddings"):
                 embeddings = self._run_model(batches)
+                # logger.debug(f"Embeddings shape: {embeddings.shape}")
                 all_embeddings[ts] = embeddings
             self._save_features(all_embeddings)
 
@@ -345,13 +351,16 @@ class FeatureExtractor(ABC):
         # find coordinate patches from detections
         patch_coords = self._map_coords_to_model_grid(coords)
         patch_idxs = self._find_nearest_cell(patch_coords)
+        # logger.debug(f"Patch indices: {patch_idxs}")
 
         # load the embeddings and extract the relevant ones
         feats = torch.zeros(len(coords), self.hidden_state_size, device=self.device)
         indices = [y * self.final_grid_size + x for _, y, x in patch_idxs]
 
         unique_timepoints = list(set(t for t, _, _ in patch_idxs))
+        # logger.debug(f"Unique timepoints: {unique_timepoints}")
         embeddings = self._load_features()
+        # logger.debug(f"Embeddings shape: {embeddings.shape}")
         embeddings_dict = {t: embeddings[t] for t in unique_timepoints}
 
         for i, (t, _, _) in enumerate(patch_idxs):
@@ -449,19 +458,33 @@ class HieraFeatures(FeatureExtractor):
             ] = "nearest_patch",
         ):
         super().__init__(image_size, save_path, batch_size, device, mode)
-        self.input_size = 224
-        self.final_grid_size = 7  # 7x7 grid
-        self.n_channels = 3  # expects RGB images
+        # self.input_size = 224
+        self.input_mul = 3
+        self.input_size = self.input_mul * 224
+        self.final_grid_size = 7 * self.input_mul  # 14x14 grid
+        self.n_channels = 3
         self.hidden_state_size = 768
+
+        ##
+        self.im_proc_kwargs["size"] = (self.input_size, self.input_size)
+        ##
         self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self.model = HieraModel.from_pretrained(self.model_name)
-        
+        config = HieraConfig.from_pretrained(self.model_name)
+        config.image_size = [self.input_size, self.input_size]
+        # logger.debug(f"Config: {config}")
+        # self.model = HieraModel.from_pretrained(self.model_name)
+        # self.model.config.image_size = [self.input_size, self.input_size]
+        self.model = HieraModel(config)
         self.model.to(self.device)
-        
+        # self.model.embeddings.patch_embeddings.num_patches = (self.input_size // self.model.config.patch_size[0]) ** 2
+        # self.model.embeddings.position_embeddings = torch.nn.Parameter(
+        #     torch.zeros(1, self.model.embeddings.patch_embeddings.num_patches + 1, self.hidden_state_size)
+        # )
+        # self.model.embeddings.position_ids = torch.arange(0, self.model.embeddings.patch_embeddings.num_patches + 1).unsqueeze(0)
+
     def _run_model(self, images) -> torch.Tensor:
         """Extracts embeddings from the model."""
         images = self._rescale_batch(images)
-        logger.debug(f"Images shape: {images.shape}")
         inputs = self.image_processor(images, **self.im_proc_kwargs).to(self.device)
         
         with torch.no_grad():
@@ -492,8 +515,16 @@ class DinoV2Features(FeatureExtractor):
         self.n_channels = 3  # expects RGB images
         self.hidden_state_size = 768
         self.image_processor = AutoImageProcessor.from_pretrained(self.model_name)
+        ##
+        self.im_proc_kwargs["size"] = (self.input_size, self.input_size)
+        ##
         self.model = AutoModel.from_pretrained(self.model_name)
+        # config = Dinov2Config.from_pretrained(self.model_name)
+        # config.image_size = self.input_size
         
+        # self.model = Dinov2Model(config)
+        # logger.info(f"Model from config: {self.model.config}")
+        # logger.info(f"Pretrained model : {Dinov2Model.from_pretrained(self.model_name).config}")
         self.model.to(self.device)
         
     def _run_model(self, images) -> torch.Tensor:
@@ -507,6 +538,7 @@ class DinoV2Features(FeatureExtractor):
         # this way we get only the patch embeddings
         # which are compatible with finding the relevant patches directly
         # in the rest of the code
+        self.final_grid_size = np.sqrt(504)
         return outputs.last_hidden_state[:, 1:, :]
     
 

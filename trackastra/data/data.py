@@ -36,7 +36,7 @@ from trackastra.data.pretrained_features import (
     AVAILABLE_PRETRAINED_BACKBONES,
     FeatureExtractor,
     PretrainBackboneType,
-    PretrainedFeatsExtractionMode
+    PretrainedFeatsExtractionMode,
 )
 
 # from ..utils import blockwise_sum, normalize
@@ -298,6 +298,7 @@ class CTCData(Dataset):
                 )
             self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
             # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
+            self.feature_extractor_input_size = self.feature_extractor.input_size
             self.feature_extractor = None
         else:
             self.pretrained_features = None
