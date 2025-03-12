@@ -150,7 +150,7 @@ class CTCData(Dataset):
         return_dense: bool = False,
         compress: bool = False,
         pretrained_backbone: PretrainBackboneType | None = None,
-        pretrained_features_extraction: PretrainedFeatsExtractionMode | None = "nearest_patch",
+        pretrained_features_extraction_mode: PretrainedFeatsExtractionMode | None = "nearest_patch",
         **kwargs,
     ) -> None:
         """_summary_.
@@ -183,7 +183,7 @@ class CTCData(Dataset):
             pretrained_backbone (str):
                 If features is set to "pretrained_feats", specify the pretrained backbone to use.
                 Required if features is set to "pretrained_feats", otherwise ignored.
-            pretrained_features_extraction (str):
+            pretrained_features_extraction_mode (str):
                 If features is set to "pretrained_feats", specify the extraction mode to use.
                 Required if features is set to "pretrained_feats", otherwise ignored
         """
@@ -220,14 +220,14 @@ class CTCData(Dataset):
                 """
                 raise ImportError(msg) from e        
         if features == "pretrained_feats":
-            if pretrained_features_extraction is None:
+            if pretrained_features_extraction_mode is None:
                 raise ValueError("Pretrained features extraction mode must be specified.")
             if pretrained_backbone is None:
                 raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
             if pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
                 raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
-        self.pretrained_model = pretrained_backbone
-        self.pretrained_feature_extraction = pretrained_features_extraction
+        self.pretrained_backbone_name = pretrained_backbone
+        self.pretrained_feature_extraction_mode = pretrained_features_extraction_mode
 
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
@@ -288,20 +288,13 @@ class CTCData(Dataset):
         if self.compress:
             self._compress_data()
 
-        if self.pretrained_model is not None:
-            img_shape = self.windows[0]["img"].shape[-2:]
-            self.feature_extractor = FeatureExtractor.from_model_name(
-                self.pretrained_model, 
-                img_shape, 
-                save_path=self.img_folder / "embeddings",
-                mode=self.pretrained_feature_extraction
-                )
-            self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
-            # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
-            self.feature_extractor_input_size = self.feature_extractor.input_size
-            self.feature_extractor = None
-        else:
-            self.pretrained_features = None
+        # Use pretrained model for feature extraction if specified
+        self._pretrained_model_input_size_factor = 1
+        self.feature_extractor_input_size = None
+        self.pretrained_features = None
+        
+        self._compute_pretrained_model_features()
+            
     # def from_ctc
 
     @classmethod
@@ -371,7 +364,7 @@ class CTCData(Dataset):
 
         if self.compress:
             self._compress_data()
-
+            
     def _get_ndivs(self, windows):
         n_divs = []
         for w in tqdm(windows, desc="Counting divisions", leave=False):
@@ -418,7 +411,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
-                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_model]["feat_dim"],
+                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone_name]["feat_dim"],
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -1344,6 +1337,46 @@ class CTCData(Dataset):
             res["mask"] = mask
 
         return res
+
+    def _compute_pretrained_model_features(self):
+        if self.pretrained_backbone_name is not None:
+            img_shape = self.windows[0]["img"].shape[-2:]
+            self.feature_extractor = FeatureExtractor.from_model_name(
+                self.pretrained_backbone_name, 
+                img_shape, 
+                save_path=self.img_folder / "embeddings",
+                mode=self.pretrained_feature_extraction_mode
+                )
+            try:
+                self.feature_extractor.input_mul = self._pretrained_model_input_size_factor
+            except Exception:
+                logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_backbone_name}")
+            self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
+            # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
+            self.feature_extractor_input_size = self.feature_extractor.input_size
+            self.feature_extractor = None
+        else:
+            logger.warning("No pretrained model set, feature axtraction not run")
+
+    def compute_pretrained_features(self, input_size_factor: int | None = None, model: PretrainBackboneType = None, mode: PretrainedFeatsExtractionMode = "nearest_patch"):
+        """Compute pretrained features for the dataset, if the model. input size factor or mode was changed.
+        
+        Args:
+            input_size_factor (int, optional): The input size factor for the pretrained model. Defaults to None.
+            model (PretrainBackboneType, optional): The pretrained model to use. Defaults to None.
+            mode (PretrainedFeatsExtractionMode, optional): The mode to use for feature extraction. Defaults to "nearest_patch".
+        """
+        if input_size_factor is not None:
+            self._pretrained_model_input_size_factor = input_size_factor
+        if model is not None:
+            self.pretrained_backbone_name = model
+        if mode is not None:
+            self.pretrained_feature_extraction_mode = mode
+        if input_size_factor is None and model is None and mode is None:
+            logger.warning("No changes in input size factor, model or mode. Skipping feature extraction.")
+            return
+        else:
+            self._compute_pretrained_model_features()
 
 
 def _ctc_lineages(df, masks, t1=0, t2=None):
