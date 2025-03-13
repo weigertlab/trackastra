@@ -226,7 +226,7 @@ class CTCData(Dataset):
                 raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
             if pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
                 raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
-        self.pretrained_backbone_name = pretrained_backbone
+        self._pretrained_backbone_name = pretrained_backbone
         self.pretrained_feature_extraction_mode = pretrained_features_extraction_mode
 
         logger.info(f"ROOT (config): \t{self.root}")
@@ -296,6 +296,15 @@ class CTCData(Dataset):
         self._compute_pretrained_model_features()
             
     # def from_ctc
+    
+    @property
+    def pretrained_backbone_name(self):
+        return self._pretrained_backbone_name
+    
+    @pretrained_backbone_name.setter
+    def pretrained_backbone_name(self, value):
+        self._pretrained_backbone_name = value
+        self.feat_dim = AVAILABLE_PRETRAINED_BACKBONES[value]["feat_dim"]
 
     @classmethod
     def from_arrays(cls, imgs: np.ndarray, masks: np.ndarray, train_args: dict):
