@@ -60,6 +60,7 @@ def predict_windows(
     edge_threshold: float = 0.05,
     spatial_dim: int = 3,
     progbar_class=tqdm,
+    pred_func_override=None,
 ) -> dict:
     """_summary_.
 
@@ -71,6 +72,7 @@ def predict_windows(
         delta_t (_type_, optional): _description_. Defaults to 1.
         edge_threshold (_type_, optional): _description_. Defaults to 0.05.
         spatial_dim: Dimensionality of the input masks. This might be < model.coord_dim
+        pred_func_override: Function to override the prediction function. This is useful for debugging.
 
     Returns:
         _type_: _description_
@@ -109,9 +111,17 @@ def predict_windows(
         # This assumes that the samples in the dataset are ordered by time and start at 0.
         batch = windows[t]
         timepoints = batch["timepoints"]
+        if isinstance(timepoints, torch.Tensor):
+            timepoints = timepoints.cpu().numpy()
         labels = batch["labels"]
-
-        A = predict(batch, model)
+        if isinstance(labels, torch.Tensor):
+            labels = labels.cpu().numpy()
+    
+        if pred_func_override is None:
+            A = predict(batch, model)
+        else:
+            A = pred_func_override(batch) 
+        
 
         dt = timepoints[None, :] - timepoints[:, None]
         time_mask = np.logical_and(dt <= delta_t, dt > 0)
