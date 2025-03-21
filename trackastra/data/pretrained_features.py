@@ -39,7 +39,7 @@ PretrainedFeatsExtractionMode = Literal[
     "mean_patches"  # Runs on whole image, then averages the embeddings of all patches that intersect with the detection
 ]
 
-PretrainBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
+PretrainedBackboneType = Literal[  # cannot unpack this directly in python < 3.11 so it has to be copied
     "facebook/hiera-tiny-224-hf",  # 768
     "facebook/dinov2-base",  # 768
     "facebook/sam-vit-base",  # 256
@@ -157,7 +157,7 @@ class FeatureExtractor(ABC):
     
     @classmethod
     def from_model_name(cls, 
-                        model_name: PretrainBackboneType, 
+                        model_name: PretrainedBackboneType, 
                         image_shape: tuple[int, int], 
                         save_path: str | Path, 
                         device: torch.device = "cuda" if torch.cuda.is_available() else "cpu",
@@ -207,7 +207,7 @@ class FeatureExtractor(ABC):
         assert feats.shape == (len(coords), self.hidden_state_size)
         return feats  # (n_regions, embedding_size)
     
-    def precompute_region_embeddings(self, images, windows, window_size):
+    def precompute_region_embeddings(self, images): # , windows, window_size):
         """Precomputes embeddings for all images."""
         missing = self._check_existing_embeddings(len(images))
         all_embeddings = torch.zeros(len(images), self.final_grid_size**2, self.hidden_state_size, device=self.device)
@@ -217,44 +217,50 @@ class FeatureExtractor(ABC):
                 # logger.debug(f"Embeddings shape: {embeddings.shape}")
                 all_embeddings[ts] = embeddings
             self._save_features(all_embeddings)
+        return self.embeddings
+        # region_embeddings = {}
+        # for n in tqdm(range(0, len(windows), window_size), desc="Extracting region embeddings"):
+        #     self._extract_region_embeddings(region_embeddings, windows[n], n)
 
-        region_embeddings = {}
-        for n in tqdm(range(0, len(windows), window_size), desc="Extracting region embeddings"):
-            self._extract_region_embeddings(region_embeddings, windows[n], n)
+        # remaining = len(images) - len(region_embeddings)
+        # logger.debug(f"Remaining frames: {remaining}")
+        # if remaining > 0:
+        #     self._extract_region_embeddings(region_embeddings, windows[-1], len(images) - remaining, remaining)
 
-        remaining = len(images) - len(region_embeddings)
-        logger.debug(f"Remaining frames: {remaining}")
-        if remaining > 0:
-            self._extract_region_embeddings(region_embeddings, windows[-1], len(images) - remaining, remaining)
+        # self.embeddings = None  # clear embeddings from memory
+        # return region_embeddings
 
-        self.embeddings = None  # clear embeddings from memory
-        return region_embeddings
-
-    def _extract_region_embeddings(self, region_embeddings, window, start_index, remaining=None):
+    def _extract_region_embeddings(self, all_frames_embeddings, window, start_index, remaining=None):
         window_coords = window["coords"]
         window_timepoints = window["timepoints"]
         window_masks = window["mask"]
         window_labels = window["labels"]
-        n_regions_per_frame = np.unique(window_timepoints, return_counts=True)[1]
-        tot_regions = n_regions_per_frame.sum()
-        coords_txy = np.concatenate((window_timepoints[:, None], window_coords), axis=-1)
-        if coords_txy.shape[0] != tot_regions:
-            raise RuntimeError(f"Number of coords ({coords_txy.shape[0]}) does not match the number of coordinates ({window_timepoints.shape[0]}).")
-        features = self.forward(
-            coords=coords_txy,
-            masks=window_masks,
-            timepoints=window_timepoints,
-            labels=window_labels,
-        )  # (n_regions, embedding_size)
-        if tot_regions != features.shape[0]:
-            raise RuntimeError(f"Number of regions ({n_regions_per_frame}) does not match the number of embeddings ({features.shape[0]}).")
+        
+        n_regions_per_frame, features = self._extract_embedding(window_masks, window_timepoints, window_labels, window_coords)
+        
         for i in range(remaining or len(n_regions_per_frame)):
             # if computing remaining frames' embeddings, start from the end
             obj_per_frame = n_regions_per_frame[-i - 1] if remaining else n_regions_per_frame[i]
             frame_index = start_index + i if not remaining else np.max(window_timepoints) - i
             # logger.debug(f"Frame {frame_index} has {obj_per_frame} objects.")
-            region_embeddings[frame_index] = features[:obj_per_frame]
+            all_frames_embeddings[frame_index] = features[:obj_per_frame]
             features = features[obj_per_frame:]
+    
+    def _extract_embedding(self, masks, timepoints, labels, coords):
+        n_regions_per_frame = np.unique(timepoints, return_counts=True)[1]
+        tot_regions = n_regions_per_frame.sum()
+        coords_txy = np.concatenate((timepoints[:, None], coords), axis=-1)
+        if coords_txy.shape[0] != tot_regions:
+            raise RuntimeError(f"Number of coords ({coords_txy.shape[0]}) does not match the number of coordinates ({timepoints.shape[0]}).")
+        features = self.forward(
+            coords=coords_txy,
+            masks=masks,
+            timepoints=timepoints,
+            labels=labels,
+        )
+        if tot_regions != features.shape[0]:
+            raise RuntimeError(f"Number of regions ({n_regions_per_frame}) does not match the number of embeddings ({features.shape[0]}).")
+        return n_regions_per_frame, features
     
     @abstractmethod
     def _run_model(self, images) -> torch.Tensor:  # must return (B, grid_size**2, hidden_state_size)
@@ -302,7 +308,7 @@ class FeatureExtractor(ABC):
     def _find_nearest_cell(self, patch_coords):
         x_idxs = patch_coords[:, 1] // self.model_patch_size
         y_idxs = patch_coords[:, 2] // self.model_patch_size
-        patch_idxs = np.column_stack((patch_coords[:, 0], x_idxs, y_idxs))
+        patch_idxs = np.column_stack((patch_coords[:, 0], x_idxs, y_idxs)).astype(int)
         return patch_idxs
     
     def _find_bbox_cells(self, regions: dict, cell_height: int, cell_width: int):

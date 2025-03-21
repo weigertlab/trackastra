@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
 from typing import TYPE_CHECKING, Literal
+import os
 
 import joblib
 import lz4.frame
@@ -35,7 +36,7 @@ from trackastra.data.matching import matching
 from trackastra.data.pretrained_features import (
     AVAILABLE_PRETRAINED_BACKBONES,
     FeatureExtractor,
-    PretrainBackboneType,
+    PretrainedBackboneType,
     PretrainedFeatsExtractionMode,
 )
 
@@ -149,7 +150,7 @@ class CTCData(Dataset):
         crop_size: tuple | None = None,
         return_dense: bool = False,
         compress: bool = False,
-        pretrained_backbone: PretrainBackboneType | None = None,
+        pretrained_backbone: PretrainedBackboneType | None = None,
         pretrained_features_extraction_mode: PretrainedFeatsExtractionMode | None = "nearest_patch",
         **kwargs,
     ) -> None:
@@ -264,10 +265,15 @@ class CTCData(Dataset):
         self.compress = compress
         self.start_frame = 0
         self.end_frame = None
+        
+        # Pretrained model attributes for feature extraction if specified
+        self._pretrained_model_input_size_factor = 1
+        self.feature_extractor_input_size = None
+        self.pretrained_features = None
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features == "wrfeat" or self.features == "pretrained_feats":
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -288,12 +294,8 @@ class CTCData(Dataset):
         if self.compress:
             self._compress_data()
 
-        # Use pretrained model for feature extraction if specified
-        self._pretrained_model_input_size_factor = 1
-        self.feature_extractor_input_size = None
-        self.pretrained_features = None
+
         
-        self._compute_pretrained_model_features()
             
     # def from_ctc
     
@@ -353,7 +355,7 @@ class CTCData(Dataset):
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features == "wrfeat" or self.features == "pretrained_feats":
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -877,13 +879,13 @@ class CTCData(Dataset):
             mask = mask.astype(int)
         else:
             logger.debug(
-                "disable augmentation as no trajectories would be left"
+                "Disable augmentation as no trajectories would be left"
             )
         return img, labels, mask, coords, timepoints, assoc_matrix
                     
     def __getitem__(self, n: int, return_dense=None):
         # if not set, use default
-        if self.features == "wrfeat":
+        if self.features == "wrfeat" or self.features == "pretrained_feats":
             return self._getitem_wrfeat(n, return_dense)
 
         if return_dense is None:
@@ -986,24 +988,24 @@ class CTCData(Dataset):
             )
 
             features = np.concatenate(features, axis=0)
-        elif self.features == "pretrained_feats":
-            if self.augmenter is not None:
-                img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
-                    img, labels, mask, coords, timepoints, min_time, assoc_matrix
-                )
-            ts, n_obj = np.unique(timepoints, return_counts=True)
-            features = torch.zeros((n_obj.sum(), self.feat_dim))
-            offset = 0
+        # elif self.features == "pretrained_feats":
+        #     if self.augmenter is not None:
+        #         img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
+        #             img, labels, mask, coords, timepoints, min_time, assoc_matrix
+        #         )
+        #     ts, n_obj = np.unique(timepoints, return_counts=True)
+        #     features = torch.zeros((n_obj.sum(), self.feat_dim))
+        #     offset = 0
 
-            for t, count in zip(ts, n_obj):
-                feat = self.pretrained_features[t]  # (timepoints -> (n_regions, n_features)) for a SINGLE timepoint
-                if feat.shape[0] != count:
-                    raise ValueError(f"Feature mismatch at time {t}: expected {count}, got {feat.shape[0]}")
-                features[offset:offset + count] = feat
-                offset += count
+        #     for t, count in zip(ts, n_obj):
+        #         feat = self.pretrained_features[t]  # (timepoints -> (n_regions, n_features)) for a SINGLE timepoint
+        #         if feat.shape[0] != count:
+        #             raise ValueError(f"Feature mismatch at time {t}: expected {count}, got {feat.shape[0]}")
+        #         features[offset:offset + count] = feat
+        #         offset += count
 
-            if features.shape[0] != len(timepoints):
-                raise ValueError(f"Pretrained features shape mismatch: {features.shape[0]} != {len(timepoints)}")
+        #     if features.shape[0] != len(timepoints):
+        #         raise ValueError(f"Pretrained features shape mismatch: {features.shape[0]} != {len(timepoints)}")
 
         # remove temporal offset and add timepoints to coords
         relative_timepoints = timepoints - track["t1"]
@@ -1184,13 +1186,22 @@ class CTCData(Dataset):
             self.det_masks[_f] = det_masks
 
             # build features
-
-            features = joblib.Parallel(n_jobs=8)(
-                joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
-                    mask=mask[None], img=img[None], t_start=t
+            if self.features == "pretrained_feats":
+                self._setup_pretrained_model_feature_extractor()
+                self.feature_extractor.precompute_region_embeddings(self.imgs)
+                features = [
+                    wrfeat.WRPretrainedFeatures.from_loaded_pretrained_features(
+                        img=img[np.newaxis], mask=mask[np.newaxis], feature_extractor=self.feature_extractor, t_start=t
+                    )
+                    for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
+                ]
+            elif self.features == "wrfeat":
+                features = joblib.Parallel(n_jobs=8)(
+                    joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
+                        mask=mask[None], img=img[None], t_start=t
+                    )
+                    for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
                 )
-                for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
-            )
 
             properties_by_time = dict()
             for _t, _feats in enumerate(features):
@@ -1347,32 +1358,52 @@ class CTCData(Dataset):
 
         return res
 
+    def _setup_pretrained_model_feature_extractor(self):
+        should_use_mps = (
+            torch.backends.mps.is_available()
+            and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
+            and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
+        )
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else (
+                "mps"
+                if should_use_mps and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK")
+                else "cpu"
+            )
+        )
+        if self.ndim == 3:
+            raise ValueError("Pretrained model feature extraction is not implemented for 3D data")
+        img_shape = self.imgs.shape[-2:]
+        self.feature_extractor = FeatureExtractor.from_model_name(
+            self.pretrained_backbone_name, 
+            img_shape, 
+            save_path=self.img_folder / "embeddings",
+            mode=self.pretrained_feature_extraction_mode,
+            device=device
+        )
+        
     def _compute_pretrained_model_features(self):
-        if self.pretrained_backbone_name is not None:
-            img_shape = self.windows[0]["img"].shape[-2:]
-            self.feature_extractor = FeatureExtractor.from_model_name(
-                self.pretrained_backbone_name, 
-                img_shape, 
-                save_path=self.img_folder / "embeddings",
-                mode=self.pretrained_feature_extraction_mode
-                )
-            try:
-                self.feature_extractor.input_mul = self._pretrained_model_input_size_factor
-            except Exception:
-                logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_backbone_name}")
-            self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
-            # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
-            self.feature_extractor_input_size = self.feature_extractor.input_size
-            self.feature_extractor = None
-        else:
-            logger.warning("No pretrained model set, feature axtraction not run")
+        if self.pretrained_backbone_name is None:
+            logger.warning("No pretrained model set, feature extraction not run")
+            return
 
-    def compute_pretrained_features(self, input_size_factor: int | None = None, model: PretrainBackboneType = None, mode: PretrainedFeatsExtractionMode = "nearest_patch"):
+        try:
+            self.feature_extractor.input_mul = self._pretrained_model_input_size_factor
+        except Exception:
+            logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_backbone_name}")
+        self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
+        # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
+        self.feature_extractor_input_size = self.feature_extractor.input_size
+        self.feature_extractor = None
+
+    def compute_pretrained_features(self, input_size_factor: int | None = None, model: PretrainedBackboneType = None, mode: PretrainedFeatsExtractionMode = "nearest_patch"):
         """Compute pretrained features for the dataset, if the model. input size factor or mode was changed.
         
         Args:
             input_size_factor (int, optional): The input size factor for the pretrained model. Defaults to None.
-            model (PretrainBackboneType, optional): The pretrained model to use. Defaults to None.
+            model (PretrainedBackboneType, optional): The pretrained model to use. Defaults to None.
             mode (PretrainedFeatsExtractionMode, optional): The mode to use for feature extraction. Defaults to "nearest_patch".
         """
         if input_size_factor is not None:

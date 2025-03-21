@@ -17,6 +17,7 @@ from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
 
 from trackastra.data.utils import load_tiff_timeseries
+from trackastra.data.pretrained_features import FeatureExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,10 @@ class WRFeatures:
 
         self.coords = coords
         self.labels = labels
-        self.features = features.copy()
+        if features is None:
+            self.features = OrderedDict()
+        else:
+            self.features = features.copy()
         self.timepoints = timepoints
 
     def __repr__(self):
@@ -97,6 +101,9 @@ class WRFeatures:
 
     @property
     def features_stacked(self):
+        if not self.features:
+            logger.warning("No features to stack")
+            return None
         return np.concatenate([v for k, v in self.features.items()], axis=-1)
 
     def __len__(self):
@@ -204,6 +211,56 @@ class WRFeatures:
             coords=coords, labels=labels, timepoints=timepoints, features=features
         )
 
+class WRPretrainedFeatures(WRFeatures):
+    """WindowedRegion with pretrained features from pre-trained models."""
+    
+    def __init__(
+        self,
+        coords: np.ndarray,
+        labels: np.ndarray,
+        timepoints: np.ndarray,
+        features: OrderedDict[np.ndarray],
+    ):
+        super().__init__(coords, labels, timepoints, features)
+        
+    @classmethod
+    def from_loaded_pretrained_features(
+        cls,
+        img: np.ndarray,
+        mask: np.ndarray,
+        feature_extractor: FeatureExtractor,
+        t_start: int = 0,
+    ) -> 'WRPretrainedFeatures':
+
+        _ntime, ndim = img.shape[0], img.ndim - 1
+        if ndim not in (2, 3):
+            raise ValueError("Only 2D or 3D data is supported")
+
+        # properties = tuple("pretrained_feats")
+            
+        # get labels, coords and timepoints
+        df_properties = ("label", "centroid")
+        dfs = []
+        for i, (y, x) in enumerate(zip(mask, img)):
+            _df = pd.DataFrame(
+                regionprops_table(y, intensity_image=x, properties=df_properties)
+            )
+            _df["timepoint"] = i + t_start
+
+            dfs.append(_df)
+        df = pd.concat(dfs)
+
+        timepoints = df["timepoint"].values.astype(np.int32)
+        labels = df["label"].values.astype(np.int32)
+        coords = df[[f"centroid-{i}" for i in range(ndim)]].values.astype(np.float32)
+
+        _, features = feature_extractor._extract_embedding(mask, timepoints, labels, coords) 
+        features = features.detach().cpu().numpy()
+        feats_dict = OrderedDict(pretrained_feats=features)
+        
+        return cls(
+            coords=coords, labels=labels, timepoints=timepoints, features=feats_dict,
+        )
 
 # augmentations
 
