@@ -140,14 +140,18 @@ class WRFeatures:
         cls,
         mask: np.ndarray,
         img: np.ndarray,
-        properties="regionprops2",
+        properties: "regionprops2",
         t_start: int = 0,
     ):
         _ntime, ndim = mask.shape[0], mask.ndim - 1
         if ndim not in (2, 3):
             raise ValueError("Only 2D or 3D data is supported")
 
-        properties = tuple(_PROPERTIES[properties])
+        if properties is None: 
+            properties = ()
+        else:
+            properties = tuple(_PROPERTIES[properties])
+            
         if "label" in properties or "centroid" in properties:
             raise ValueError(
                 f"label and centroid should not be in properties {properties}"
@@ -353,6 +357,8 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         "intensity_min",
         "border_dist",
     ):
+        pass
+    elif k == "pretrained_feats":
         pass
     else:
         raise ValueError(f"Don't know how to affinely transform {k}")
@@ -573,23 +579,34 @@ def build_windows(
 
 
 if __name__ == "__main__":
-    imgs = load_tiff_timeseries(
-        # "/scratch0/data/celltracking/ctc_2024/Fluo-C3DL-MDA231/train/01",
-        "/scratch0/data/celltracking/ctc_2024/Fluo-N2DL-HeLa/train/01",
-    )
-    masks = load_tiff_timeseries(
-        # "/scratch0/data/celltracking/ctc_2024/Fluo-C3DL-MDA231/train/01_GT/TRA",
-        "/scratch0/data/celltracking/ctc_2024/Fluo-N2DL-HeLa/train/01_GT/TRA",
-        dtype=int,
-    )
+    # imgs = load_tiff_timeseries(
+    #     # "/scratch0/data/celltracking/ctc_2024/Fluo-C3DL-MDA231/train/01",
+    #     "/scratch0/data/celltracking/ctc_2024/Fluo-N2DL-HeLa/train/01",
+    # )
+    # masks = load_tiff_timeseries(
+    #     # "/scratch0/data/celltracking/ctc_2024/Fluo-C3DL-MDA231/train/01_GT/TRA",
+    #     "/scratch0/data/celltracking/ctc_2024/Fluo-N2DL-HeLa/train/01_GT/TRA",
+    #     dtype=int,
+    # )
 
-    features = get_features(detections=masks, imgs=imgs, ndim=3)
-    windows = build_windows(features, window_size=4)
+    # features = get_features(detections=masks, imgs=imgs, ndim=3)
+    # windows = build_windows(features, window_size=4)
 
 
-# if __name__ == "__main__":
-#     y = np.zeros((1, 100, 100), np.uint8)
-#     y[:, 20:40, 20:60] = 1
-#     x = y + np.random.normal(0, 0.1, y.shape)
+    y = np.zeros((1, 100, 100), np.uint8)
+    y[:, 20:40, 20:60] = 1
+    x = y + np.random.normal(0, 0.1, y.shape)
 
-#     f = WRFeatures.from_mask_img(y, x, properties=("intensity_mean", "area"))
+
+    f = WRFeatures.from_mask_img(y, x, properties='regionprops2')
+
+    # f = WRFeatures.from_pretrained(y, x)
+
+    augmenter = WRAugmentationPipeline([
+        WRRandomAffine(degrees=10, scale=(0.9, 1.1), shear=(0.1, 0.1), p=0.5),
+        WRRandomBrightness(scale=(0.5, 2.0), shift=(-0.1, 0.1), p=0.5),
+        WRRandomOffset(offset=(-3, 3), p=0.5),
+        WRRandomMovement(offset=(-10, 10), p=0.5),
+    ])
+    
+    f2 = augmenter(f)
