@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
 from typing import TYPE_CHECKING, Literal
-import os
 
 import joblib
 import lz4.frame
@@ -34,10 +33,10 @@ from trackastra.data.features import (
 )
 from trackastra.data.matching import matching
 from trackastra.data.pretrained_features import (
-    AVAILABLE_PRETRAINED_BACKBONES,
     FeatureExtractor,
     PretrainedBackboneType,
     PretrainedFeatsExtractionMode,
+    PretrainedFeatureExtractorConfig,
 )
 
 # from ..utils import blockwise_sum, normalize
@@ -45,7 +44,7 @@ from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)  # FIXME go back to INFO for release
 
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
@@ -150,11 +149,10 @@ class CTCData(Dataset):
         crop_size: tuple | None = None,
         return_dense: bool = False,
         compress: bool = False,
-        pretrained_backbone: PretrainedBackboneType | None = None,
-        pretrained_features_extraction_mode: PretrainedFeatsExtractionMode | None = "nearest_patch",
+        pretrained_backbone_config: PretrainedFeatureExtractorConfig | None = None,
         **kwargs,
     ) -> None:
-        """_summary_.
+        """Cell Tracking Challenge data loader.
 
         Args:
             root (str):
@@ -181,12 +179,10 @@ class CTCData(Dataset):
                 Return dense masks and images in the data samples.
             compress (bool):
                 Compress elements/remove img if not needed to save memory for large datasets
-            pretrained_backbone (str):
-                If features is set to "pretrained_feats", specify the pretrained backbone to use.
-                Required if features is set to "pretrained_feats", otherwise ignored.
-            pretrained_features_extraction_mode (str):
-                If features is set to "pretrained_feats", specify the extraction mode to use.
-                Required if features is set to "pretrained_feats", otherwise ignored
+            pretrained_backbone_config (PretrainedFeatureExtractorConfig):
+                Configuration for the pretrained backbone.
+                If mode is set to "pretrained_feats", this configuration is used to extract features.
+                Ignored otherwise.
         """
         super().__init__()
 
@@ -220,15 +216,6 @@ class CTCData(Dataset):
                 to install the required dependencies.
                 """
                 raise ImportError(msg) from e        
-        if features == "pretrained_feats":
-            if pretrained_features_extraction_mode is None:
-                raise ValueError("Pretrained features extraction mode must be specified.")
-            if pretrained_backbone is None:
-                raise ValueError("Pretrained features extraction requires a pretrained backbone to be specified.")
-            if pretrained_backbone not in AVAILABLE_PRETRAINED_BACKBONES.keys():
-                raise ValueError(f"Pretrained backbone {pretrained_backbone} not available. Available backbones: {list(AVAILABLE_PRETRAINED_BACKBONES.keys())}")
-        self._pretrained_backbone_name = pretrained_backbone
-        self.pretrained_feature_extraction_mode = pretrained_features_extraction_mode
 
         logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
@@ -250,6 +237,16 @@ class CTCData(Dataset):
             self.img_folder = self._guess_img_folder(self.root)
         logger.info(f"IMG (guessed):\t{self.img_folder}")
 
+        self.pretrained_config = None
+        if features == "pretrained_feats" and pretrained_backbone_config is None:
+            raise ValueError("Pretrained backbone config must be provided for pretrained features mode.")
+        if isinstance(pretrained_backbone_config, PretrainedFeatureExtractorConfig):
+            self.pretrained_config = pretrained_backbone_config
+        else:
+            raise ValueError(f"Pretrained backbone config must be a PretrainedFeatureExtractorConfig object, got {type(pretrained_backbone_config)}")
+        if self.pretrained_config.save_path is None:
+            self.pretrained_config.save_path = self.img_folder
+        
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
             ndim, features, augment, crop_size
         )
@@ -294,19 +291,10 @@ class CTCData(Dataset):
         if self.compress:
             self._compress_data()
 
+        if kwargs:
+            logger.warning(f"Unused kwargs: {kwargs}")
 
-        
-            
     # def from_ctc
-    
-    @property
-    def pretrained_backbone_name(self):
-        return self._pretrained_backbone_name
-    
-    @pretrained_backbone_name.setter
-    def pretrained_backbone_name(self, value):
-        self._pretrained_backbone_name = value
-        self.feat_dim = AVAILABLE_PRETRAINED_BACKBONES[value]["feat_dim"]
 
     @classmethod
     def from_arrays(cls, imgs: np.ndarray, masks: np.ndarray, train_args: dict):
@@ -396,7 +384,7 @@ class CTCData(Dataset):
     def _setup_features_augs(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
-        if self.features == "wrfeat":
+        if self.features in ["wrfeat", "pretrained_feats"]:
             return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
 
         cropper = (
@@ -422,7 +410,7 @@ class CTCData(Dataset):
                 "regionprops2": 6,
                 "patch": 256,
                 "patch_regionprops": 256 + 5,
-                "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone_name]["feat_dim"],
+                # "pretrained_feats": AVAILABLE_PRETRAINED_BACKBONES[self.pretrained_backbone_name]["feat_dim"],
             }[features]
         elif ndim == 3:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
@@ -514,6 +502,20 @@ class CTCData(Dataset):
 
     def __len__(self):
         return len(self.windows)
+    
+    def _get_wrfeat_feats_dims(self, ndim: int, features: str):
+        dims = {
+            "wrfeat": {
+                2: 7,
+                3: 12,
+            },
+        }
+        if features == "wrfeat":
+            return dims[features][ndim]
+        elif features == "pretrained_feats":
+            return self.pretrained_config.feat_dim
+        else:
+            raise ValueError(f"Unknown feature dimension for {features}. Consider updating this method.")
 
     def _load_gt(self):
         logger.info("Loading ground truth")
@@ -988,6 +990,7 @@ class CTCData(Dataset):
             )
 
             features = np.concatenate(features, axis=0)
+        # MOVED as WRFeat. See wrfeat.WRPretrainedFeatures
         # elif self.features == "pretrained_feats":
         #     if self.augmenter is not None:
         #         img, labels, mask, coords, timepoints, assoc_matrix = self._apply_transform_and_check(
@@ -1054,63 +1057,15 @@ class CTCData(Dataset):
 
     # wrfeat functions...
     # TODO: refactor this as a subclass or make everything a class factory. *very* hacky this way
+    # -> updated _setup_features_augs_wrfeat to use a factory instead
 
     def _setup_features_augs_wrfeat(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
-        # FIXME: hardcoded
-        feat_dim = 7 if ndim == 2 else 12
-        if augment == 0:
-            augmenter = None
-        elif augment == 1:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=0.5),
-                    wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
-                    ),
-                    # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
-                    # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
-        elif augment == 2:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=0.5),
-                    wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
-                    ),
-                    wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
-        elif augment == 3:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=.5),
-                    wrfeat.WRRandomAffine(
-                        p=.8, 
-                        degrees=180, 
-                        scale=(.9, 1.1), 
-                        shear=(0.1, 0.1), 
-                        scale_isotropic=(.5, 2.)
-                    ),
-                    wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
-        else:
-            raise ValueError(f"Invalid augment level {augment}")
+        feat_dim = self._get_wrfeat_feats_dims(ndim, features)
+        augmenter = wrfeat.AugmentationFactory.create_augmentation_pipeline(augment)
+        cropper = wrfeat.AugmentationFactory.create_cropper(crop_size, ndim)
 
-        cropper = (
-            wrfeat.WRRandomCrop(
-                crop_size=crop_size,
-                ndim=ndim,
-            )
-            if crop_size is not None
-            else None
-        )
         return feat_dim, augmenter, cropper
 
     def _load_wrfeat(self):
@@ -1187,7 +1142,7 @@ class CTCData(Dataset):
 
             # build features
             if self.features == "pretrained_feats":
-                self._setup_pretrained_model_feature_extractor()
+                self._setup_pretrained_feature_extractor()
                 self.feature_extractor.precompute_region_embeddings(self.imgs)
                 features = [
                     wrfeat.WRPretrainedFeatures.from_loaded_pretrained_features(
@@ -1358,42 +1313,28 @@ class CTCData(Dataset):
 
         return res
 
-    def _setup_pretrained_model_feature_extractor(self):
-        should_use_mps = (
-            torch.backends.mps.is_available()
-            and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
-            and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
-        )
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else (
-                "mps"
-                if should_use_mps and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK")
-                else "cpu"
-            )
-        )
+    def _setup_pretrained_feature_extractor(self):
         if self.ndim == 3:
             raise ValueError("Pretrained model feature extraction is not implemented for 3D data")
-        img_shape = self.imgs.shape[-2:]
+        img_shape = self.imgs.shape[-2:]  # FIXME may not be consistent across all folders when training
         self.feature_extractor = FeatureExtractor.from_model_name(
-            self.pretrained_backbone_name, 
+            self.pretrained_config.model_name,
             img_shape, 
-            save_path=self.img_folder / "embeddings",
-            mode=self.pretrained_feature_extraction_mode,
-            device=device
+            save_path=self.pretrained_config.save_path / "embeddings",
+            mode=self.pretrained_config.mode,
+            device=self.pretrained_config.device
         )
         
     def _compute_pretrained_model_features(self):
-        if self.pretrained_backbone_name is None:
+        if self.pretrained_config.model_name is None:
             logger.warning("No pretrained model set, feature extraction not run")
             return
 
         try:
             self.feature_extractor.input_mul = self._pretrained_model_input_size_factor
         except Exception:
-            logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_backbone_name}")
-        self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs, self.windows, self.window_size)
+            logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_config.model_name}")
+        self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs)
         # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
         self.feature_extractor_input_size = self.feature_extractor.input_size
         self.feature_extractor = None
@@ -1408,10 +1349,13 @@ class CTCData(Dataset):
         """
         if input_size_factor is not None:
             self._pretrained_model_input_size_factor = input_size_factor
+            logger.debug(f"Setting input size factor to {input_size_factor}")
         if model is not None:
-            self.pretrained_backbone_name = model
+            self.pretrained_config.model_name = model
+            logger.debug(f"Setting pretrained model to {model}")
         if mode is not None:
-            self.pretrained_feature_extraction_mode = mode
+            self.pretrained_config.mode = mode
+            logger.debug(f"Setting feature extraction mode to {mode}")
         if input_size_factor is None and model is None and mode is None:
             logger.warning("No changes in input size factor, model or mode. Skipping feature extraction.")
             return

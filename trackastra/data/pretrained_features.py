@@ -1,5 +1,7 @@
 import logging
+import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -84,6 +86,60 @@ def average_time_decorator(func):
         return result
     
     return wrapper
+
+
+@dataclass
+class PretrainedFeatureExtractorConfig:
+    """model_name (str):
+        Specify the pretrained backbone to use.
+    save_path (str | Path):
+        Specify the path to save the embeddings.
+    batch_size (int):
+        Specify the batch size to use for the model.
+    mode (str):
+        Specify the mode to use for the model.
+        Currently available modes are "nearest_patch" and "mean_patches".
+    device (str):
+        Specify the device to use for the model.
+        If not set and "pretrained_feats" is used, the device is automatically set by default to "cuda", "mps" or "cpu" as available.
+    """
+    model_name: PretrainedBackboneType
+    save_path: str | Path = None
+    batch_size: int = 4
+    mode: PretrainedFeatsExtractionMode = "nearest_patch"
+    device: str | None = None
+    feat_dim: int = None
+    
+    def __post_init__(self):
+        self._guess_device()
+        self._check_model_availability()
+        
+    def _check_model_availability(self):
+        if self.model_name not in AVAILABLE_PRETRAINED_BACKBONES.keys():
+            raise ValueError(f"Model {self.model_name} is not available for feature extraction.")
+        self.feat_dim = AVAILABLE_PRETRAINED_BACKBONES[self.model_name]["feat_dim"]
+        
+    def _guess_device(self):
+        if self.device is None:
+            should_use_mps = (
+                torch.backends.mps.is_available()
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is not None
+                and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
+            )
+            self.device = (
+                "cuda"
+                if torch.cuda.is_available()
+                else (
+                    "mps"
+                    if should_use_mps and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK")
+                    else "cpu"
+                )
+            )
+        
+        try:
+            torch.device(self.device)  # check if device is valid
+        except Exception as e:
+            raise ValueError(f"Invalid device: {self.device}") from e
 
 
 class FeatureExtractor(ABC):
@@ -207,7 +263,7 @@ class FeatureExtractor(ABC):
         assert feats.shape == (len(coords), self.hidden_state_size)
         return feats  # (n_regions, embedding_size)
     
-    def precompute_region_embeddings(self, images): # , windows, window_size):
+    def precompute_region_embeddings(self, images):  # , windows, window_size):
         """Precomputes embeddings for all images."""
         missing = self._check_existing_embeddings(len(images))
         all_embeddings = torch.zeros(len(images), self.final_grid_size**2, self.hidden_state_size, device=self.device)
@@ -216,6 +272,7 @@ class FeatureExtractor(ABC):
                 embeddings = self._run_model(batches)
                 # logger.debug(f"Embeddings shape: {embeddings.shape}")
                 all_embeddings[ts] = embeddings
+            self.embeddings = all_embeddings
             self._save_features(all_embeddings)
         return self.embeddings
         # region_embeddings = {}

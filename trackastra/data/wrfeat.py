@@ -4,10 +4,11 @@ WindowedRegionFeatures (WRFeatures) is a class that holds regionprops features f
 
 import itertools
 import logging
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from functools import reduce
-from typing import Literal
+from typing import ClassVar, Literal
 
 import joblib
 import numpy as np
@@ -16,7 +17,6 @@ from edt import edt
 from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
 
-from trackastra.data.utils import load_tiff_timeseries
 from trackastra.data.pretrained_features import FeatureExtractor
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,8 @@ def _border_dist(mask: np.ndarray, cutoff: float = 5):
     border[ss] = 1
     dist = 1 - np.minimum(edt(border) / cutoff, 1)
     return tuple(r.intensity_max for r in regionprops(mask, intensity_image=dist))
+
+# Features classes
 
 
 class WRFeatures:
@@ -147,7 +149,7 @@ class WRFeatures:
         cls,
         mask: np.ndarray,
         img: np.ndarray,
-        properties: "regionprops2",
+        properties: str = "regionprops2",
         t_start: int = 0,
     ):
         _ntime, ndim = mask.shape[0], mask.ndim - 1
@@ -211,8 +213,9 @@ class WRFeatures:
             coords=coords, labels=labels, timepoints=timepoints, features=features
         )
 
+
 class WRPretrainedFeatures(WRFeatures):
-    """WindowedRegion with pretrained features from pre-trained models."""
+    """WindowedRegion with features from pre-trained models."""
     
     def __init__(
         self,
@@ -232,13 +235,10 @@ class WRPretrainedFeatures(WRFeatures):
         t_start: int = 0,
     ) -> 'WRPretrainedFeatures':
 
-        _ntime, ndim = img.shape[0], img.ndim - 1
+        ndim = img.ndim - 1
         if ndim not in (2, 3):
             raise ValueError("Only 2D or 3D data is supported")
-
-        # properties = tuple("pretrained_feats")
             
-        # get labels, coords and timepoints
         df_properties = ("label", "centroid")
         dfs = []
         for i, (y, x) in enumerate(zip(mask, img)):
@@ -262,11 +262,18 @@ class WRPretrainedFeatures(WRFeatures):
             coords=coords, labels=labels, timepoints=timepoints, features=feats_dict,
         )
 
-# augmentations
+# Augmentations
 
 
 class WRRandomCrop:
-    """windowed region random crop augmentation."""
+    """windowed region random crop augmentation.
+    
+    Affected properties:
+        - "coords"
+        - "labels"
+        - "timepoints"
+        - "features"
+    """
 
     def __init__(
         self,
@@ -331,7 +338,8 @@ class WRRandomCrop:
         )
 
 
-class WRBaseAugmentation:
+class WRBaseAugmentation(ABC):
+    """Base class for windowed region augmentations."""
     def __init__(self, p: float = 0.5) -> None:
         self._p = p
         self._rng = np.random.RandomState()
@@ -341,11 +349,19 @@ class WRBaseAugmentation:
             return features
         return self._augment(features)
 
+    @abstractmethod
     def _augment(self, features: WRFeatures):
         raise NotImplementedError()
 
 
 class WRRandomFlip(WRBaseAugmentation):
+    """Random flip augmentation.
+    
+    Affected properties:
+        - "area"
+        - "equivalent_diameter_area"
+        - "inertia_tensor"
+    """
     def _augment(self, features: WRFeatures):
         ndim = features.ndim
         flip = self._rng.randint(0, 2, features.ndim)
@@ -423,13 +439,20 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
 
 
 class WRRandomAffine(WRBaseAugmentation):
+    """Random affine transformation augmentation.
+    
+    Affected properties:
+        - "area"
+        - "equivalent_diameter_area"
+        - "inertia_tensor"
+    """
     def __init__(
         self,
         degrees: float = 10,
         scale: float = (0.9, 1.1),
         shear: float = (0.1, 0.1),
         p: float = 0.5,
-        scale_isotropic: float = (1.,1.),
+        scale_isotropic: float = (1., 1.),
     ):
         super().__init__(p)
         self.degrees = degrees if degrees is not None else 0
@@ -442,7 +465,7 @@ class WRRandomAffine(WRBaseAugmentation):
         degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
         scale_iso = self._rng.uniform(*self.scale_isotropic)
         scale = self._rng.uniform(*self.scale, 3)
-        scale = scale*scale_iso
+        scale = scale * scale_iso
         
         shy = self._rng.uniform(-self.shear[0], self.shear[0])
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
@@ -470,6 +493,11 @@ class WRRandomAffine(WRBaseAugmentation):
 
 
 class WRRandomBrightness(WRBaseAugmentation):
+    """random brightness augmentation.
+    
+    Affected properties:
+        - "intensity"
+    """
     def __init__(
         self,
         scale: tuple[float] = (0.5, 2.0),
@@ -501,6 +529,11 @@ class WRRandomBrightness(WRBaseAugmentation):
 
 
 class WRRandomOffset(WRBaseAugmentation):
+    """Random offset augmentation.
+    
+    Affected properties:
+        - "coords"
+    """
     def __init__(self, offset: float = (-3, 3), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
@@ -518,7 +551,11 @@ class WRRandomOffset(WRBaseAugmentation):
 
 
 class WRRandomMovement(WRBaseAugmentation):
-    """random global linear shift."""
+    """Random global linear shift.
+    
+    Affected properties:
+        - "coords"
+    """
     def __init__(self, offset: float = (-10, 10), p: float = 0.5):
         super().__init__(p)
         self.offset = offset
@@ -546,6 +583,75 @@ class WRAugmentationPipeline:
             feats = aug(feats)
         return feats
 
+# Factory functions
+
+
+class AugmentationFactory:
+    default_args: ClassVar = {
+    "flip": {"p": 0.5},
+    "affine": {
+        "p": 0.8,
+        "degrees": 180,
+        "scale": (0.5, 2),
+        "shear": (0.1, 0.1),
+    },
+    "brightness": {"p": 0.8},
+    "offset": {"p": 0.8, "offset": (-3, 3)},
+    "movement": {"offset": (-10, 10), "p": 0.3},
+    }
+
+    @staticmethod
+    def create_augmentation_pipeline(augment: int):
+        if augment == 0:
+            return None
+        elif augment == 1:
+            return WRAugmentationPipeline(
+                [
+                    WRRandomFlip(**AugmentationFactory.default_args["flip"]),
+                    WRRandomAffine(
+                        **AugmentationFactory.default_args["affine"]
+                    ),
+                    # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
+                    # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                ]
+            )
+        elif augment == 2:
+            return WRAugmentationPipeline(
+                [
+                    WRRandomFlip(**AugmentationFactory.default_args["flip"]),
+                    WRRandomAffine(**AugmentationFactory.default_args["affine"]),
+                    WRRandomBrightness(**AugmentationFactory.default_args["brightness"]),
+                    WRRandomOffset(**AugmentationFactory.default_args["offset"]),
+                ]
+            )
+        elif augment == 3:
+            return WRAugmentationPipeline(
+                [
+                    WRRandomFlip(**AugmentationFactory.default_args["flip"]),
+                    WRRandomAffine(
+                        p=0.8, 
+                        degrees=180, 
+                        scale=(0.9, 1.1), 
+                        shear=(0.1, 0.1), 
+                        scale_isotropic=(0.5, 2.0)
+                    ),
+                    WRRandomBrightness(**AugmentationFactory.default_args["brightness"]),
+                    WRRandomMovement(**AugmentationFactory.default_args["movement"]),
+                    WRRandomOffset(**AugmentationFactory.default_args["offset"]),
+                ]
+            )
+        else:
+            raise ValueError(f"Invalid augment level {augment}")
+
+    @staticmethod
+    def create_cropper(crop_size: tuple[int], ndim: int):
+        if crop_size is not None:
+            return WRRandomCrop(
+                crop_size=crop_size,
+                ndim=ndim,
+            )
+        return None
+
 
 def get_features(
     detections: np.ndarray,
@@ -555,6 +661,7 @@ def get_features(
     n_workers=0,
     progbar_class=tqdm,
 ) -> list[WRFeatures]:
+    """Extracts features from detections and images."""
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
     logger.info(f"Extracting features from {len(detections)} detections")
@@ -607,6 +714,7 @@ def _check_dimensions(x: np.ndarray, ndim: int):
 def build_windows(
     features: list[WRFeatures], window_size: int, progbar_class=tqdm
 ) -> list[dict]:
+    """Builds windows from a list of WRFeatures."""
     windows = []
     for t1, t2 in progbar_class(
         zip(range(0, len(features)), range(window_size, len(features) + 1)),
@@ -649,11 +757,9 @@ if __name__ == "__main__":
     # features = get_features(detections=masks, imgs=imgs, ndim=3)
     # windows = build_windows(features, window_size=4)
 
-
     y = np.zeros((1, 100, 100), np.uint8)
     y[:, 20:40, 20:60] = 1
     x = y + np.random.normal(0, 0.1, y.shape)
-
 
     f = WRFeatures.from_mask_img(y, x, properties='regionprops2')
 
