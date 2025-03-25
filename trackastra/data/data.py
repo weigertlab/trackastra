@@ -1324,6 +1324,7 @@ class CTCData(Dataset):
             mode=self.pretrained_config.mode,
             device=self.pretrained_config.device
         )
+        self.feature_extractor_input_size = self.feature_extractor.input_size
         
     def _compute_pretrained_model_features(self):
         if self.pretrained_config.model_name is None:
@@ -1336,7 +1337,6 @@ class CTCData(Dataset):
             logger.warning(f"Cannot change input size for pretrained model: {self.pretrained_config.model_name}")
         self.pretrained_features = self.feature_extractor.precompute_region_embeddings(self.imgs)
         # dict(n_frames) : torch.Tensor(n_regions_in_frame, n_features)
-        self.feature_extractor_input_size = self.feature_extractor.input_size
         self.feature_extractor = None
 
     def compute_pretrained_features(self, input_size_factor: int | None = None, model: PretrainedBackboneType = None, mode: PretrainedFeatsExtractionMode = "nearest_patch"):

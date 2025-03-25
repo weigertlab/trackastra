@@ -496,6 +496,7 @@ class FeatureExtractor(ABC):
             # check feature shape consistency
             if features.shape[1] != self.final_grid_size**2 or features.shape[2] != self.hidden_state_size:
                 logger.error(f"Saved embeddings found, but shape {features.shape} does not match expected shape {('n_frames', self.final_grid_size**2, self.hidden_state_size)}.")
+                logger.error("Embeddings will be recomputed.")
                 return None
             self.embeddings = torch.tensor(features).to(self.device)
         return self.embeddings
