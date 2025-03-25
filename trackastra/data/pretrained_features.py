@@ -425,9 +425,14 @@ class FeatureExtractor(ABC):
         embeddings = self._load_features()
         # logger.debug(f"Embeddings shape: {embeddings.shape}")
         embeddings_dict = {t: embeddings[t] for t in unique_timepoints}
-
-        for i, (t, _, _) in enumerate(patch_idxs):
-            feats[i] = embeddings_dict[t][indices[i]]
+        try:
+            for i, (t, _, _) in enumerate(patch_idxs):
+                feats[i] = embeddings_dict[t][indices[i]]
+        except KeyError as e:
+            logger.error(f"KeyError: {e} - Check if the timepoint exists in embeddings_dict.")
+        except IndexError as e:
+            # TODO improve handling of this error. Maybe check shape earlier
+            logger.error(f"IndexError: {e} - Embeddings exist but do not have the correct shape. Did the model input size change ? If so, please delete saved embeddings and recompute.")
             
         return feats
     
@@ -488,19 +493,24 @@ class FeatureExtractor(ABC):
             load_path = self.save_path / f"{self.model_name_path}_features.npy"
             features = np.load(load_path)
             assert features is not None, f"Failed to load features from {load_path}"
+            # check feature shape consistency
+            if features.shape[1] != self.final_grid_size**2 or features.shape[2] != self.hidden_state_size:
+                logger.error(f"Saved embeddings found, but shape {features.shape} does not match expected shape {('n_frames', self.final_grid_size**2, self.hidden_state_size)}.")
+                return None
             self.embeddings = torch.tensor(features).to(self.device)
         return self.embeddings
    
     def _check_existing_embeddings(self, n_images):
         """Checks if embeddings for the model already exist."""
         try:
-            self._load_features()
+            features = self._load_features()
         except FileNotFoundError:
             return True
-        missing = (self.embeddings.shape[0] != n_images)
-        if not missing:
+        if features is None:
+            return True
+        else:
             logger.info(f"Embeddings for {self.model_name} already exist. Skipping embedding computation.")
-        return missing
+        return False
 
 
 ##############
