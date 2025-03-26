@@ -241,10 +241,7 @@ class CTCData(Dataset):
         if features == "pretrained_feats": 
             if pretrained_backbone_config is None:
                 raise ValueError("Pretrained backbone config must be provided for pretrained features mode.")
-            if isinstance(pretrained_backbone_config, PretrainedFeatureExtractorConfig):
-                self.pretrained_config = pretrained_backbone_config
-            else:
-                raise ValueError(f"Pretrained backbone config must be a PretrainedFeatureExtractorConfig object, got {type(pretrained_backbone_config)}")
+            self.pretrained_config = pretrained_backbone_config
             if self.pretrained_config.save_path is None:
                 self.pretrained_config.save_path = self.img_folder
         
