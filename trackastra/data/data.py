@@ -238,14 +238,15 @@ class CTCData(Dataset):
         logger.info(f"IMG (guessed):\t{self.img_folder}")
 
         self.pretrained_config = None
-        if features == "pretrained_feats" and pretrained_backbone_config is None:
-            raise ValueError("Pretrained backbone config must be provided for pretrained features mode.")
-        if isinstance(pretrained_backbone_config, PretrainedFeatureExtractorConfig):
-            self.pretrained_config = pretrained_backbone_config
-        else:
-            raise ValueError(f"Pretrained backbone config must be a PretrainedFeatureExtractorConfig object, got {type(pretrained_backbone_config)}")
-        if self.pretrained_config.save_path is None:
-            self.pretrained_config.save_path = self.img_folder
+        if features == "pretrained_feats": 
+            if pretrained_backbone_config is None:
+                raise ValueError("Pretrained backbone config must be provided for pretrained features mode.")
+            if isinstance(pretrained_backbone_config, PretrainedFeatureExtractorConfig):
+                self.pretrained_config = pretrained_backbone_config
+            else:
+                raise ValueError(f"Pretrained backbone config must be a PretrainedFeatureExtractorConfig object, got {type(pretrained_backbone_config)}")
+            if self.pretrained_config.save_path is None:
+                self.pretrained_config.save_path = self.img_folder
         
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
             ndim, features, augment, crop_size
