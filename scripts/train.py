@@ -208,18 +208,24 @@ class WrappedLightningModule(pl.LightningModule):
         timepoints = batch["timepoints"]
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
-
+        
+        # torch.autograd.set_detect_anomaly(True)
         A_pred = self.model(coords, feats, padding_mask=padding_mask)
+        
         # remove inf values that might happen due to float16 numerics
-        A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
+        # A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
+        # above call interferes with backward as it is an inplace operation
+        A_pred = A_pred.clamp(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
 
         mask_invalid = torch.logical_or(
             padding_mask.unsqueeze(1), padding_mask.unsqueeze(2)
         )
 
-        A_pred[mask_invalid] = 0
+        # A_pred[mask_invalid] = 0
+        # above call interferes with backward as it is an inplace operation in "linear" causal norm
+        A_pred = A_pred.masked_fill(mask_invalid, 0)
         loss = self.criterion(A_pred, A)
-
+            
         if self.causal_norm != "none":
             # TODO speedup: I could softmax only the part of the matrix (upper triangular) that is not masked out
             A_pred_soft = torch.stack(
@@ -234,6 +240,7 @@ class WrappedLightningModule(pl.LightningModule):
                 if len(A) > 0:
                     # debug
                     if torch.any(torch.isnan(A_pred_soft)):
+                        
                         print(A_pred)
                         print(
                             "AAAA pred",
@@ -252,6 +259,11 @@ class WrappedLightningModule(pl.LightningModule):
                             timepoints=timepoints.detach().cpu().numpy(),
                         )
 
+                if A_pred_soft.dtype != A.dtype:
+                    logger.warning(
+                        "A_pred_soft has different dtype than A, casting to A.dtype"
+                    )
+                    A_pred_soft = A_pred_soft.to(A.dtype)
                 # Keep the non-softmaxed loss for numerical stability
                 loss = 0.01 * loss + self.criterion_softmax(A_pred_soft, A)
 
@@ -939,12 +951,12 @@ def train(args):
         else:
             model = TrackingTransformer.from_folder(fpath, args=args)
     else:
+        # FIXME(cy) hardcoded feat_dim
         feat_dim = 0 if args.features == "none" else 7 if args.ndim == 2 else 12
         model = TrackingTransformer(
             # coord_dim=datasets["train"].datasets[0].ndim,
             coord_dim=args.ndim,
             # feat_dim=datasets["train"].datasets[0].feat_dim,
-            # FIXME hardcoded feat_dim
             feat_dim=feat_dim,
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,

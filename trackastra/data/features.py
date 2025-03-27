@@ -1,8 +1,12 @@
 import itertools
+import logging
 
 import numpy as np
 import pandas as pd
 from skimage.measure import regionprops_table
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # the property keys that are supported for 2 and 3 dim
 
@@ -31,6 +35,7 @@ _PROPERTIES = {
             "intensity_mean",
             "inertia_tensor",
         ),
+        "pretrained_feats": (),
     },
     3: {
         "regionprops2": (

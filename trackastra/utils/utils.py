@@ -263,7 +263,8 @@ def blockwise_causal_norm(
         A = torch.sigmoid(A)
         if mask_invalid is not None:
             assert mask_invalid.shape == A.shape
-            A[mask_invalid] = 0
+            # A[mask_invalid] = 0
+            A = A.masked_fill(mask_invalid, 0)
 
         u0, u1 = A, A
         ma0 = ma1 = 0
