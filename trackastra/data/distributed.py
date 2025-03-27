@@ -212,7 +212,7 @@ class BalancedDataModule(LightningDataModule):
         input_val: list,
         cachedir: str,
         augment: int,
-        distributed:bool, 
+        distributed: bool, 
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
@@ -241,6 +241,7 @@ class BalancedDataModule(LightningDataModule):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
             datasets[split] = torch.utils.data.ConcatDataset(
+                # TODO(cy) add saving pretrained_feats to cache from here
                 CTCData(
                     root=Path(inp),
                     augment=self.augment if split == "train" else 0,
@@ -286,7 +287,7 @@ class BalancedDataModule(LightningDataModule):
             )
             batch_sampler = None
         else: 
-            sampler=None
+            sampler = None
             batch_sampler = BalancedBatchSampler(
                 self.datasets["train"],
                 **self.sampler_kwargs,

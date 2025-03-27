@@ -106,7 +106,9 @@ class WRFeatures:
         if not self.features:
             logger.warning("No features to stack")
             return None
-        return np.concatenate([v for k, v in self.features.items()], axis=-1)
+        feats = np.concatenate([v for k, v in self.features.items()], axis=-1)
+        # raise if any NaNs in features
+        return feats
 
     def __len__(self):
         return len(self.labels)
@@ -193,6 +195,10 @@ class WRFeatures:
         timepoints = df["timepoint"].values.astype(np.int32)
         labels = df["label"].values.astype(np.int32)
         coords = df[[f"centroid-{i}" for i in range(ndim)]].values.astype(np.float32)
+        
+        # if any NaNs in features, raise
+        if df.isnull().values.any():
+            raise ValueError("NaNs found in features DataFrame")
 
         features = OrderedDict(
             (
@@ -411,8 +417,9 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     if k == "area":
         v = np.linalg.det(M) * v
     elif k == "equivalent_diameter_area":
-        v = np.linalg.det(M) ** (1 / len(M)) * v
-
+        # v = np.linalg.det(M) ** (1 / len(M)) * v
+        v = np.abs(np.linalg.det(M)) ** (1 / len(M)) * v
+        # TODO check the bhavior of equivalent_diameter_area in 3D regionprops
     elif k == "inertia_tensor":
         # v' = M * v  * M^T
         v = v.reshape(-1, ndim, ndim)        
@@ -435,6 +442,10 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         pass
     else:
         raise ValueError(f"Don't know how to affinely transform {k}")
+    
+    if np.isnan(v).any():
+        logger.error(f"NaNs found in {k} after affine transformation")
+    
     return v
 
 
