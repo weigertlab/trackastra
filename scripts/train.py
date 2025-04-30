@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.seterr(all="ignore")
 
 
@@ -1003,9 +1003,9 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        accelerator="cuda",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
         strategy=strategy,
-        devices=n_gpus,
+        devices=n_gpus if torch.cuda.is_available() else 1,
         precision="16-mixed" if args.mixedp else 32,
         logger=train_logger,
         num_nodes=1,
