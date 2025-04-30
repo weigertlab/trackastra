@@ -83,7 +83,6 @@ class WarmupCosineLRScheduler(LRScheduler):
         max_epochs,
         cosine_final: float = 0.001,
         last_epoch=-1,
-        verbose=False,
     ):
         """Use cosine_final to switch on/off the cosine annealing.
 
@@ -93,7 +92,7 @@ class WarmupCosineLRScheduler(LRScheduler):
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.cosine_final = cosine_final
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
         if not self._get_lr_called_within_step:
