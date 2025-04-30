@@ -287,7 +287,7 @@ class WRBaseAugmentation:
 class WRRandomFlip(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
         ndim = features.ndim
-        flip = self._rng.randint(0, 2, 2)
+        flip = self._rng.randint(0, 2, features.ndim)
         points = features.coords.copy()
         for i, f in enumerate(flip):
             if f == 1:
@@ -300,12 +300,15 @@ class WRRandomFlip(WRBaseAugmentation):
         )
 
 
-def _scale_matrix(sy: float, sx: float):
-    return np.array([[1, 0, 0], [0, sy, 0], [0, 0, sx]])
+def _scale_matrix(sz: float, sy: float, sx: float):
+    return np.diag([sz, sy, sx])
+
+# def _scale_matrix(sy: float, sx: float):
+#     return np.array([[1, 0, 0], [0, sy, 0], [0, 0, sx]])
 
 
 def _shear_matrix(shy: float, shx: float):
-    return np.array([[1, 0, 0], [0, 1, shy], [0, shx, 1]])
+    return np.array([[1, 0, 0], [0, 1 + shx * shy, shy], [0, shx, 1]])
 
 
 def _rotation_matrix(theta: float):
@@ -323,7 +326,7 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     if k == "area":
         v = np.linalg.det(M) * v
     elif k == "equivalent_diameter_area":
-        v = np.linalg.det(M) * (1 / len(M)) * v
+        v = np.linalg.det(M) ** (1 / len(M)) * v
 
     elif k == "inertia_tensor":
         # v' = M * v  * M^T
@@ -362,16 +365,16 @@ class WRRandomAffine(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
 
         degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
-        scale = self._rng.uniform(*self.scale, 2)
+        scale = self._rng.uniform(*self.scale, 3)
         shy = self._rng.uniform(-self.shear[0], self.shear[0])
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
             _rotation_matrix(degrees)
-            @ _scale_matrix(scale[0], scale[1])
+            @ _scale_matrix(*scale)
             @ _shear_matrix(shy, shx)
         )
-
+        
         # M is by default 3D , we need to remove the last dimension for 2D
         self._M = self._M[-features.ndim :, -features.ndim :]
         points = features.coords @ self._M.T
@@ -428,6 +431,26 @@ class WRRandomOffset(WRBaseAugmentation):
 
         offset = self._rng.uniform(*self.offset, features.coords.shape)
         coords = features.coords + offset
+        return WRFeatures(
+            coords=coords,
+            labels=features.labels,
+            timepoints=features.timepoints,
+            features=features.features,
+        )
+
+
+class WRRandomMovement(WRBaseAugmentation):
+    """random global linear shift."""
+    def __init__(self, offset: float = (-10, 10), p: float = 0.5):
+        super().__init__(p)
+        self.offset = offset
+
+    def _augment(self, features: WRFeatures):
+        base_offset = self._rng.uniform(*self.offset, features.coords.shape[-1])
+        tmin = features.timepoints.min()
+        offset = (features.timepoints[:, None] - tmin) * base_offset[None]
+        coords = features.coords + offset
+        
         return WRFeatures(
             coords=coords,
             labels=features.labels,

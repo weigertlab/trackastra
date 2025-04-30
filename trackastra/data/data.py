@@ -19,12 +19,22 @@ from skimage.segmentation import relabel_sequential
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from ..utils import blockwise_sum, normalize
-from . import wrfeat
-from ._check_ctc import _check_ctc, _get_node_attributes
-from .augmentations import AugmentationPipeline, RandomCrop
-from .features import _PROPERTIES, extract_features_patch, extract_features_regionprops
-from .matching import matching
+from trackastra.data import wrfeat
+from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
+from trackastra.data.augmentations import (
+    AugmentationPipeline,
+    RandomCrop,
+    default_augmenter,
+)
+from trackastra.data.features import (
+    _PROPERTIES,
+    extract_features_patch,
+    extract_features_regionprops,
+)
+from trackastra.data.matching import matching
+
+# from ..utils import blockwise_sum, normalize
+from trackastra.utils import blockwise_sum, normalize
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -110,7 +120,7 @@ class CTCData(Dataset):
         root: str = "",
         ndim: int = 2,
         use_gt: bool = True,
-        detection_folders: list[str] | None = None,
+        detection_folders: list[str] = ["TRA"],
         window_size: int = 10,
         max_tokens: int | None = None,
         slice_pct: tuple = (0.0, 1.0),
@@ -179,10 +189,10 @@ class CTCData(Dataset):
                 f" {tuple(_PROPERTIES[ndim].keys())}"
             )
 
-        logger.info(f"ROOT (config): {self.root}")
+        logger.info(f"ROOT (config): \t{self.root}")
         self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(self.root)
-        logger.info(f"ROOT: \t{self.root}")
-        logger.info(f"GT TRA:\t{self.gt_tra_folder}")
+        logger.info(f"ROOT (guessed): \t{self.root}")
+        logger.info(f"GT TRA (guessed):\t{self.gt_tra_folder}")
         if self.use_gt:
             self.gt_mask_folder = self._guess_mask_folder(self.root, self.gt_tra_folder)
         else:
@@ -190,14 +200,14 @@ class CTCData(Dataset):
             self.gt_mask_folder = self._guess_det_folder(
                 self.root, self.detection_folders[0]
             )
-        logger.info(f"GT MASK:\t{self.gt_mask_folder}")
+        logger.info(f"GT MASK (guessed):\t{self.gt_mask_folder}")
 
         # dont load image data if not needed
         if features in ("none",):
             self.img_folder = None
         else:
             self.img_folder = self._guess_img_folder(self.root)
-        logger.info(f"IMG:\t\t{self.img_folder}")
+        logger.info(f"IMG (guessed):\t{self.img_folder}")
 
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
             ndim, features, augment, crop_size
@@ -310,7 +320,7 @@ class CTCData(Dataset):
 
     def _get_ndivs(self, windows):
         n_divs = []
-        for w in tqdm(windows, desc="Counting divisions", leave=True):
+        for w in tqdm(windows, desc="Counting divisions", leave=False):
             _n = (
                 (
                     blockwise_sum(
@@ -331,6 +341,21 @@ class CTCData(Dataset):
         if self.features == "wrfeat":
             return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
 
+        cropper = (
+            RandomCrop(
+                crop_size=crop_size,
+                ndim=ndim,
+                use_padding=False,
+                ensure_inside_points=True,
+            )
+            if crop_size is not None
+            else None
+        )
+
+        # Hack
+        if self.features == "none":
+            return 0, default_augmenter, cropper
+
         if ndim == 2:
             augmenter = AugmentationPipeline(p=0.8, level=augment) if augment else None
             feat_dim = {
@@ -347,16 +372,7 @@ class CTCData(Dataset):
                 "regionprops2": 11,
                 "patch_regionprops": 256 + 8,
             }[features]
-        cropper = (
-            RandomCrop(
-                crop_size=crop_size,
-                ndim=ndim,
-                use_padding=False,
-                ensure_inside_points=True,
-            )
-            if crop_size is not None
-            else None
-        )
+
         return feat_dim, augmenter, cropper
 
     def _compress_data(self):
@@ -438,7 +454,7 @@ class CTCData(Dataset):
         return len(self.windows)
 
     def _load_gt(self):
-
+        logger.info("Loading ground truth")
         self.start_frame = int(
             len(list(self.gt_mask_folder.glob("*.tif"))) * self.slice_pct[0]
         )
@@ -480,7 +496,7 @@ class CTCData(Dataset):
             if not st_path.exists():
                 logger.debug("No _ST folder found, skipping correction")
             else:
-                logger.info(f"GT MASK:\t{st_path} for correcting with ST masks")
+                logger.info(f"ST MASK:\t\t{st_path} for correcting with ST masks")
                 st_masks = self._load_tiffs(st_path, dtype)
                 x = np.maximum(x, st_masks)
 
@@ -605,6 +621,7 @@ class CTCData(Dataset):
 
     def _load(self):
         # Load ground truth
+        logger.info("Loading ground truth")
         self.gt_masks, self.gt_track_df = self._load_gt()
 
         self.gt_masks = self._check_dimensions(self.gt_masks)
@@ -622,8 +639,10 @@ class CTCData(Dataset):
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
                 self.imgs = np.stack(
-                    _compress_img_mask_preproc(im, mask, self.features)
-                    for im, mask in zip(self.imgs, self.gt_masks)
+                    [
+                        _compress_img_mask_preproc(im, mask, self.features)
+                        for im, mask in zip(self.imgs, self.gt_masks)
+                    ]
                 )
 
         assert len(self.gt_masks) == len(self.imgs)
@@ -813,7 +832,12 @@ class CTCData(Dataset):
         # cropping
         if self.cropper is not None:
             (img2, mask2, coords2), idx = self.cropper(img, mask, coords)
-            if len(idx) > 0:
+            cropped_timepoints = timepoints[idx]
+
+            # at least one detection in each timepoint to accept the crop
+            if len(np.unique(cropped_timepoints)) == self.window_size:
+                # at least two total detections to accept the crop
+                # if len(idx) >= 2:
                 img, mask, coords = img2, mask2, coords2
                 labels = labels[idx]
                 timepoints = timepoints[idx]
@@ -928,7 +952,7 @@ class CTCData(Dataset):
             coords = coords[:n_elems]
             features = features[:n_elems]
             assoc_matrix = assoc_matrix[:n_elems, :n_elems]
-            logger.debug(
+            logger.info(
                 f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
             )
 
@@ -981,7 +1005,7 @@ class CTCData(Dataset):
                     # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
                 ]
             )
-        elif augment > 1:
+        elif augment == 2:
             augmenter = wrfeat.WRAugmentationPipeline(
                 [
                     wrfeat.WRRandomFlip(p=0.5),
@@ -989,6 +1013,18 @@ class CTCData(Dataset):
                         p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
                     ),
                     wrfeat.WRRandomBrightness(p=0.8),
+                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+                ]
+            )
+        elif augment == 3:
+            augmenter = wrfeat.WRAugmentationPipeline(
+                [
+                    wrfeat.WRRandomFlip(p=0.5),
+                    wrfeat.WRRandomAffine(
+                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    ),
+                    wrfeat.WRRandomBrightness(p=0.8),
+                    wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
                     wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
                 ]
             )
@@ -1025,10 +1061,12 @@ class CTCData(Dataset):
             self.imgs = self._check_dimensions(self.imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
-                self.imgs = np.stack([
-                    _compress_img_mask_preproc(im, mask, self.features)
-                    for im, mask in zip(self.imgs, self.gt_masks)
-                ])
+                self.imgs = np.stack(
+                    [
+                        _compress_img_mask_preproc(im, mask, self.features)
+                        for im, mask in zip(self.imgs, self.gt_masks)
+                    ]
+                )
 
         assert len(self.gt_masks) == len(self.imgs)
 
@@ -1036,6 +1074,7 @@ class CTCData(Dataset):
         windows = []
         self.properties_by_time = dict()
         self.det_masks = dict()
+        logger.info("Loading detections")
         for _f in self.detection_folders:
             det_folder = self.root / _f
 
@@ -1051,7 +1090,7 @@ class CTCData(Dataset):
                 det_folder = self._guess_det_folder(root=self.root, suffix=_f)
                 if det_folder is None:
                     continue
-                logger.info(f"DET MASK:\t{det_folder}")
+                logger.info(f"DET MASK (guessed):\t{det_folder}")
                 det_masks = self._load_tiffs(det_folder, dtype=np.int32)
                 det_masks = self._correct_gt_with_st(
                     det_folder, det_masks, dtype=np.int32
@@ -1162,13 +1201,13 @@ class CTCData(Dataset):
             return_dense = self.return_dense
 
         track = self.windows[n]
-        coords = track["coords"]
+        # coords = track["coords"]
         assoc_matrix = track["assoc_matrix"]
         labels = track["labels"]
         img = track["img"]
         mask = track["mask"]
         timepoints = track["timepoints"]
-        track["t1"]
+        # track["t1"]
         feat = track["wrfeat"]
 
         if return_dense and isinstance(mask, _CompressedArray):
@@ -1180,24 +1219,43 @@ class CTCData(Dataset):
 
         # cropping
         if self.cropper is not None:
-            feat, idx = self.cropper(feat)
-            labels = labels[idx]
-            timepoints = timepoints[idx]
-            assoc_matrix = assoc_matrix[idx][:, idx]
+            # Use only if there is at least one timepoint per detection
+            cropped_feat, cropped_idx = self.cropper(feat)
+            cropped_timepoints = timepoints[cropped_idx]
+            if len(np.unique(cropped_timepoints)) == self.window_size:
+                idx = cropped_idx
+                feat = cropped_feat
+                labels = labels[idx]
+                timepoints = timepoints[idx]
+                assoc_matrix = assoc_matrix[idx][:, idx]
+            else:
+                logger.debug("Skipping cropping")
 
         if self.augmenter is not None:
             feat = self.augmenter(feat)
 
         coords0 = np.concatenate((feat.timepoints[:, None], feat.coords), axis=-1)
         coords0 = torch.from_numpy(coords0).float()
-        assoc_matrix = torch.from_numpy(assoc_matrix.copy()).float()
+        assoc_matrix = torch.from_numpy(assoc_matrix.astype(np.float32))
         features = torch.from_numpy(feat.features_stacked).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()
 
+        if self.max_tokens and len(timepoints) > self.max_tokens:
+            time_incs = np.where(timepoints - np.roll(timepoints, 1))[0]
+            n_elems = time_incs[np.searchsorted(time_incs, self.max_tokens) - 1]
+            timepoints = timepoints[:n_elems]
+            labels = labels[:n_elems]
+            coords0 = coords0[:n_elems]
+            features = features[:n_elems]
+            assoc_matrix = assoc_matrix[:n_elems, :n_elems]
+            logger.debug(
+                f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
+            )
+
         if self.augmenter is not None:
             coords = coords0.clone()
-            coords[:, 1:] += torch.randint(0, 256, (1, self.ndim))
+            coords[:, 1:] += torch.randint(0, 512, (1, self.ndim))
         else:
             coords = coords0.clone()
         res = dict(
@@ -1342,9 +1400,9 @@ def _ctc_assoc_matrix(detections, ts, graph, matching):
                 if n in fwd_map:
                     ancestors.append(fwd_map[n])
 
-            family[
-                i, np.array([fwd_map[gt_tracklet_id], *ancestors, *descendants])
-            ] = True
+            family[i, np.array([fwd_map[gt_tracklet_id], *ancestors, *descendants])] = (
+                True
+            )
         else:
             pass
             # Now we match to nothing, so even the matrix diagonal will not be filled.
@@ -1397,52 +1455,68 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
         raise ValueError(f"pad_tensor: n_max={n_max} must be larger than n={n} !")
     pad_shape = list(x.shape)
     pad_shape[dim] = n_max - n
-    pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype).to(x.device)
+    # pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype).to(x.device)
+    pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype)
     return torch.cat((x, pad), dim=dim)
 
 
-def collate_sequence_padding(max_len: int | None = None):
+def collate_sequence_padding(batch):
     """Collate function that pads all sequences to the same length."""
-
-    def collate_sequence(batch):
-        lens = tuple(len(x["coords"]) for x in batch)
-        n_max_len = max(lens) if max_len is None else max_len
-        # print(tuple(len(x["coords"]) for x in batch))
-        # print(tuple(len(x["features"]) for x in batch))
-        # print(batch[0].keys())
-        tuple(batch[0].keys())
-        normal_keys = {
-            "coords": 0,
-            "features": 0,
-            "labels": 0,  # Not needed, remove for speed.
-            "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
-        }
-        n_pads = tuple(n_max_len - s for s in lens)
-        batch_new = dict(
-            (
-                k,
-                torch.stack(
-                    [pad_tensor(x[k], n_max=n_max_len, value=v) for x in batch], dim=0
-                ),
+    lens = tuple(len(x["coords"]) for x in batch)
+    n_max_len = max(lens)
+    # print(tuple(len(x["coords"]) for x in batch))
+    # print(tuple(len(x["features"]) for x in batch))
+    # print(batch[0].keys())
+    tuple(batch[0].keys())
+    normal_keys = {
+        "coords": 0,
+        "features": 0,
+        "labels": 0,  # Not needed, remove for speed.
+        "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
+    }
+    n_pads = tuple(n_max_len - s for s in lens)
+    batch_new = dict(
+        (
+            k,
+            torch.stack(
+                [pad_tensor(x[k], n_max=n_max_len, value=v) for x in batch], dim=0
+            ),
+        )
+        for k, v in normal_keys.items()
+    )
+    batch_new["assoc_matrix"] = torch.stack(
+        [
+            pad_tensor(
+                pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
             )
-            for k, v in normal_keys.items()
-        )
-        batch_new["assoc_matrix"] = torch.stack(
-            [
-                pad_tensor(
-                    pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
-                )
-                for x in batch
-            ],
-            dim=0,
-        )
+            for x in batch
+        ],
+        dim=0,
+    )
 
-        # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
-        pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
-        for i, n_pad in enumerate(n_pads):
-            pad_mask[i, n_max_len - n_pad :] = True
+    # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
+    pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
+    for i, n_pad in enumerate(n_pads):
+        pad_mask[i, n_max_len - n_pad :] = True
 
-        batch_new["padding_mask"] = pad_mask.bool()
-        return batch_new
+    batch_new["padding_mask"] = pad_mask.bool()
+    return batch_new
 
-    return collate_sequence
+
+if __name__ == "__main__":
+
+    dummy_data = CTCData(
+        root="../../scripts/data/synthetic_cells/01",
+        ndim=2,
+        detection_folders=["TRA"],
+        window_size=4,
+        max_tokens=None,
+        augment=3,
+        features="none",
+        downscale_temporal=1,
+        downscale_spatial=1,
+        sanity_dist=False,
+        crop_size=(256, 256),
+    )
+
+    x = dummy_data[0]

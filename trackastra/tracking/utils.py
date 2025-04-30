@@ -128,14 +128,16 @@ def linear_chains(G: nx.DiGraph):
     """Find all linear chains in a tree/graph, i.e. paths that.
 
     i) either start/end at a node with out_degree>in_degree or and have no internal branches, or
-    ii) consists of a single node
+    ii) consists of a single node or a single splitting node 
 
     Note that each chain includes its start/end node, i.e. they can be appear in multiple chains.
     """
     # get all nodes with out_degree>in_degree (i.e. start of chain)
     nodes = tuple(n for n in G.nodes if G.out_degree[n] > G.in_degree[n])
-    single_nodes = tuple(n for n in G.nodes if G.out_degree[n] == G.in_degree[n] == 0)
-
+    # single nodes are those that are not starting a linear chain
+    # single_nodes = tuple(n for n in G.nodes if G.out_degree[n] == G.in_degree[n] == 0)
+    single_nodes = tuple(n for n in G.nodes if G.in_degree[n] == 0 and G.out_degree[n] != 1)
+    
     for ni in single_nodes:
         yield [ni]
 
@@ -161,9 +163,10 @@ def graph_to_napari_tracks(
     for i, cs in enumerate(chains):
         label = i + 1
         labels.append(label)
-        if len(cs) == 1:
-            # Non-connected node
-            continue
+        # if len(cs) == 1:
+        #     print(cs)
+        #     # Non-connected node
+        #     continue
         end = cs[-1]
         track_end_to_track_id[end] = label
 
@@ -173,7 +176,7 @@ def graph_to_napari_tracks(
 
     for label, cs in tqdm(zip(labels, chains), total=len(chains)):
         start = cs[0]
-        if start in track_end_to_track_id:
+        if start in track_end_to_track_id and len(cs) > 1:
             tracks_graph[label] = track_end_to_track_id[start]
             nodes = cs[1:]
         else:
@@ -359,3 +362,36 @@ def graph_to_ctc(
             )
 
     return df, masks
+
+
+def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = 'time'):
+    """From a ctc dataframe, create a digraph with frame_attribute and label as node attributes.
+
+    Args:
+        df: pd.DataFrame with columns `label`, `t1`, `t2`, `parent` (man_track.txt)
+        frame_attribute: Name of the frame attribute in the graph nodes.
+
+    Returns:
+        graph: The track graph
+    """
+    graph = nx.DiGraph()
+
+    t1 = df.t1.min()
+    t2 = df.t2.max()
+    
+    for t in tqdm(range(t1, t2 + 1)):
+        obs = df[(df.t1 <= t) & (df.t2 >= t)]
+        for row in obs.itertuples():
+            label, t1, t2, parent = row.label, row.t1, row.t2, row.parent
+            # add label as node if not already in graph
+            if not graph.has_node(label):
+                attrs = {
+                    "label": label,
+                   frame_attribute: t
+                   }
+                graph.add_node(label, **attrs)
+
+            if parent != 0:
+                graph.add_edge(parent, label)
+
+    return graph

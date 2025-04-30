@@ -69,9 +69,11 @@ class Trackastra:
         self.train_args = train_args
 
     @classmethod
-    def from_folder(cls, dir: Path, device: str | None = None):
+    def from_folder(cls, dir: Path | str, device: str | None = None):
         # Always load to cpu first
-        transformer = TrackingTransformer.from_folder(dir, map_location="cpu")
+        transformer = TrackingTransformer.from_folder(
+            Path(dir).expanduser(), map_location="cpu"
+        )
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
 

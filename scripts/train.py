@@ -1,18 +1,13 @@
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import pickle
-
 import torch
 import torch.multiprocessing
 
 # torch.multiprocessing.set_sharing_strategy("file_system")
 torch.set_float32_matmul_precision("medium")
 
-import hashlib
-import json
 import logging
-import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -33,12 +28,10 @@ from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from numerize import numerize
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
-from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
-    BalancedBatchSampler,
     BalancedDataModule,
     CTCData,
     collate_sequence_padding,
@@ -161,15 +154,15 @@ def log_tracking_metrics(model, _data, causal_norm: str, delta: int):
             max_distance=50,
         )
         (
-            df,
+            _df,
             df_metric,
-            df_mot,
-            masks,
-            graph,
-            tracks_graph,
-            tracks,
-            masks_original,
-            viewer,
+            _df_mot,
+            _masks,
+            _graph,
+            _tracks_graph,
+            _tracks,
+            _masks_original,
+            _viewer,
         ) = tracking(args_track)
     return df_metric
 
@@ -344,15 +337,20 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         # self.train_loss.append(loss)
-
-        self.log_dict(
-            {
-                "detections_per_sequence": batch["coords"].shape[1],
-                "padding_fraction": out["padding_fraction"],
-            },
-            on_step=True,
-            on_epoch=False,
-        )
+        if isinstance(self.logger, WandbLogger):
+            histogram = wandb.Histogram(
+                torch.sum(batch["timepoints"] != -1, dim=1).detach().cpu().numpy()
+            )
+            self.logger.log_metrics({"detections_per_sample": histogram})
+        else:
+            self.log_dict(
+                {
+                    "detections_per_sequence": batch["coords"].shape[1],
+                    "padding_fraction": out["padding_fraction"],
+                },
+                on_step=True,
+                on_epoch=False,
+            )
 
         return loss
 
@@ -626,7 +624,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
             value = trainer.logged_metrics[self._monitor]
             if value < self._best:
                 self._best = value
-                logging.info(f"saved best model with {self._monitor}={value:.5f}")
+                logging.info(f"Saved best model with {self._monitor}={value:.5f}")
                 pl_module.model.save(self._logdir)
 
 
@@ -646,48 +644,48 @@ def create_run_name(args):
     return name
 
 
-def cache_class(cachedir=None):
-    """A simple file cache for CTCData."""
+# def cache_class(cachedir=None):
+#     """A simple file cache for CTCData."""
 
-    def make_hashable(obj):
-        if isinstance(obj, (tuple, list)):
-            return tuple(make_hashable(e) for e in obj)
-        elif isinstance(obj, Path):
-            return obj.as_posix()
-        elif isinstance(obj, dict):
-            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-        else:
-            return obj
+#     def make_hashable(obj):
+#         if isinstance(obj, tuple | list):
+#             return tuple(make_hashable(e) for e in obj)
+#         elif isinstance(obj, Path):
+#             return obj.as_posix()
+#         elif isinstance(obj, dict):
+#             return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+#         else:
+#             return obj
 
-    def hash_args_kwargs(*args, **kwargs):
-        hashable_args = tuple(make_hashable(arg) for arg in args)
-        hashable_kwargs = make_hashable(kwargs)
-        combined_serialized = json.dumps(
-            [hashable_args, hashable_kwargs], sort_keys=True
-        )
-        hash_obj = hashlib.sha256(combined_serialized.encode())
-        return hash_obj.hexdigest()
+#     def hash_args_kwargs(*args, **kwargs):
+#         hashable_args = tuple(make_hashable(arg) for arg in args)
+#         hashable_kwargs = make_hashable(kwargs)
+#         combined_serialized = json.dumps(
+#             [hashable_args, hashable_kwargs], sort_keys=True
+#         )
+#         hash_obj = hashlib.sha256(combined_serialized.encode())
+#         return hash_obj.hexdigest()
 
-    if cachedir is None:
-        return CTCData
-    else:
-        cachedir = Path(cachedir)
+#     if cachedir is None:
+#         return CTCData
+#     else:
+#         cachedir = Path(cachedir)
 
-        def _wrapped(*args, **kwargs):
-            h = hash_args_kwargs(*args, **kwargs)
-            cachedir.mkdir(exist_ok=True, parents=True)
-            cache_file = cachedir / f"{h}.pkl"
-            if cache_file.exists():
-                logger.info(f"Loading cached dataset from {cache_file}")
-                with open(cache_file, "rb") as f:
-                    return pickle.load(f)
-            else:
-                c = CTCData(*args, **kwargs)
-                logger.info(f"Saving cached dataset to {cache_file}")
-                pickle.dump(c, open(cache_file, "wb"))
-            return c
+#         def _wrapped(*args, **kwargs):
+#             h = hash_args_kwargs(*args, **kwargs)
+#             cachedir.mkdir(exist_ok=True, parents=True)
+#             cache_file = cachedir / f"{h}.pkl"
+#             if cache_file.exists():
+#                 logger.info(f"Loading cached dataset from {cache_file}")
+#                 with open(cache_file, "rb") as f:
+#                     return pickle.load(f)
+#             else:
+#                 c = CTCData(*args, **kwargs)
+#                 logger.info(f"Saving cached dataset to {cache_file}")
+#                 pickle.dump(c, open(cache_file, "wb"))
+#             return c
 
-        return _wrapped
+#         return _wrapped
 
 
 def find_val_batch(loader_val, n_gpus):
@@ -755,6 +753,7 @@ def train(args):
                 mode="min",
                 save_top_k=1,
                 save_last=True,
+                verbose=True,
             )
         )
 
@@ -783,14 +782,11 @@ def train(args):
             f'Logdir {logdir} exists, set "--resume t"  if you want to overwrite'
         )
 
-    datasets = dict()
-
-    CTCData = cache_class(args.cachedir if args.cache else None)
-
     n_gpus = torch.cuda.device_count() if args.distributed else 1
-
     if args.preallocate:
-        logger.info("Load one dataset to preallocate memory for training")
+        if n_gpus > 1:
+            raise ValueError("Preallocation should only be used with single GPU")
+        logger.info("Preallocating memory")
         dummy_data = CTCData(
             root=Path(args.input_train[0]),
             ndim=args.ndim,
@@ -799,14 +795,12 @@ def train(args):
             max_tokens=args.max_tokens,
             augment=args.augment,
             features=args.features,
-            slice_pct=args.slice_pct_train,
             downscale_temporal=args.downscale_temporal,
             downscale_spatial=args.downscale_spatial,
             sanity_dist=args.sanity_dist,
             crop_size=args.crop_size,
             compress=args.compress,
         )
-
         dummy_model = TrackingTransformer(
             coord_dim=dummy_data.ndim,
             feat_dim=dummy_data.feat_dim,
@@ -820,6 +814,7 @@ def train(args):
             spatial_pos_cutoff=args.spatial_pos_cutoff,
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
+            attn_dist_mode=args.attn_dist_mode,
             causal_norm=args.causal_norm,
         )
 
@@ -838,122 +833,70 @@ def train(args):
         preallocate_memory(
             dummy_data,
             dummy_model_lightning,
-            args.batch_size // n_gpus,
+            args.batch_size,
             args.max_tokens,
             device,
         )
         del dummy_model_lightning
+        del dummy_model
         del dummy_data
+        torch.cuda.empty_cache()
 
-    for p in args.input_train + args.input_val:
-        if not Path(p).exists():
-            raise FileNotFoundError(f"Input folder {p} does not exist")
+    non_exists = tuple(
+        p for p in args.input_train + args.input_val if not Path(p).exists()
+    )
+    if len(non_exists) > 0:
+        p_non = "\n".join(non_exists)
+        raise FileNotFoundError(f"the following input folders don't exist: \n{p_non}")
 
-    for split, inps, slice_pct in zip(
-        ("train", "val"),
-        (args.input_train, args.input_val),
-        (args.slice_pct_train, args.slice_pct_val),
-    ):
-        logger.info(f"Loading {split.upper()} data")
-        start = default_timer()
-        datasets[split] = torch.utils.data.ConcatDataset(
-            CTCData(
-                root=Path(inp),
-                ndim=args.ndim,
-                detection_folders=args.detection_folders,
-                window_size=args.window,
-                max_tokens=args.max_tokens,
-                augment=args.augment if split == "train" else 0,
-                features=args.features,
-                slice_pct=slice_pct,
-                downscale_temporal=args.downscale_temporal,
-                downscale_spatial=args.downscale_spatial,
-                sanity_dist=args.sanity_dist,
-                crop_size=args.crop_size if split == "train" else None,
-                compress=args.compress,
-            )
-            for inp in inps
-        )
-        logger.info(
-            f"Loaded {len(datasets[split])} {split.upper()} samples (in"
-            f" {(default_timer() - start):.1f} s)\n\n"
-        )
+    if args.only_prechecks:
+        return locals()
 
-    common_loader_args = dict(
+    dataset_kwargs = dict(
+        ndim=args.ndim,
+        detection_folders=args.detection_folders,
+        window_size=args.window,
+        max_tokens=args.max_tokens,
+        features=args.features,
+        downscale_temporal=args.downscale_temporal,
+        downscale_spatial=args.downscale_spatial,
+        sanity_dist=args.sanity_dist,
+        crop_size=args.crop_size,
+        compress=args.compress,
+    )
+    sampler_kwargs = dict(
+        batch_size=args.batch_size,
+        n_pool=args.n_pool_sampler,
+        num_samples=args.train_samples,
+        weight_by_ndivs=args.weight_by_ndivs,
+        weight_by_dataset=args.weight_by_dataset,
+    )
+    loader_kwargs = dict(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
-        collate_fn=collate_sequence_padding(),
+        collate_fn=collate_sequence_padding,
     )
 
-    datamodule = None
     # Sampler gets wrapped with distributed sampler, which cannot sample with replacement
-    if args.distributed:
-        datamodule = BalancedDataModule(
-            datasets["train"],
-            datasets["val"],
-            num_samples=args.train_samples if args.train_samples > 0 else None,
-            batch_size=args.batch_size,
-            n_pool=args.n_pool_sampler,
-            num_workers=args.num_workers,
-            weight_by_ndivs=args.weight_by_ndivs,
-            weight_by_dataset=args.weight_by_dataset,
-            **common_loader_args,
-        )
-
-    else:
-
-        if args.n_pool_sampler > 0:
-            batch_sampler = BalancedBatchSampler(
-                datasets["train"],
-                batch_size=args.batch_size,
-                n_pool=args.n_pool_sampler,
-                num_samples=args.train_samples if args.train_samples > 0 else None,
-                weight_by_ndivs=args.weight_by_ndivs,
-                weight_by_dataset=args.weight_by_dataset,
-            )
-
-            loader_train = DataLoader(
-                datasets["train"],
-                batch_sampler=batch_sampler,
-                num_workers=args.num_workers,
-                **common_loader_args,
-            )
-        else:
-            if args.weight_by_ndivs:
-                raise NotImplementedError(
-                    "Weighting by ndivs only works with balanced samples (i.e."
-                    " n_pool_sampler > 0)"
-                )
-            sampler = torch.utils.data.RandomSampler(
-                datasets["train"],
-                num_samples=(
-                    args.train_samples
-                    if args.train_samples > 0
-                    else len(datasets["train"])
-                ),
-                replacement=True,
-            )
-            loader_train = DataLoader(
-                datasets["train"],
-                sampler=sampler,
-                batch_size=args.batch_size,
-                num_workers=args.num_workers,
-                **common_loader_args,
-            )
-
-    loader_val = DataLoader(
-        datasets["val"],
-        batch_size=1,
-        shuffle=False,
-        num_workers=0 if args.num_workers == 0 else max(1, args.num_workers // 2),
-        **common_loader_args,
+    datamodule = BalancedDataModule(
+        input_train=args.input_train,
+        input_val=args.input_val,
+        cachedir=args.cachedir,
+        augment=args.augment,
+        distributed=args.distributed,
+        dataset_kwargs=dataset_kwargs,
+        sampler_kwargs=sampler_kwargs,
+        loader_kwargs=loader_kwargs,
     )
+    # still write cached dataset even if epochs == 0 (e.g. for parallel cache creation)
+    if args.epochs == 0:
+        datamodule.prepare_data()
 
-    for k, v in datasets.items():
-        print(f"Dataset {k}: {len(v)} samples")
-
-    batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    # batch_val_tb_idx = 0
+    # FIXME: bring back the biggest batch for visualization.
+    # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
+    batch_val_tb_idx = 0
 
     if train_logger:
         callbacks.append(
@@ -961,6 +904,15 @@ def train(args):
         )
 
     callbacks.append(pl.pytorch.callbacks.Timer(interval="epoch"))
+    # Mostly for stopping broken runs
+    callbacks.append(
+        pl.pytorch.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=args.epochs // 6,
+            mode="min",
+            verbose=True,
+        )
+    )
 
     if args.example_images:
         callbacks.append(ExampleImages())
@@ -979,9 +931,13 @@ def train(args):
         else:
             model = TrackingTransformer.from_folder(fpath, args=args)
     else:
+        feat_dim = 0 if args.features == "none" else 7 if args.ndim == 2 else 12
         model = TrackingTransformer(
-            coord_dim=datasets["train"].datasets[0].ndim,
-            feat_dim=datasets["train"].datasets[0].feat_dim,
+            # coord_dim=datasets["train"].datasets[0].ndim,
+            coord_dim=args.ndim,
+            # feat_dim=datasets["train"].datasets[0].feat_dim,
+            # FIXME hardcoded feat_dim
+            feat_dim=feat_dim,
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
@@ -992,6 +948,7 @@ def train(args):
             spatial_pos_cutoff=args.spatial_pos_cutoff,
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
+            attn_dist_mode=args.attn_dist_mode,
             causal_norm=args.causal_norm,
         )
 
@@ -1006,6 +963,8 @@ def train(args):
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
     )
+    # Compiling does not work!
+    # model_lightning = torch.compile(model_lightning)
 
     # if logdir already exists and --resume option is set, load the last checkpoint (eg when continuing training after crash)
     if logdir is not None and logdir.exists() and args.resume:
@@ -1032,8 +991,8 @@ def train(args):
     logging.info(f"Model has {numerize.numerize(num_params)} parameters")
 
     if args.distributed:
-        # strategy = "ddp"
-        strategy = "ddp_find_unused_parameters_true"
+        strategy = "ddp"
+        # strategy = "ddp_find_unused_parameters_true"
     else:
         strategy = "auto"
 
@@ -1064,18 +1023,11 @@ def train(args):
         resume_path = None
 
     if args.epochs > 0:
-        if args.distributed and datamodule is not None:
-            trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
-        else:
-            trainer.fit(
-                model_lightning,
-                train_dataloaders=loader_train,
-                val_dataloaders=loader_val,
-                ckpt_path=resume_path,
-            )
+        logger.info("Using lightning datamodule")
+        trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
 
-    print(f"Time elapsed:     {(default_timer() - t)/60:.02f} min")
-    print(f"CPU Memory used:  {(_process_memory() - memory)/1e9:.2f} GB")
+    print(f"Time elapsed:     {(default_timer() - t) / 60:.02f} min")
+    print(f"CPU Memory used:  {(_process_memory() - memory) / 1e9:.2f} GB")
     print(f"GPU Memory used : {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
     return locals()
@@ -1122,20 +1074,18 @@ def parse_train_args():
         ),
     )
     parser.add_argument("--input_train", type=str, nargs="+")
-    parser.add_argument("--input_val", type=str, nargs="+")
-    parser.add_argument("--slice_pct_train", type=float, nargs=2, default=(0.0, 1.0))
-    parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
+    parser.add_argument("--input_val", type=str, nargs="*")
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--spatial_pos_cutoff", type=int, default=256)
     parser.add_argument("--from_subfolder", action="store_true")
-    parser.add_argument("--train_samples", type=int, default=10000)
+    parser.add_argument("--train_samples", type=int, default=50000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
     parser.add_argument("--feat_embed_per_dim", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.00)
-    parser.add_argument("--num_workers", type=int, default=12)
+    parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_tokens", type=int, default=None)
     parser.add_argument("--delta_cutoff", type=int, default=2)
@@ -1147,6 +1097,7 @@ def parse_train_args():
         default="rope",
     )
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)
+    parser.add_argument("--attn_dist_mode", default="v0")
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -1175,9 +1126,10 @@ def parse_train_args():
     parser.add_argument("--tracking_frequency", type=int, default=-1)
 
     parser.add_argument("--sanity_dist", action="store_true")
-    parser.add_argument("--preallocate", type=str2bool, default=True)
+    parser.add_argument("--preallocate", type=str2bool, default=False)
+    parser.add_argument("--only_prechecks", action="store_true")
     parser.add_argument(
-        "--compress", type=str2bool, default=False, help="compress dataset"
+        "--compress", type=str2bool, default=True, help="compress dataset"
     )
     parser.add_argument(
         "--cache",
@@ -1203,7 +1155,7 @@ def parse_train_args():
     parser.add_argument(
         "--distributed",
         type=str2bool,
-        default=False,
+        default=True,
         help="use distributed DDP training",
     )
     parser.add_argument(
@@ -1223,7 +1175,7 @@ def parse_train_args():
     parser.add_argument(
         "--crop_size",
         type=int,
-        required=True,
+        # required=True,
         nargs="+",
         default=None,
         help="random crop size for augmentation",
@@ -1261,10 +1213,9 @@ def parse_train_args():
     # elif args.attn_positional_bias == "False":
     #     args.attn_positional_bias = False
 
-    if args.distributed and hasattr(sys, "ps1"):
-        raise ValueError(
-            "Distributed training does not work in interactive mode. Run as `python"
-            " train.py`."
+    if args.train_samples == 0:
+        raise NotImplementedError(
+            "--train_samples must be > 0, full dataset pass not supported."
         )
 
     return args

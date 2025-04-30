@@ -1,11 +1,13 @@
-""""
-Sampler utils for normal and distributed training
-(e.g. to balance batch size).
+"""Data loading and sampling utils for distributed training."""
 
-"""
-
+import hashlib
+import json
 import logging
+import pickle
 from collections.abc import Iterable
+from copy import deepcopy
+from pathlib import Path
+from timeit import default_timer
 
 import numpy as np
 import torch
@@ -16,13 +18,56 @@ from torch.utils.data import (
     DataLoader,
     Dataset,
     DistributedSampler,
-    RandomSampler,
 )
 
 from .data import CTCData
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+
+
+def cache_class(cachedir=None):
+    """A simple file cache for CTCData."""
+
+    def make_hashable(obj):
+        if isinstance(obj, tuple | list):
+            return tuple(make_hashable(e) for e in obj)
+        elif isinstance(obj, Path):
+            return obj.as_posix()
+        elif isinstance(obj, dict):
+            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+        else:
+            return obj
+
+    def hash_args_kwargs(*args, **kwargs):
+        hashable_args = tuple(make_hashable(arg) for arg in args)
+        hashable_kwargs = make_hashable(kwargs)
+        combined_serialized = json.dumps(
+            [hashable_args, hashable_kwargs], sort_keys=True
+        )
+        hash_obj = hashlib.sha256(combined_serialized.encode())
+        return hash_obj.hexdigest()
+
+    if cachedir is None:
+        return CTCData
+    else:
+        cachedir = Path(cachedir)
+
+        def _wrapped(*args, **kwargs):
+            h = hash_args_kwargs(*args, **kwargs)
+            cachedir.mkdir(exist_ok=True, parents=True)
+            cache_file = cachedir / f"{h}.pkl"
+            if cache_file.exists():
+                logger.info(f"Loading cached dataset from {cache_file}")
+                with open(cache_file, "rb") as f:
+                    return pickle.load(f)
+            else:
+                c = CTCData(*args, **kwargs)
+                logger.info(f"Saving cached dataset to {cache_file}")
+                pickle.dump(c, open(cache_file, "wb"))
+            return c
+
+        return _wrapped
 
 
 class BalancedBatchSampler(BatchSampler):
@@ -129,9 +174,9 @@ class BalancedDistributedSampler(DistributedSampler):
     def __init__(
         self,
         dataset: Dataset,
-        batch_size: int = 16,
-        n_pool: int = 10,
-        num_samples: int | None = None,
+        batch_size: int,
+        n_pool: int,
+        num_samples: int,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         *args,
@@ -163,49 +208,107 @@ class BalancedDistributedSampler(DistributedSampler):
 class BalancedDataModule(LightningDataModule):
     def __init__(
         self,
-        train_dataset,
-        val_dataset,
-        batch_size,
-        n_pool=8,
-        num_samples: int | None = None,  # means all
-        weight_by_ndivs: bool = False,
-        weight_by_dataset: bool = False,
-        **loader_kwargs,
+        input_train: list,
+        input_val: list,
+        cachedir: str,
+        augment: int,
+        distributed: bool, 
+        dataset_kwargs: dict,
+        sampler_kwargs: dict,
+        loader_kwargs: dict,
     ):
         super().__init__()
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.batch_size = batch_size
-        self.num_samples = num_samples
-        self.n_pool = n_pool
-        self.weight_by_ndivs = weight_by_ndivs
-        self.weight_by_dataset = weight_by_dataset
+        self.input_train = input_train
+        self.input_val = input_val
+        self.cachedir = cachedir
+        self.augment = augment
+        self.distributed = distributed
+        self.dataset_kwargs = dataset_kwargs
+        self.sampler_kwargs = sampler_kwargs
         self.loader_kwargs = loader_kwargs
 
-    def train_dataloader(self):
-        if self.n_pool <= 0:
-            sampler = RandomSampler(
-                self.train_dataset, num_samples=self.num_samples, replacement=True
+    def prepare_data(self):
+        """Loads and caches the datasets if not already done.
+
+        Running on the main CPU process.
+        """
+        CTCData = cache_class(self.cachedir)
+        datasets = dict()
+        for split, inps in zip(
+            ("train", "val"),
+            (self.input_train, self.input_val),
+        ):
+            logger.info(f"Loading {split.upper()} data")
+            start = default_timer()
+            datasets[split] = torch.utils.data.ConcatDataset(
+                CTCData(
+                    root=Path(inp),
+                    augment=self.augment if split == "train" else 0,
+                    **self.dataset_kwargs,
+                )
+                for inp in inps
             )
-        else:
-            sampler = BalancedDistributedSampler(
-                self.train_dataset,
-                batch_size=self.batch_size,
-                n_pool=self.n_pool,
-                num_samples=self.num_samples,
-                weight_by_ndivs=self.weight_by_ndivs,
-                weight_by_dataset=self.weight_by_dataset,
+            logger.info(
+                f"Loaded {len(datasets[split])} {split.upper()} samples (in"
+                f" {(default_timer() - start):.1f} s)\n\n"
             )
 
+        del datasets
+
+    def setup(self, stage: str):
+        CTCData = cache_class(self.cachedir)
+        self.datasets = dict()
+        for split, inps in zip(
+            ("train", "val"),
+            (self.input_train, self.input_val),
+        ):
+            logger.info(f"Loading {split.upper()} data")
+            start = default_timer()
+            self.datasets[split] = torch.utils.data.ConcatDataset(
+                CTCData(
+                    root=Path(inp),
+                    augment=self.augment if split == "train" else 0,
+                    **self.dataset_kwargs,
+                )
+                for inp in inps
+            )
+            logger.info(
+                f"Loaded {len(self.datasets[split])} {split.upper()} samples (in"
+                f" {(default_timer() - start):.1f} s)\n\n"
+            )
+
+    def train_dataloader(self):
+        loader_kwargs = self.loader_kwargs.copy()
+        if self.distributed:
+            sampler = BalancedDistributedSampler(
+                self.datasets["train"],
+                **self.sampler_kwargs,
+            )
+            batch_sampler = None
+        else: 
+            sampler = None
+            batch_sampler = BalancedBatchSampler(
+                self.datasets["train"],
+                **self.sampler_kwargs,
+            )
+            if not loader_kwargs['batch_size'] == batch_sampler.batch_size:
+                raise ValueError(f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and sampler_kwargs ({batch_sampler.batch_size}) must match")            
+            del loader_kwargs['batch_size']
+        
         loader = DataLoader(
-            self.train_dataset,
+            self.datasets["train"],
             sampler=sampler,
-            batch_size=self.batch_size,
-            **self.loader_kwargs,
+            batch_sampler=batch_sampler,
+            **loader_kwargs,
         )
         return loader
 
     def val_dataloader(self):
+        val_loader_kwargs = deepcopy(self.loader_kwargs)
+        val_loader_kwargs["persistent_workers"] = False
+        val_loader_kwargs["num_workers"] = 1
         return DataLoader(
-            self.val_dataset, shuffle=False, batch_size=1, **self.loader_kwargs
+            self.datasets["val"],
+            shuffle=False,
+            **val_loader_kwargs,
         )
