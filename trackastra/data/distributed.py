@@ -212,7 +212,7 @@ class BalancedDataModule(LightningDataModule):
         input_val: list,
         cachedir: str,
         augment: int,
-        distributed:bool, 
+        distributed: bool, 
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
@@ -286,7 +286,7 @@ class BalancedDataModule(LightningDataModule):
             )
             batch_sampler = None
         else: 
-            sampler=None
+            sampler = None
             batch_sampler = BalancedBatchSampler(
                 self.datasets["train"],
                 **self.sampler_kwargs,
