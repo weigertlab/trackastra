@@ -25,7 +25,7 @@ import yaml
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
-from numerize import numerize
+import humanize
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
 from torchvision.utils import make_grid
@@ -988,7 +988,7 @@ def train(args):
 
     model_lightning.to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logging.info(f"Model has {numerize.numerize(num_params)} parameters")
+    logging.info(f"Model has {humanize.intword(num_params)} parameters")
 
     if args.distributed:
         strategy = "ddp"
