@@ -140,7 +140,7 @@ https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
   Docker images
 </h3>
 
-Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/repository/docker/bentaculum/trackastra-track/general). Currently, we only provide CPU-based docker images.
+Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/r/bentaculum/trackastra-track/tags). Currently, we only provide CPU-based docker images.
 
 Track within a docker container with the following command, filling the `<VARIABLES>`:
 
