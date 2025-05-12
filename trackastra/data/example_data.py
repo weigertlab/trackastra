@@ -10,7 +10,7 @@ def example_data_bacteria():
 
     Van Vliet et al. Spatially Correlated Gene Expression in Bacterial Groups: The Role of Lineage History, Spatial Gradients, and Cell-Cell Interactions (2018)
     https://doi.org/10.1016/j.cels.2018.03.009
-    
+
     subset of timelapse trpL/150310-11
     """
     img = tifffile.imread(root / "trpL_150310-11_img.tif")

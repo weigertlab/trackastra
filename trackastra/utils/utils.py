@@ -161,14 +161,12 @@ def _blockwise_sum_with_bounds(A: torch.Tensor, bounds: torch.Tensor, dim: int =
 
 def _bounds_from_timepoints(timepoints: torch.Tensor):
     assert timepoints.ndim == 1
-    bounds = torch.cat(
-        (
-            torch.tensor([0], device=timepoints.device),
-            # torch.nonzero faster than torch.where
-            torch.nonzero(timepoints[1:] - timepoints[:-1], as_tuple=False)[:, 0] + 1,
-            torch.tensor([len(timepoints)], device=timepoints.device),
-        )
-    )
+    bounds = torch.cat((
+        torch.tensor([0], device=timepoints.device),
+        # torch.nonzero faster than torch.where
+        torch.nonzero(timepoints[1:] - timepoints[:-1], as_tuple=False)[:, 0] + 1,
+        torch.tensor([len(timepoints)], device=timepoints.device),
+    ))
     return bounds
 
 
@@ -397,7 +395,7 @@ def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device)
     if device.type == "cuda":
         logger.info(
             "Memory allocated for model:"
-            f" {torch.cuda.max_memory_allocated() / 1024 ** 3:.02f} GB"
+            f" {torch.cuda.max_memory_allocated() / 1024**3:.02f} GB"
         )
 
 

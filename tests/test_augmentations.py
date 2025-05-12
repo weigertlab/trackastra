@@ -38,7 +38,6 @@ def generate_data(ndim: int = 2):
 
 @pytest.mark.skip(reason="outdated")
 def test_augpipeline(plot=False):
-
     x, y, points, ts = generate_data()
     pipe = AugmentationPipeline(level=3, p=1)
     (x2, y2, p2), idx = pipe(x, y, points, ts)
@@ -53,7 +52,6 @@ def test_augpipeline(plot=False):
 
 
 if __name__ == "__main__":
-
     test_augpipeline(plot=True)
 
     # pipe = RandomCrop((30, 40, 10, 20), ensure_inside_points=True)

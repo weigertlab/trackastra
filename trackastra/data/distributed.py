@@ -212,7 +212,7 @@ class BalancedDataModule(LightningDataModule):
         input_val: list,
         cachedir: str,
         augment: int,
-        distributed: bool, 
+        distributed: bool,
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
@@ -285,16 +285,18 @@ class BalancedDataModule(LightningDataModule):
                 **self.sampler_kwargs,
             )
             batch_sampler = None
-        else: 
+        else:
             sampler = None
             batch_sampler = BalancedBatchSampler(
                 self.datasets["train"],
                 **self.sampler_kwargs,
             )
-            if not loader_kwargs['batch_size'] == batch_sampler.batch_size:
-                raise ValueError(f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and sampler_kwargs ({batch_sampler.batch_size}) must match")            
-            del loader_kwargs['batch_size']
-        
+            if not loader_kwargs["batch_size"] == batch_sampler.batch_size:
+                raise ValueError(
+                    f"Batch size in loader_kwargs ({loader_kwargs['batch_size']}) and sampler_kwargs ({batch_sampler.batch_size}) must match"
+                )
+            del loader_kwargs["batch_size"]
+
         loader = DataLoader(
             self.datasets["train"],
             sampler=sampler,

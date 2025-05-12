@@ -319,38 +319,34 @@ class TrackingTransformer(torch.nn.Module):
         )
         self.norm = nn.LayerNorm(d_model)
 
-        self.encoder = nn.ModuleList(
-            [
-                EncoderLayer(
-                    coord_dim,
-                    d_model,
-                    nhead,
-                    dropout,
-                    window=window,
-                    cutoff_spatial=spatial_pos_cutoff,
-                    positional_bias=attn_positional_bias,
-                    positional_bias_n_spatial=attn_positional_bias_n_spatial,
-                    attn_dist_mode=attn_dist_mode,
-                )
-                for _ in range(num_encoder_layers)
-            ]
-        )
-        self.decoder = nn.ModuleList(
-            [
-                DecoderLayer(
-                    coord_dim,
-                    d_model,
-                    nhead,
-                    dropout,
-                    window=window,
-                    cutoff_spatial=spatial_pos_cutoff,
-                    positional_bias=attn_positional_bias,
-                    positional_bias_n_spatial=attn_positional_bias_n_spatial,
-                    attn_dist_mode=attn_dist_mode,
-                )
-                for _ in range(num_decoder_layers)
-            ]
-        )
+        self.encoder = nn.ModuleList([
+            EncoderLayer(
+                coord_dim,
+                d_model,
+                nhead,
+                dropout,
+                window=window,
+                cutoff_spatial=spatial_pos_cutoff,
+                positional_bias=attn_positional_bias,
+                positional_bias_n_spatial=attn_positional_bias_n_spatial,
+                attn_dist_mode=attn_dist_mode,
+            )
+            for _ in range(num_encoder_layers)
+        ])
+        self.decoder = nn.ModuleList([
+            DecoderLayer(
+                coord_dim,
+                d_model,
+                nhead,
+                dropout,
+                window=window,
+                cutoff_spatial=spatial_pos_cutoff,
+                positional_bias=attn_positional_bias,
+                positional_bias_n_spatial=attn_positional_bias_n_spatial,
+                attn_dist_mode=attn_dist_mode,
+            )
+            for _ in range(num_decoder_layers)
+        ])
 
         self.head_x = FeedForward(d_model)
         self.head_y = FeedForward(d_model)
@@ -442,14 +438,12 @@ class TrackingTransformer(torch.nn.Module):
             A = torch.sigmoid(A)
             A[invalid] = 0
         else:
-            return torch.stack(
-                [
-                    blockwise_causal_norm(
-                        _A, _t, mode=self.config["causal_norm"], mask_invalid=_m
-                    )
-                    for _A, _t, _m in zip(A, timepoints, invalid)
-                ]
-            )
+            return torch.stack([
+                blockwise_causal_norm(
+                    _A, _t, mode=self.config["causal_norm"], mask_invalid=_m
+                )
+                for _A, _t, _m in zip(A, timepoints, invalid)
+            ])
         return A
 
     def save(self, folder):

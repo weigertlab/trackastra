@@ -10,13 +10,11 @@ from trackastra.data import CTCData, collate_sequence_padding
 def example_dataset():
     img_dir = Path("test_data/img")
     img_dir.mkdir(exist_ok=True, parents=True)
-    img = np.array(
-        [
-            [0, 1, 1],  # t=0
-            [0, 1, 0],  # t=1
-            [1, 1, 0],  # t=2
-        ]
-    )
+    img = np.array([
+        [0, 1, 1],  # t=0
+        [0, 1, 0],  # t=1
+        [1, 1, 0],  # t=2
+    ])
     img = np.expand_dims(img, -1)
 
     for i in range(img.shape[0]):
@@ -36,26 +34,22 @@ def example_dataset():
     )
     np.savetxt(tra_dir / "man_track.txt", man_track, fmt="%i")
 
-    y = np.array(
-        [
-            [00, 10, 11],  # t=0
-            [00, 10, 00],  # t=1
-            [20, 22, 00],  # t=2
-        ]
-    )
+    y = np.array([
+        [00, 10, 11],  # t=0
+        [00, 10, 00],  # t=1
+        [20, 22, 00],  # t=2
+    ])
     y = np.expand_dims(y, -1)
     for i in range(y.shape[0]):
         imwrite(tra_dir / f"track_{i}.tif", y[i])
 
     pred_dir = Path("test_data/RES")
     pred_dir.mkdir(exist_ok=True, parents=True)
-    pred = np.array(
-        [
-            [50, 41, 00],  # t=0
-            [41, 50, 00],  # t=1
-            [43, 43, 60],  # t=2
-        ]
-    )
+    pred = np.array([
+        [50, 41, 00],  # t=0
+        [41, 50, 00],  # t=1
+        [43, 43, 60],  # t=2
+    ])
     pred = np.expand_dims(pred, -1)
 
     for i in range(pred.shape[0]):
@@ -63,13 +57,11 @@ def example_dataset():
 
     emp_dir = Path("test_data/EMPTY")
     emp_dir.mkdir(exist_ok=True, parents=True)
-    emp = np.array(
-        [
-            [0, 0, 0],  # t=0
-            [0, 0, 0],  # t=1
-            [0, 0, 0],  # t=2
-        ]
-    )
+    emp = np.array([
+        [0, 0, 0],  # t=0
+        [0, 0, 0],  # t=1
+        [0, 0, 0],  # t=2
+    ])
     emp = np.expand_dims(emp, -1)
 
     for i in range(emp.shape[0]):
@@ -77,13 +69,11 @@ def example_dataset():
 
     one_dir = Path("test_data/ONE_DET")
     one_dir.mkdir(exist_ok=True, parents=True)
-    one = np.array(
-        [
-            [1, 0, 0],  # t=0
-            [0, 0, 0],  # t=1
-            [0, 0, 0],  # t=2
-        ]
-    )
+    one = np.array([
+        [1, 0, 0],  # t=0
+        [0, 0, 0],  # t=1
+        [0, 0, 0],  # t=2
+    ])
     one = np.expand_dims(one, -1)
 
     for i in range(one.shape[0]):
@@ -166,33 +156,29 @@ def test_ctc_assoc_matrix_toy_example():
     assert_dims(tra)
     assert torch.all(
         tra["assoc_matrix"]
-        == torch.tensor(
-            [
-                [1.0, 0.0, 1.0, 1.0, 1.0],
-                [0.0, 1.0, 0.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0, 1.0, 1.0],
-                [1.0, 0.0, 1.0, 1.0, 0.0],
-                [1.0, 0.0, 1.0, 0.0, 1.0],
-            ]
-        )
+        == torch.tensor([
+            [1.0, 0.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0, 1.0],
+        ])
     )
 
     res = data[1]
     assert_dims(res)
     assert torch.all(
         res["assoc_matrix"]
-        == torch.tensor(
-            [
-                # t: 0, 0, 1, 1, 2, 2
-                # id: 41, 50, 41, 50, 43, 60
-                [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-                [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            ]
-        )
+        == torch.tensor([
+            # t: 0, 0, 1, 1, 2, 2
+            # id: 41, 50, 41, 50, 43, 60
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ])
     )
 
     return data
@@ -273,7 +259,7 @@ def test_memory(features="none"):
     )
     mem2 = process.memory_info().rss
     # print(f"memory used by raw data: {data.imgs.nbytes / 1024 ** 3:.2} GB")
-    print(f"memory used by dataset:  {(mem2 - mem1) / 1024 ** 3:.2} GB")
+    print(f"memory used by dataset:  {(mem2 - mem1) / 1024**3:.2} GB")
     return data
 
 
@@ -309,4 +295,3 @@ def test_compress(features=None):
             else:
                 print(f"{k:20} OK")
     return data1, data2
-

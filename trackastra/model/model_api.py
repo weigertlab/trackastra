@@ -134,7 +134,6 @@ class Trackastra:
         delta_t: int = 1,
         **kwargs,
     ):
-
         logger.info("Running greedy tracker")
         nodes = predictions["nodes"]
         weights = predictions["weights"]
@@ -225,7 +224,7 @@ class Trackastra:
 
         if imgs.shape != masks.shape:
             raise RuntimeError(
-                f"Img shape {imgs.shape} and mask shape {masks. shape} do not match."
+                f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
             )
 
         return self.track(imgs, masks, mode, **kwargs), masks

@@ -110,18 +110,12 @@ def build_graph(
 
     graph = TrackGraph(G, frame_attribute="time")
     frame_pairs = zip(
-        chain(
-            *[
-                list(range(graph.t_begin, graph.t_end - d))
-                for d in range(1, delta_t + 1)
-            ]
-        ),
-        chain(
-            *[
-                list(range(graph.t_begin + d, graph.t_end))
-                for d in range(1, delta_t + 1)
-            ]
-        ),
+        chain(*[
+            list(range(graph.t_begin, graph.t_end - d)) for d in range(1, delta_t + 1)
+        ]),
+        chain(*[
+            list(range(graph.t_begin + d, graph.t_end)) for d in range(1, delta_t + 1)
+        ]),
     )
     iterator = tqdm(
         frame_pairs,

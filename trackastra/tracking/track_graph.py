@@ -52,7 +52,6 @@ class TrackGraph(nx.DiGraph):
     """
 
     def __init__(self, graph_data=None, frame_attribute="t"):
-
         super().__init__(incoming_graph_data=graph_data)
 
         self.frame_attribute = frame_attribute
@@ -85,14 +84,12 @@ class TrackGraph(nx.DiGraph):
         return self._nodes_by_frame[t]
 
     def _update_metadata(self):
-
         if not self._graph_changed:
             return
 
         self._graph_changed = False
 
         if self.number_of_nodes() == 0:
-
             self._nodes_by_frame = {}
             self.t_begin = None
             self.t_end = None

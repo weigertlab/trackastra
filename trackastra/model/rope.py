@@ -37,12 +37,10 @@ class RotaryPositionalEncoding(nn.Module):
 
         self._n_dim = len(cutoffs)
         # theta in RoFormer https://arxiv.org/pdf/2104.09864.pdf
-        self.freqs = nn.ParameterList(
-            [
-                nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2))
-                for cutoff, n in zip(cutoffs, n_pos)
-            ]
-        )
+        self.freqs = nn.ParameterList([
+            nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2))
+            for cutoff, n in zip(cutoffs, n_pos)
+        ])
 
     def get_co_si(self, coords: torch.Tensor):
         _B, _N, D = coords.shape

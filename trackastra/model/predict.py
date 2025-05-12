@@ -98,8 +98,9 @@ def predict_windows(
         )
 
     # create assoc matrix between ids
-    sp_weights, sp_accum = csr_array((max_id, max_id), dtype=np.float32), csr_array(
-        (max_id, max_id), dtype=np.float32
+    sp_weights, sp_accum = (
+        csr_array((max_id, max_id), dtype=np.float32),
+        csr_array((max_id, max_id), dtype=np.float32),
     )
 
     for t in progbar_class(

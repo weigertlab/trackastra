@@ -503,25 +503,23 @@ class AugmentationPipeline(BasicPipeline):
                 # Augmentations for all images in a window
                 K.RandomHorizontalFlip(p=0.5, same_on_batch=True),
                 K.RandomVerticalFlip(p=0.5, same_on_batch=True),
-                ConcatAffine(
-                    [
-                        K.RandomAffine(
-                            degrees=180,
-                            shear=(-5, 5, -5, 5),  # x_min, x_max, y_min, y_max
-                            translate=(0.03, 0.03),
-                            scale=(0.8, 1.2),  # isotropic
-                            p=p,
-                            same_on_batch=True,
-                        ),
-                        # Anisotropic scaling
-                        K.RandomAffine(
-                            degrees=0,
-                            scale=(0.9, 1.1, 0.9, 1.1),  # x_min, x_max, y_min, y_max
-                            p=p,
-                            same_on_batch=True,
-                        ),
-                    ]
-                ),
+                ConcatAffine([
+                    K.RandomAffine(
+                        degrees=180,
+                        shear=(-5, 5, -5, 5),  # x_min, x_max, y_min, y_max
+                        translate=(0.03, 0.03),
+                        scale=(0.8, 1.2),  # isotropic
+                        p=p,
+                        same_on_batch=True,
+                    ),
+                    # Anisotropic scaling
+                    K.RandomAffine(
+                        degrees=0,
+                        scale=(0.9, 1.1, 0.9, 1.1),  # x_min, x_max, y_min, y_max
+                        p=p,
+                        same_on_batch=True,
+                    ),
+                ]),
                 RandomTemporalAffine(
                     degrees=10,
                     translate=(0.05, 0.05),

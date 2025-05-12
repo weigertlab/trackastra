@@ -81,9 +81,9 @@ def _get_node_attributes(masks):
         pd.DataFrame: Dataframe with one detection per row. Columns
             segmentation_id, x, y, z, t
     """
-    data_df = pd.concat(
-        [_detections_from_image(masks, idx) for idx in range(masks.shape[0])]
-    ).reset_index(drop=True)
+    data_df = pd.concat([
+        _detections_from_image(masks, idx) for idx in range(masks.shape[0])
+    ]).reset_index(drop=True)
     data_df = data_df.rename(
         columns={
             "label": "segmentation_id",

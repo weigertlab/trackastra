@@ -4,7 +4,6 @@ Licensed under The MIT License
 Copyright (c) 2015 Microsoft.
 """
 
-
 import numpy as np
 from skimage.measure import regionprops
 
