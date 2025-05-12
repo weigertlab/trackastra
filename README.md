@@ -164,7 +164,7 @@ docker run -it -v ./:/data -v ./:/results bentaculum/trackastra-track:model.ctc-
   <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Command Line Interface
 </h3>
-After [installation](#installation), simply run in your terminal 
+After installing Trackastra, simply run in your terminal 
 
 ```bash
 trackastra track --help
