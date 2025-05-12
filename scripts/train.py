@@ -16,6 +16,7 @@ from timeit import default_timer
 
 import configargparse
 import git
+import humanize
 import lightning as pl
 import numpy as np
 import psutil
@@ -25,7 +26,6 @@ import yaml
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
-import humanize
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
 from torchvision.utils import make_grid
@@ -221,14 +221,10 @@ class WrappedLightningModule(pl.LightningModule):
 
         if self.causal_norm != "none":
             # TODO speedup: I could softmax only the part of the matrix (upper triangular) that is not masked out
-            A_pred_soft = torch.stack(
-                [
-                    blockwise_causal_norm(
-                        _A, _t, mode=self.causal_norm, mask_invalid=_m
-                    )
-                    for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
-                ]
-            )
+            A_pred_soft = torch.stack([
+                blockwise_causal_norm(_A, _t, mode=self.causal_norm, mask_invalid=_m)
+                for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
+            ])
             with torch.cuda.amp.autocast(enabled=False):
                 if len(A) > 0:
                     # debug
@@ -404,10 +400,10 @@ class WrappedLightningModule(pl.LightningModule):
             self.tracking_frequency > 0
             and self.current_epoch % self.tracking_frequency == 0
         ):
-            _data = self.trainer.val_dataloaders.dataset.datasets[0].datasets[0]
+            data = self.trainer.val_dataloaders.dataset.datasets[0].datasets[0]
             try:
                 metrics = log_tracking_metrics(
-                    self.model, _data, self.causal_norm, self.delta_cutoff
+                    self.model, data, self.causal_norm, self.delta_cutoff
                 )
                 self.logger.experiment.add_scalar(
                     "tra_error", 1 - metrics["TRA"].mean(), self.current_epoch
@@ -616,7 +612,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
         if trainer.is_global_zero:
             logging.info(f"using logdir {self._logdir}")
             self._logdir.mkdir(parents=True, exist_ok=True)
-            with open(self._logdir / "train_config.yaml", "tw") as f:
+            with open(self._logdir / "train_config.yaml", "w") as f:
                 yaml.safe_dump(self._training_args, f)
 
     def on_validation_end(self, trainer, pl_module):
@@ -697,8 +693,7 @@ def find_val_batch(loader_val, n_gpus):
     n_divs = []
     n_dets = 0
     for batch in batches_val[: len(batches_val) // n_gpus]:
-
-        _n_divs = (
+        n_divs_ = (
             (
                 blockwise_sum(batch["assoc_matrix"][0], batch["timepoints"][0]).max(
                     dim=0
@@ -708,11 +703,11 @@ def find_val_batch(loader_val, n_gpus):
             .sum()
             .item()
         )
-        n_divs.append(_n_divs)
+        n_divs.append(n_divs_)
         assert len(batch["timepoints"]) == 1
-        _n_dets = len(batch["timepoints"][0])
-        n_dets += _n_dets
-        logger.debug(f"{_n_divs=}, {_n_dets=}")
+        n_dets_ = len(batch["timepoints"][0])
+        n_dets += n_dets_
+        logger.debug(f"{n_divs_=}, {n_dets_=}")
 
     logger.info(
         f"Validation set division/detection ratio: {np.array(n_divs).sum() / n_dets}"
