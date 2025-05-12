@@ -17,6 +17,7 @@ Nuclei tracking | Bacteria tracking
 :-: | :-:
 <video src='https://github.com/weigertlab/trackastra/assets/8866751/807a8545-2f65-4697-a175-89b90dfdc435' width=180></video>| <video src='https://github.com/weigertlab/trackastra/assets/8866751/e7426d34-4407-4acb-ad79-fae3bc7ee6f9' width=180/></video>
 
+<a id="installation-anchor"></a>
 ## Installation
 This repository contains the Python implementation of Trackastra.
 
@@ -164,7 +165,7 @@ docker run -it -v ./:/data -v ./:/results bentaculum/trackastra-track:model.ctc-
   <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
   Command Line Interface
 </h3>
-After [installation](#installation), simply run in your terminal 
+After [installing Trackastra](#installation-anchor), simply run in your terminal 
 
 ```bash
 trackastra track --help
