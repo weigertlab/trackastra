@@ -1041,7 +1041,6 @@ def parse_train_args():
         "--config",
         is_config_file=True,
         help="config file path",
-        default="configs/vanvliet.yaml",
     )
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("-o", "--outdir", type=str, default="runs")
