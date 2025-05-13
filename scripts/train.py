@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.seterr(all="ignore")
 
 
@@ -722,6 +721,9 @@ def _init_wandb(project, name, config):
 
 
 def train(args):
+    device = torch.device(
+        "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
+    )
     args.seed = seed(args.seed)
     if args.model is None:
         logger.warning("Training from scratch, this is slow!\n")
@@ -1041,6 +1043,7 @@ def parse_train_args():
         help="config file path",
         default="configs/vanvliet.yaml",
     )
+    parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("-o", "--outdir", type=str, default="runs")
     parser.add_argument("--name", type=str, help="Name to append to timestamp")
     parser.add_argument("--timestamp", type=str2bool, default=True)
