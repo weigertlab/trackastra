@@ -19,8 +19,10 @@ TICKS_FONT_SIZE = 16
 TITLE_FONT_SIZE = 24
 
 SHOW_METRICS = [
-    "TRA", 
-    "DET",
+    # "TRA", 
+    # "DET",
+    "1-TRA",
+    "1-DET",
     "AOGM", 
     "fp_edges",
     "fn_edges", 
@@ -61,7 +63,9 @@ METRICS_INFO = {
         ],
     "metrics_to_mean": [
         "DET",
+        "1-DET",
         "TRA",
+        "1-TRA",
         "Division Recall",
         "Division Precision",
         "Division F1",
@@ -108,12 +112,17 @@ _REPLACE_NAMES = {
     "num_fragmentations": "# of Fragmentations",
     "aa_match": "Association Accuracy (Matching)",
     "aa_edge_count": "Association Accuracy (Edge Count)",
+    "1-TRA": "1 - TRA",
+    "1-DET": "1 - DET",
 }
 
 
 def aggregate_metrics(metrics_df, raise_if_unknown=False):
     """Aggregates the metrics dataframe by summing or averaging the metrics over all the frames."""
     summary_df = pd.DataFrame()
+    metrics_df = metrics_df.copy()
+    metrics_df["1-TRA"] = 1 - metrics_df["TRA"]
+    metrics_df["1-DET"] = 1 - metrics_df["DET"]
     for col in metrics_df.columns:
         if col in METRICS_INFO["metrics_to_sum"]:
             summary_df[col] = [metrics_df[col].sum()]
