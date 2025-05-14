@@ -1,5 +1,4 @@
 import logging
-import sys
 import time
 from types import SimpleNamespace
 
@@ -8,9 +7,6 @@ import yaml
 
 try:
     import motile
-
-    if sys.version_info >= (3, 12):
-        raise ImportError("The optional dependency 'motile' requires Python <3.12.")
 except ModuleNotFoundError:
     raise ModuleNotFoundError(
         "For tracking with an ILP, please conda install the optional `motile`"
