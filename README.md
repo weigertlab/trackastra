@@ -22,11 +22,13 @@ This repository contains the Python implementation of Trackastra.
 
 Please first set up a Python environment (with Python version 3.10 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
 
+### Simple installation
 Trackastra can then be installed from PyPI using `pip`:
 ```bash
 pip install trackastra
 ```
 
+### With ILP support
 For tracking with an integer linear program (ILP, which is optional)
 ```bash
 conda create --name trackastra python=3.10 --no-default-packages
@@ -34,8 +36,21 @@ conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
+<details>
+<summary>📄 <h4>Development installation</h4></summary>
+  
+```bash
+conda create --name trackastra python=3.10 --no-default-packages
+conda activate trackastra
+conda install -c conda-forge -c gurobi -c funkelab ilpy
+git clone https://github.com/weigertlab/trackastra.git
+pip install -e "./trackastra[ilp,dev]"
+```
 
-Notes:
+</details>
+<details>
+<summary>📄 <h4></b>Notes/Troubleshooting</h4></summary>
+  
 - For the optional ILP linking, this will install [`motile`](https://funkelab.github.io/motile/index.html) and binaries for two discrete optimizers:
 
   1. The [Gurobi Optimizer](https://www.gurobi.com/). This is a commercial solver, which requires a valid license. Academic licenses are provided for free, see [here](https://www.gurobi.com/academia/academic-program-and-licenses/) for how to obtain one.
@@ -43,6 +58,9 @@ Notes:
   2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 - 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
+  
+</details>
+
 
 ## Usage: Tracking with a pretrained model
 
