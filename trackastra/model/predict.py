@@ -17,12 +17,17 @@ logger.setLevel(logging.INFO)
 
 
 def predict(batch, model):
-    """Args:
-        batch (_type_): _description_
-        model (_type_): _description_.
-
+    """Predict association scores between objects in a batch.
+    
+    Args:
+        batch: Dictionary containing:
+            - features: Object features array
+            - coords: Object coordinates array
+            - timepoints: Time points array
+        model: TrackingTransformer model to use for prediction.
+    
     Returns:
-        _type_: _description_
+        Array of association scores between objects.
     """
     feats = torch.from_numpy(batch["features"])
     coords = torch.from_numpy(batch["coords"])
@@ -61,19 +66,36 @@ def predict_windows(
     spatial_dim: int = 3,
     progbar_class=tqdm,
 ) -> dict:
-    """_summary_.
-
+    """Predict associations between objects across sliding windows.
+    
+    This function processes a sequence of sliding windows to predict associations
+    between objects across time frames. It handles:
+    - Object tracking across time
+    - Weight normalization across windows
+    - Edge thresholding
+    - Time-based filtering
+    
     Args:
-        windows (_type_): _description_
-        features (_type_): _description_
-        model (_type_): _description_
-        intra_window_weight (_type_, optional): _description_. Defaults to 0.
-        delta_t (_type_, optional): _description_. Defaults to 1.
-        edge_threshold (_type_, optional): _description_. Defaults to 0.05.
-        spatial_dim: Dimensionality of the input masks. This might be < model.coord_dim
-
+        windows: List of window dictionaries containing:
+            - timepoints: Array of time points
+            - labels: Array of object labels
+            - features: Object features
+            - coords: Object coordinates
+        features: List of feature objects containing:
+            - labels: Object labels
+            - timepoints: Time points
+            - coords: Object coordinates
+        model: TrackingTransformer model to use for prediction.
+        intra_window_weight: Weight factor for objects in middle of window. Defaults to 0.
+        delta_t: Maximum time difference between objects to consider. Defaults to 1.
+        edge_threshold: Minimum association score to consider. Defaults to 0.05.
+        spatial_dim: Dimensionality of input masks. May be less than model.coord_dim.
+        progbar_class: Progress bar class to use. Defaults to tqdm.
+    
     Returns:
-        _type_: _description_
+        Dictionary containing:
+            - nodes: List of node properties (id, coords, time, label)
+            - weights: Tuple of ((node_i, node_j), weight) pairs
     """
     # first get all objects/coords
     time_labels_to_id = dict()
