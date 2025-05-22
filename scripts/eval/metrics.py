@@ -372,6 +372,49 @@ def _graph_to_mo16(graph: TrackingData):
     rows = np.stack(rows)
     return rows
 
+def iou_matrix(objs, hyps, max_iou=1.):
+    # Monkey patched due to np.asfarray usage (deprecated)
+    """Computes 'intersection over union (IoU)' distance matrix between object and hypothesis rectangles.
+
+    The IoU is computed as
+
+        IoU(a,b) = 1. - isect(a, b) / union(a, b)
+
+    where isect(a,b) is the area of intersection of two rectangles and union(a, b) the area of union. The
+    IoU is bounded between zero and one. 0 when the rectangles overlap perfectly and 1 when the overlap is
+    zero.
+
+    Params
+    ------
+    objs : Nx4 array
+        Object rectangles (x,y,w,h) in rows
+    hyps : Kx4 array
+        Hypothesis rectangles (x,y,w,h) in rows
+
+    Kwargs
+    ------
+    max_iou : float
+        Maximum tolerable overlap distance. Object / hypothesis points
+        with larger distance are set to np.nan signalling do-not-pair. Defaults
+        to 0.5
+
+    Returns
+    -------
+    C : NxK array
+        Distance matrix containing pairwise distances or np.nan.
+    """
+
+    if np.size(objs) == 0 or np.size(hyps) == 0:
+        return np.empty((0, 0))
+
+    objs = np.asarray(objs).astype(float)
+    hyps = np.asarray(hyps).astype(float)
+    assert objs.shape[1] == 4
+    assert hyps.shape[1] == 4
+    iou = mm.distances.boxiou(objs[:, None], hyps[None, :])
+    dist = 1 - iou
+    return np.where(dist > max_iou, np.nan, dist)
+
 
 def compute_metrics_mot(gt: TrackingData, pred: TrackingData):
     """https://github.com/cheind/py-motmetrics#for-custom-dataset."""
@@ -388,7 +431,7 @@ def compute_metrics_mot(gt: TrackingData, pred: TrackingData):
         gt_dets = gt[gt[:, 0] == frame, 1:6]
         t_dets = pred[pred[:, 0] == frame, 1:6]
 
-        C = mm.distances.iou_matrix(gt_dets[:, 1:], t_dets[:, 1:], max_iou=0.5)
+        C = iou_matrix(gt_dets[:, 1:], t_dets[:, 1:], max_iou=0.5)
 
         # Call update once for per frame.
         # format: gt object ids, t object ids, distance
