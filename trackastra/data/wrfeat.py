@@ -175,6 +175,9 @@ class WRFeatures:
         properties="regionprops2",
         t_start: int = 0,
     ):
+        img = np.asarray(img)
+        mask = np.asarray(mask)
+
         _ntime, ndim = mask.shape[0], mask.ndim - 1
         if ndim not in (2, 3):
             raise ValueError("Only 2D or 3D data is supported")

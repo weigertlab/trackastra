@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
+import dask.array as da
 import numpy as np
 import tifffile
 import torch
@@ -141,8 +142,8 @@ class Trackastra:
 
     def _predict(
         self,
-        imgs: np.ndarray,
-        masks: np.ndarray,
+        imgs: np.ndarray | da.Array,
+        masks: np.ndarray | da.Array,
         edge_threshold: float = 0.05,
         n_workers: int = 0,
         normalize_imgs: bool = True,
@@ -150,7 +151,11 @@ class Trackastra:
     ):
         logger.info("Predicting weights for candidate graph")
         if normalize_imgs:
-            imgs = normalize(imgs)
+            if isinstance(imgs, da.Array):
+                imgs = imgs.map_blocks(normalize)
+            else:
+                imgs = normalize(imgs)
+
         self.transformer.eval()
 
         features = get_features(
@@ -214,8 +219,8 @@ class Trackastra:
 
     def track(
         self,
-        imgs: np.ndarray,
-        masks: np.ndarray,
+        imgs: np.ndarray | da.Array,
+        masks: np.ndarray | da.Array,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         normalize_imgs: bool = True,
         progbar_class=tqdm,
@@ -228,7 +233,7 @@ class Trackastra:
         tracking mode. No hyperparameters need to be chosen beyond the tracking mode.
 
         Args:
-            imgs: Input images of shape (T,(Z),Y,X).
+            imgs: Input images of shape (T,(Z),Y,X) (numpy or dask array)
             masks: Instance segmentation masks of shape (T,(Z),Y,X).
             mode: Tracking mode:
                 - "greedy_nodiv": Fast greedy linking without division
