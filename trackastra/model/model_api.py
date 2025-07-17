@@ -22,24 +22,24 @@ logger = logging.getLogger(__name__)
 
 class Trackastra:
     """A transformer-based tracking model for time-lapse data.
-    
-    Trackastra links segmented objects across time frames by predicting 
+
+    Trackastra links segmented objects across time frames by predicting
     associations with a transformer model trained on diverse time-lapse videos.
-    
+
     The model takes as input:
     - A sequence of images of shape (T,(Z),Y,X)
     - Corresponding instance segmentation masks of shape (T,(Z),Y,X)
-    
+
     It supports multiple tracking modes:
     - greedy_nodiv: Fast greedy linking without division
     - greedy: Fast greedy linking with division
     - ilp: Integer Linear Programming based linking (more accurate but slower)
-    
+
     Examples:
         >>> # Load example data
         >>> from trackastra.data import example_data_bacteria
         >>> imgs, masks = example_data_bacteria()
-        >>> 
+        >>>
         >>> # Load pretrained model and track
         >>> model = Trackastra.from_pretrained("general_2d", device="cuda")
         >>> track_graph = model.track(imgs, masks, mode="greedy")
@@ -52,7 +52,7 @@ class Trackastra:
         device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
     ):
         """Initialize Trackastra model.
-        
+
         Args:
             transformer: The underlying transformer model.
             train_args: Training configuration arguments.
@@ -102,13 +102,13 @@ class Trackastra:
     @classmethod
     def from_folder(cls, dir: Path | str, device: str | None = None):
         """Load a Trackastra model from a local folder.
-        
+
         Args:
             dir: Path to model folder containing:
                 - model weights
                 - train_config.yaml with training arguments
             device: Device to run model on.
-            
+
         Returns:
             Trackastra model instance.
         """
@@ -124,14 +124,14 @@ class Trackastra:
         cls, name: str, device: str | None = None, download_dir: Path | None = None
     ):
         """Load a pretrained Trackastra model.
-        
+
         Available pretrained models are described in detail in pretrained.json.
-        
+
         Args:
             name: Name of pretrained model (e.g. "general_2d").
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
             download_dir: Directory to download model to (defaults to ~/.cache/trackastra).
-            
+
         Returns:
             Trackastra model instance.
         """
@@ -220,10 +220,10 @@ class Trackastra:
         **kwargs,
     ) -> TrackGraph:
         """Track objects across time frames.
-        
+
         This method links segmented objects across time frames using the specified
         tracking mode. No hyperparameters need to be chosen beyond the tracking mode.
-        
+
         Args:
             imgs: Input images of shape (T,(Z),Y,X).
             masks: Instance segmentation masks of shape (T,(Z),Y,X).
@@ -234,11 +234,13 @@ class Trackastra:
             progbar_class: Progress bar class to use.
             n_workers: Number of worker processes for feature extraction.
             **kwargs: Additional arguments passed to tracking algorithm.
-            
+
         Returns:
             TrackGraph containing the tracking results.
         """
-        predictions = self._predict(imgs, masks, progbar_class=progbar_class, n_workers=n_workers)
+        predictions = self._predict(
+            imgs, masks, progbar_class=progbar_class, n_workers=n_workers
+        )
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         return track_graph
 
@@ -250,9 +252,9 @@ class Trackastra:
         **kwargs,
     ) -> tuple[TrackGraph, np.ndarray]:
         """Track objects directly from image and mask files on disk.
-        
+
         This method supports both single tiff files and directories
-        
+
         Args:
             imgs_path: Path to input images. Can be:
                 - Directory containing numbered tiff files of shape (C),(Z),Y,X
@@ -265,7 +267,7 @@ class Trackastra:
                 - "greedy": Fast greedy linking with division
                 - "ilp": Integer Linear Programming based linking (more accurate but slower)
             **kwargs: Additional arguments passed to tracking algorithm.
-            
+
         Returns:
             Tuple of (TrackGraph, tracked masks).
         """

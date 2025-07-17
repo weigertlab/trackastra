@@ -18,14 +18,14 @@ logger.setLevel(logging.INFO)
 
 def predict(batch, model):
     """Predict association scores between objects in a batch.
-    
+
     Args:
         batch: Dictionary containing:
             - features: Object features array
             - coords: Object coordinates array
             - timepoints: Time points array
         model: TrackingTransformer model to use for prediction.
-    
+
     Returns:
         Array of association scores between objects.
     """
@@ -67,14 +67,14 @@ def predict_windows(
     progbar_class=tqdm,
 ) -> dict:
     """Predict associations between objects across sliding windows.
-    
+
     This function processes a sequence of sliding windows to predict associations
     between objects across time frames. It handles:
     - Object tracking across time
     - Weight normalization across windows
     - Edge thresholding
     - Time-based filtering
-    
+
     Args:
         windows: List of window dictionaries containing:
             - timepoints: Array of time points
@@ -91,7 +91,7 @@ def predict_windows(
         edge_threshold: Minimum association score to consider. Defaults to 0.05.
         spatial_dim: Dimensionality of input masks. May be less than model.coord_dim.
         progbar_class: Progress bar class to use. Defaults to tqdm.
-    
+
     Returns:
         Dictionary containing:
             - nodes: List of node properties (id, coords, time, label)

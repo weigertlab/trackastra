@@ -55,9 +55,9 @@ def track_greedy(
 
     for edge in tqdm(edges, desc="Greedily matched edges"):
         node_in, node_out, features = edge
-        assert (
-            features[edge_attr] <= 1.0
-        ), "Edge weights are assumed to be normalized to [0,1]"
+        assert features[edge_attr] <= 1.0, (
+            "Edge weights are assumed to be normalized to [0,1]"
+        )
         # assumes sorted edges
         if features[edge_attr] < threshold:
             break

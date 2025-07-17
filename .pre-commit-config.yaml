@@ -5,9 +5,9 @@ ci:
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.6
+    rev: v0.11.10
     hooks:
-    - id: ruff
-      args: [--fix, --unsafe-fixes, --preview, --verbose, --exit-zero]
+    - id: ruff-check
+      args: [--fix, --unsafe-fixes, --verbose]
     - id: ruff-format
       args: [--preview]
