@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import psutil
 import pytest
 import torch
 from tifffile import imwrite
@@ -243,8 +244,6 @@ def test_custom_data_mw(detection_folder="RES", features="regionprops2"):
 
 @pytest.mark.skip(reason="outdated")
 def test_memory(features="none"):
-    import psutil
-
     process = psutil.Process()
     mem1 = process.memory_info().rss
     # data = ConcatDataset(tuple(CTCData(f"../scripts/data/deepcell/test/{i:02d}") for i in range(4)))
