@@ -73,9 +73,13 @@ def _border_dist_fast(mask: np.ndarray, cutoff: float = 5):
     ndim = len(mask.shape)
 
     for axis, size in enumerate(mask.shape):
+        # only apply to last two dimensions
+        if axis < ndim - 2:
+            continue
+
         # Create fade values for the band [0, cutoff)
         band_vals = np.arange(cutoff, dtype=np.float32) / cutoff
-
+        band_vals = band_vals[:size]
         # Build slices for the low border
         low_slices = [slice(None)] * ndim
         low_slices[axis] = slice(0, cutoff)
@@ -84,10 +88,9 @@ def _border_dist_fast(mask: np.ndarray, cutoff: float = 5):
             border_low, band_vals[(...,) + (None,) * (ndim - axis - 1)]
         )
         border[tuple(low_slices)] = border_low_vals
-
         # Build slices for the high border
         high_slices = [slice(None)] * ndim
-        high_slices[axis] = slice(size - cutoff, size)
+        high_slices[axis] = slice(max(0, size - cutoff), size)
         band_vals_rev = band_vals[::-1]
         border_high = border[tuple(high_slices)]
         border_high_vals = np.minimum(
@@ -202,7 +205,6 @@ class WRFeatures:
                 regionprops_table(y, intensity_image=x, properties=df_properties)
             )
             _df["timepoint"] = i + t_start
-
             if use_border_dist:
                 _df["border_dist"] = _border_dist_fast(y)
 

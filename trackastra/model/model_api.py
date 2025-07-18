@@ -252,11 +252,6 @@ class Trackastra:
                 f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
             )
 
-        if not imgs.ndim == self.transformer.config["coord_dim"] + 1:
-            raise RuntimeError(
-                f"images should be a sequence of {self.transformer.config['coord_dim']}D images"
-            )
-
         predictions = self._predict(
             imgs,
             masks,

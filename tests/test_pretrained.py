@@ -40,3 +40,29 @@ def run_predictions(name, device):
 
     _ = model._predict(imgs, masks)
     assert True
+
+
+@pytest.mark.parametrize("name", ["ctc", "general_2d"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_integration(name, device):
+    """
+    Test that the number of edges and nodes in the track graph is consistent with the pretrained model.
+    """
+    length_edges_nodes = {"ctc": (3122, 3269), "general_2d": (3121, 3268)}
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("cuda not available")
+    elif device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("mps not available")
+
+    model = Trackastra.from_pretrained(
+        name=name,
+        device=device,
+    )
+    imgs, masks = example_data_hela()
+    track_graph = model.track(imgs, masks)
+    assert (len(track_graph.edges), len(track_graph.nodes)) == length_edges_nodes[name]
+
+
+if __name__ == "__main__":
+    test_integration("ctc", "cuda")
