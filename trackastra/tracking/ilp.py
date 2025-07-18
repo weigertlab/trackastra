@@ -62,7 +62,7 @@ def track_ilp(
     ilp_config: str = "gt",
     params_file: str | None = None,
     **kwargs,
-):
+) -> nx.DiGraph:
     candidate_graph_motile = motile.TrackGraph(candidate_graph, frame_attribute="time")
 
     ilp, _used_costs = solve_full_ilp(
@@ -140,7 +140,7 @@ def solve_full_ilp(
     return solver, vars(used_costs)
 
 
-def solution_to_graph(solver, base_graph):
+def solution_to_graph(solver, base_graph) -> nx.DiGraph:
     new_graph = nx.DiGraph()
     node_indicators = solver.get_variables(motile.variables.NodeSelected)
     edge_indicators = solver.get_variables(motile.variables.EdgeSelected)

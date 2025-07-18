@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import dask.array as da
+import networkx as nx
 import numpy as np
 import tifffile
 import torch
@@ -11,7 +12,7 @@ import yaml
 from tqdm import tqdm
 
 from ..data import build_windows, get_features, load_tiff_timeseries
-from ..tracking import TrackGraph, build_graph, track_greedy
+from ..tracking import build_graph, track_greedy
 from ..utils import normalize
 from .model import TrackingTransformer
 from .predict import predict_windows
@@ -193,7 +194,7 @@ class Trackastra:
         max_neighbors: int = 10,
         delta_t: int = 1,
         **kwargs,
-    ):
+    ) -> nx.DiGraph:
         logger.info("Running greedy tracker")
         nodes = predictions["nodes"]
         weights = predictions["weights"]
@@ -226,7 +227,7 @@ class Trackastra:
         progbar_class=tqdm,
         n_workers: int = 0,
         **kwargs,
-    ) -> TrackGraph:
+    ) -> nx.DiGraph:
         """Track objects across time frames.
 
         This method links segmented objects across time frames using the specified
@@ -245,7 +246,7 @@ class Trackastra:
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
-            TrackGraph containing the tracking results.
+            nx.DiGraph containing the tracking results.
         """
         predictions = self._predict(
             imgs,
@@ -265,7 +266,7 @@ class Trackastra:
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         normalize_imgs: bool = True,
         **kwargs,
-    ) -> tuple[TrackGraph, np.ndarray]:
+    ) -> tuple[nx.DiGraph, np.ndarray]:
         """Track objects directly from image and mask files on disk.
 
         This method supports both single tiff files and directories
@@ -285,7 +286,7 @@ class Trackastra:
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
-            Tuple of (TrackGraph, tracked masks).
+            Tuple of (nx.DiGraph, tracked masks).
         """
         if not imgs_path.exists():
             raise FileNotFoundError(f"{imgs_path=} does not exist.")
