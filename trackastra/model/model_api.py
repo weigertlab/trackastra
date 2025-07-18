@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
+import dask.array as da
 import numpy as np
 import tifffile
 import torch
@@ -141,14 +142,20 @@ class Trackastra:
 
     def _predict(
         self,
-        imgs: np.ndarray,
-        masks: np.ndarray,
+        imgs: np.ndarray | da.Array,
+        masks: np.ndarray | da.Array,
         edge_threshold: float = 0.05,
         n_workers: int = 0,
+        normalize_imgs: bool = True,
         progbar_class=tqdm,
     ):
         logger.info("Predicting weights for candidate graph")
-        imgs = normalize(imgs)
+        if normalize_imgs:
+            if isinstance(imgs, da.Array):
+                imgs = imgs.map_blocks(normalize)
+            else:
+                imgs = normalize(imgs)
+
         self.transformer.eval()
 
         features = get_features(
@@ -212,9 +219,10 @@ class Trackastra:
 
     def track(
         self,
-        imgs: np.ndarray,
-        masks: np.ndarray,
+        imgs: np.ndarray | da.Array,
+        masks: np.ndarray | da.Array,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        normalize_imgs: bool = True,
         progbar_class=tqdm,
         n_workers: int = 0,
         **kwargs,
@@ -225,7 +233,7 @@ class Trackastra:
         tracking mode. No hyperparameters need to be chosen beyond the tracking mode.
 
         Args:
-            imgs: Input images of shape (T,(Z),Y,X).
+            imgs: Input images of shape (T,(Z),Y,X) (numpy or dask array)
             masks: Instance segmentation masks of shape (T,(Z),Y,X).
             mode: Tracking mode:
                 - "greedy_nodiv": Fast greedy linking without division
@@ -233,14 +241,20 @@ class Trackastra:
                 - "ilp": Integer Linear Programming based linking (more accurate but slower)
             progbar_class: Progress bar class to use.
             n_workers: Number of worker processes for feature extraction.
+            normalize_imgs: Whether to normalize the images.
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
             TrackGraph containing the tracking results.
         """
         predictions = self._predict(
-            imgs, masks, progbar_class=progbar_class, n_workers=n_workers
+            imgs,
+            masks,
+            normalize_imgs=normalize_imgs,
+            progbar_class=progbar_class,
+            n_workers=n_workers,
         )
+
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         return track_graph
 
@@ -249,6 +263,7 @@ class Trackastra:
         imgs_path: Path,
         masks_path: Path,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        normalize_imgs: bool = True,
         **kwargs,
     ) -> tuple[TrackGraph, np.ndarray]:
         """Track objects directly from image and mask files on disk.
@@ -266,6 +281,7 @@ class Trackastra:
                 - "greedy_nodiv": Fast greedy linking without division
                 - "greedy": Fast greedy linking with division
                 - "ilp": Integer Linear Programming based linking (more accurate but slower)
+            normalize_imgs: Whether to normalize the images.
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
@@ -308,4 +324,6 @@ class Trackastra:
                 f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
             )
 
-        return self.track(imgs, masks, mode, **kwargs), masks
+        return self.track(
+            imgs, masks, mode, normalize_imgs=normalize_imgs, **kwargs
+        ), masks

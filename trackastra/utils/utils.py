@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from timeit import default_timer
 
+import dask.array as da
 import matplotlib
 import numpy as np
 import torch
@@ -302,9 +303,22 @@ def normalize_tensor(x: torch.Tensor, dim: int | None = None, eps: float = 1e-8)
     return (x - mi) / (ma - mi + eps)
 
 
-def normalize(x: np.ndarray):
-    mi, ma = np.percentile(x, (1, 99.8)).astype(np.float32)
-    return (x - mi) / (ma - mi + 1e-8)
+def normalize(x: np.ndarray | da.Array, subsample: int | None = 4):
+    """Percentile normalize the image.
+
+    If subsample is not None, calculate the percentile values over a subsampled image (last two axis)
+    which is way faster for large images.
+    """
+    x = x.astype(np.float32)
+    if subsample is not None and all(s > 64 * subsample for s in x.shape[-2:]):
+        y = x[..., ::subsample, ::subsample]
+    else:
+        y = x
+
+    mi, ma = np.percentile(y, (1, 99.8)).astype(np.float32)
+    x -= mi
+    x /= ma - mi + 1e-8
+    return x
 
 
 def batched(x, batch_size, device):
