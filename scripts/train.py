@@ -40,6 +40,7 @@ from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,
     blockwise_sum,
+    none_or_path,
     normalize,
     preallocate_memory,
     random_label_cmap,
@@ -639,50 +640,6 @@ def create_run_name(args):
     return name
 
 
-# def cache_class(cachedir=None):
-#     """A simple file cache for CTCData."""
-
-#     def make_hashable(obj):
-#         if isinstance(obj, tuple | list):
-#             return tuple(make_hashable(e) for e in obj)
-#         elif isinstance(obj, Path):
-#             return obj.as_posix()
-#         elif isinstance(obj, dict):
-#             return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-#         else:
-#             return obj
-
-#     def hash_args_kwargs(*args, **kwargs):
-#         hashable_args = tuple(make_hashable(arg) for arg in args)
-#         hashable_kwargs = make_hashable(kwargs)
-#         combined_serialized = json.dumps(
-#             [hashable_args, hashable_kwargs], sort_keys=True
-#         )
-#         hash_obj = hashlib.sha256(combined_serialized.encode())
-#         return hash_obj.hexdigest()
-
-#     if cachedir is None:
-#         return CTCData
-#     else:
-#         cachedir = Path(cachedir)
-
-#         def _wrapped(*args, **kwargs):
-#             h = hash_args_kwargs(*args, **kwargs)
-#             cachedir.mkdir(exist_ok=True, parents=True)
-#             cache_file = cachedir / f"{h}.pkl"
-#             if cache_file.exists():
-#                 logger.info(f"Loading cached dataset from {cache_file}")
-#                 with open(cache_file, "rb") as f:
-#                     return pickle.load(f)
-#             else:
-#                 c = CTCData(*args, **kwargs)
-#                 logger.info(f"Saving cached dataset to {cache_file}")
-#                 pickle.dump(c, open(cache_file, "wb"))
-#             return c
-
-#         return _wrapped
-
-
 def find_val_batch(loader_val, n_gpus):
     # find the val batch with most divisions for vizualisation, which runs on GPU 0
     batches_val = tuple(
@@ -1129,17 +1086,10 @@ def parse_train_args():
         "--compress", type=str2bool, default=True, help="compress dataset"
     )
     parser.add_argument(
-        "--cache",
-        type=str2bool,
-        default=False,
-        help="cache CTCData to disk use (useful for large datasets)",
-    )
-
-    parser.add_argument(
         "--cachedir",
-        type=str,
+        type=none_or_path,
         default=".cache",
-        help="cache dir for CTCData if --cache is set",
+        help="cache dir for CTCData. Set to `None` to disable caching.",
     )
     parser.add_argument("--resume", type=str2bool, default=True)
     parser.add_argument(

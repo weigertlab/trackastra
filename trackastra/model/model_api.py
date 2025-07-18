@@ -247,11 +247,6 @@ class Trackastra:
         Returns:
             TrackGraph containing the tracking results.
         """
-        if not imgs.shape == masks.shape:
-            raise RuntimeError(
-                f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
-            )
-
         predictions = self._predict(
             imgs,
             masks,
@@ -259,6 +254,7 @@ class Trackastra:
             progbar_class=progbar_class,
             n_workers=n_workers,
         )
+
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         return track_graph
 

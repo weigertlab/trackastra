@@ -461,6 +461,14 @@ def str2path(x: str) -> Path:
         return Path(x).expanduser().resolve()
 
 
+def none_or_path(x: str | None) -> Path | None:
+    """Cast string to resolved absolute path or return None."""
+    if x in (None, "None", "none"):
+        return None
+    else:
+        return str2path(str(x))
+
+
 if __name__ == "__main__":
     A = torch.rand(50, 50)
     idx = torch.tensor([0, 10, 20, A.shape[0]])
