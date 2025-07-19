@@ -394,3 +394,37 @@ def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = "time"):
                 graph.add_edge(parent, label)
 
     return graph
+
+
+def apply_solution_graph_to_masks(
+    solution_graph,
+    masks_original,
+    frame_attribute="time",
+):
+    """Apply a solution track graph to masks, i.e. keep only the masks contained in the graph.
+
+    Args:
+        solution_graph: A solution track graph with node attributes `label` and `time`.
+        masks: Array of masks with shape (time, (z), y, x).
+
+    Returns:
+        np.ndarray: The masks corresponding to the solution graph.
+    """
+    regions = tuple(
+        dict((reg.label, reg.slice) for reg in regionprops(m))
+        for t, m in enumerate(masks_original)
+    )
+    masks = np.zeros_like(masks_original)
+    for _n in solution_graph.nodes:
+        node = solution_graph.nodes[_n]
+        t = node[frame_attribute]
+        lab = node["label"]
+        ss = regions[t][lab]
+        m = masks_original[t][ss] == lab
+        if masks[t][ss][m].max() > 0:
+            raise RuntimeError(f"Overlapping masks at t={t}, label={lab}")
+        if np.count_nonzero(m) == 0:
+            raise RuntimeError(f"Empty mask at t={t}, label={lab}")
+        masks[t][ss][m] = lab
+
+    return masks

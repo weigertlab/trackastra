@@ -12,7 +12,7 @@ import yaml
 from tqdm import tqdm
 
 from ..data import build_windows, get_features, load_tiff_timeseries
-from ..tracking import build_graph, track_greedy
+from ..tracking import apply_solution_graph_to_masks, build_graph, track_greedy
 from ..utils import normalize
 from .model import TrackingTransformer
 from .predict import predict_windows
@@ -227,7 +227,7 @@ class Trackastra:
         progbar_class=tqdm,
         n_workers: int = 0,
         **kwargs,
-    ) -> nx.DiGraph:
+    ) -> tuple[nx.DiGraph, np.ndarray]:
         """Track objects across time frames.
 
         This method links segmented objects across time frames using the specified
@@ -257,7 +257,9 @@ class Trackastra:
         )
 
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
-        return track_graph
+        masks_tracked = apply_solution_graph_to_masks(track_graph, masks)
+
+        return track_graph, masks_tracked
 
     def track_from_disk(
         self,
@@ -325,6 +327,4 @@ class Trackastra:
                 f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
             )
 
-        return self.track(
-            imgs, masks, mode, normalize_imgs=normalize_imgs, **kwargs
-        ), masks
+        return self.track(imgs, masks, mode, normalize_imgs=normalize_imgs, **kwargs)

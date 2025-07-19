@@ -6,6 +6,7 @@ from .tracking import (
     track_greedy,
 )
 from .utils import (
+    apply_solution_graph_to_masks,
     ctc_to_graph,
     ctc_to_napari_tracks,
     graph_to_ctc,
