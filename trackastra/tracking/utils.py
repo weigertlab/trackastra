@@ -6,6 +6,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import tifffile
+import zarr
+from geff import write_nx
 from skimage.measure import regionprops
 from tqdm import tqdm
 
@@ -394,3 +396,66 @@ def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = "time"):
                 graph.add_edge(parent, label)
 
     return graph
+
+
+def apply_solution_graph_to_masks(
+    solution_graph,
+    masks_original,
+    frame_attribute="time",
+):
+    """Apply a solution track graph to masks, i.e. keep only the masks contained in the graph.
+
+    Args:
+        solution_graph: A solution track graph with node attributes `label` and `time`.
+        masks: Array of masks with shape (time, (z), y, x).
+
+    Returns:
+        np.ndarray: The masks corresponding to the solution graph.
+    """
+    regions = tuple(
+        dict((reg.label, reg.slice) for reg in regionprops(m))
+        for t, m in enumerate(masks_original)
+    )
+    masks = np.zeros_like(masks_original)
+    for _n in solution_graph.nodes:
+        node = solution_graph.nodes[_n]
+        t = node[frame_attribute]
+        lab = node["label"]
+        ss = regions[t][lab]
+        m = masks_original[t][ss] == lab
+        if masks[t][ss][m].max() > 0:
+            raise RuntimeError(f"Overlapping masks at t={t}, label={lab}")
+        if np.count_nonzero(m) == 0:
+            raise RuntimeError(f"Empty mask at t={t}, label={lab}")
+        masks[t][ss][m] = lab
+
+    return masks
+
+
+def write_to_geff(
+    graph: nx.DiGraph,
+    masks: np.ndarray,
+    outdir: Path,
+    tracking_graph_name: str = "tracking_graph.geff",
+    position_attr: str = "coords",
+):
+    """Write to the graph exchange file format (GEFF).
+
+    Corresponding masks are written to the same zarr group.
+    https://live-image-tracking-tools.github.io/geff/
+
+    Args:
+        graph: A track graph with node attributes `label` and `time`.
+        masks: Array of masks with shape (time, (z), y, x).
+        outdir: Path to overall output zarr file. Should have .zarr file extension.
+        tracking_graph_name: Name of the tracking graph file.
+        position_attr: Name of the node attribute that contains the position.
+    """
+    root = zarr.open_group(outdir, mode="w")
+    segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
+    segmentation[:] = masks
+    write_nx(
+        graph=graph,
+        path=Path(outdir) / tracking_graph_name,
+        position_attr=position_attr,
+    )
