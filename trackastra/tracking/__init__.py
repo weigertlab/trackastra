@@ -13,4 +13,5 @@ from .utils import (
     graph_to_edge_table,
     graph_to_napari_tracks,
     linear_chains,
+    write_to_geff,
 )

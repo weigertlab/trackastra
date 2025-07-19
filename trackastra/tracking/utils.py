@@ -6,6 +6,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import tifffile
+import zarr
+from geff import write_nx
 from skimage.measure import regionprops
 from tqdm import tqdm
 
@@ -428,3 +430,32 @@ def apply_solution_graph_to_masks(
         masks[t][ss][m] = lab
 
     return masks
+
+
+def write_to_geff(
+    graph: nx.DiGraph,
+    masks: np.ndarray,
+    outdir: Path,
+    tracking_graph_name: str = "tracking_graph.geff",
+    position_attr: str = "coords",
+):
+    """Write to the graph exchange file format (GEFF).
+
+    Corresponding masks are written to the same zarr group.
+    https://live-image-tracking-tools.github.io/geff/
+
+    Args:
+        graph: A track graph with node attributes `label` and `time`.
+        masks: Array of masks with shape (time, (z), y, x).
+        outdir: Path to overall output zarr file. Should have .zarr file extension.
+        tracking_graph_name: Name of the tracking graph file.
+        position_attr: Name of the node attribute that contains the position.
+    """
+    root = zarr.open_group(outdir, mode="w")
+    segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
+    segmentation[:] = masks
+    write_nx(
+        graph=graph,
+        path=Path(outdir) / tracking_graph_name,
+        position_attr=position_attr,
+    )
