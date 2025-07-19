@@ -62,7 +62,7 @@ def test_integration(name, device, batch_size):
         device=device,
     )
     imgs, masks = example_data_hela()
-    track_graph = model.track(imgs, masks, batch_size=batch_size)
+    track_graph, _ = model.track(imgs, masks, batch_size=batch_size)
     assert (len(track_graph.edges), len(track_graph.nodes)) == length_edges_nodes[name]
 
 
