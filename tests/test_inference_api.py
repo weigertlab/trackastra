@@ -30,7 +30,7 @@ def test_api(example_data):
 
     track_graph = model._track_from_predictions(predictions)
 
-    track_graph = model.track(
+    track_graph, masks_tracked = model.track(
         imgs,
         masks,
         mode="greedy",
@@ -44,9 +44,9 @@ def test_api(example_data):
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        _, _masks_tracked = graph_to_ctc(
+        _, _masks_ctc = graph_to_ctc(
             track_graph,
-            masks,
+            masks_tracked,
             outdir=tmp,
         )
 
