@@ -101,6 +101,7 @@ def predict_windows(
         delta_t: Maximum time difference between objects to consider. Defaults to 1.
         edge_threshold: Minimum association score to consider. Defaults to 0.05.
         spatial_dim: Dimensionality of input masks. May be less than model.coord_dim.
+        batch_size: Number of windows to predict on in parallel. Defaults to 1.
         progbar_class: Progress bar class to use. Defaults to tqdm.
 
     Returns:

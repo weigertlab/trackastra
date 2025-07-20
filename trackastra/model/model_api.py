@@ -59,6 +59,7 @@ class Trackastra:
             transformer: The underlying transformer model.
             train_args: Training configuration arguments.
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
+            batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
         """
         if device == "cuda":
             if torch.cuda.is_available():
