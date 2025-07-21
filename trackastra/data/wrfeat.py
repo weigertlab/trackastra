@@ -12,6 +12,7 @@ from typing import Literal
 import joblib
 import numpy as np
 import pandas as pd
+import torch
 from edt import edt
 from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
@@ -559,7 +560,10 @@ def _check_dimensions(x: np.ndarray, ndim: int):
 
 
 def build_windows(
-    features: list[WRFeatures], window_size: int, progbar_class=tqdm
+    features: list[WRFeatures],
+    window_size: int,
+    progbar_class=tqdm,
+    as_torch: bool = False,
 ) -> list[dict]:
     windows = []
     for t1, t2 in progbar_class(
@@ -577,11 +581,13 @@ def build_windows(
             coords = np.zeros((0, feat.ndim), dtype=int)
 
         w = dict(
-            coords=coords,
-            t1=t1,
-            labels=labels,
-            timepoints=timepoints,
-            features=feat.features_stacked,
+            coords=torch.from_numpy(coords) if as_torch else coords,
+            t1=torch.tensor(t1, dtype=torch.int32) if as_torch else t1,
+            labels=torch.from_numpy(labels) if as_torch else labels,
+            timepoints=torch.from_numpy(timepoints) if as_torch else timepoints,
+            features=torch.from_numpy(feat.features_stacked)
+            if as_torch
+            else feat.features_stacked,
         )
         windows.append(w)
 

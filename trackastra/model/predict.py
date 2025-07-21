@@ -6,6 +6,9 @@ import torch
 from scipy.sparse import SparseEfficiencyWarning, csr_array
 from tqdm import tqdm
 
+from trackastra.data import collate_sequence_padding
+from trackastra.model import TrackingTransformer
+
 # TODO fix circular import
 # from .model import TrackingTransformer
 # from trackastra.data import WRFeatures
@@ -16,11 +19,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def predict(batch, model):
-    """Predict association scores between objects in a batch.
+def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
+    """Predict association scores between objects in a batch of windows.
 
     Args:
-        batch: Dictionary containing:
+        batch: List of dictionaries containing:
             - features: Object features array
             - coords: Object coordinates array
             - timepoints: Time points array
@@ -29,14 +32,20 @@ def predict(batch, model):
     Returns:
         Array of association scores between objects.
     """
-    feats = torch.from_numpy(batch["features"])
-    coords = torch.from_numpy(batch["coords"])
-    timepoints = torch.from_numpy(batch["timepoints"]).long()
+    # feats = torch.stack([torch.from_numpy(b["features"]) for b in batch])
+    # coords = torch.stack([torch.from_numpy(b["coords"]) for b in batch])
+    # timepoints = torch.stack([torch.from_numpy(b["timepoints"]) for b in batch]).long()
+
+    padded_batch = collate_sequence_padding(batch)
+    feats = padded_batch["features"]
+    coords = padded_batch["coords"]
+    timepoints = padded_batch["timepoints"].long()
+
     # Hack that assumes that all parameters of a model are on the same device
     device = next(model.parameters()).device
-    feats = feats.unsqueeze(0).to(device)
-    timepoints = timepoints.unsqueeze(0).to(device)
-    coords = coords.unsqueeze(0).to(device)
+    feats = feats.to(device)
+    timepoints = timepoints.to(device)
+    coords = coords.to(device)
 
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
@@ -49,7 +58,8 @@ def predict(batch, model):
         # invalid = dist > model.config["spatial_pos_cutoff"]
         # A[invalid] = -torch.inf
 
-        A = A.squeeze(0).detach().cpu().numpy()
+        # TODO stay on device for further computation?
+        A = A.detach().cpu().numpy()
 
     return A
 
@@ -64,6 +74,7 @@ def predict_windows(
     delta_t: int = 1,
     edge_threshold: float = 0.05,
     spatial_dim: int = 3,
+    batch_size: int = 1,
     progbar_class=tqdm,
 ) -> dict:
     """Predict associations between objects across sliding windows.
@@ -90,6 +101,7 @@ def predict_windows(
         delta_t: Maximum time difference between objects to consider. Defaults to 1.
         edge_threshold: Minimum association score to consider. Defaults to 0.05.
         spatial_dim: Dimensionality of input masks. May be less than model.coord_dim.
+        batch_size: Number of windows to predict on in parallel. Defaults to 1.
         progbar_class: Progress bar class to use. Defaults to tqdm.
 
     Returns:
@@ -126,42 +138,44 @@ def predict_windows(
     )
 
     for t in progbar_class(
-        range(len(windows)),
+        range(0, len(windows), batch_size),
         desc="Computing associations",
     ):
         # This assumes that the samples in the dataset are ordered by time and start at 0.
-        batch = windows[t]
-        timepoints = batch["timepoints"]
-        labels = batch["labels"]
+        batch = windows[t : t + batch_size]
+        A_batch = predict(batch, model)
 
-        A = predict(batch, model)
+        for i, A in enumerate(A_batch):
+            timepoints = batch[i]["timepoints"].numpy()
+            labels = batch[i]["labels"].numpy()
 
-        dt = timepoints[None, :] - timepoints[:, None]
-        time_mask = np.logical_and(dt <= delta_t, dt > 0)
-        A[~time_mask] = 0
-        ii, jj = np.where(A >= edge_threshold)
+            dt = timepoints[None, :] - timepoints[:, None]
+            time_mask = np.logical_and(dt <= delta_t, dt > 0)
+            A = A[: len(timepoints), : len(timepoints)]
+            A[~time_mask] = 0
+            ii, jj = np.where(A >= edge_threshold)
 
-        if len(ii) == 0:
-            continue
+            if len(ii) == 0:
+                continue
 
-        labels_ii = labels[ii]
-        labels_jj = labels[jj]
-        ts_ii = timepoints[ii]
-        ts_jj = timepoints[jj]
-        nodes_ii = np.array(
-            tuple(time_labels_to_id[(t, lab)] for t, lab in zip(ts_ii, labels_ii))
-        )
-        nodes_jj = np.array(
-            tuple(time_labels_to_id[(t, lab)] for t, lab in zip(ts_jj, labels_jj))
-        )
+            labels_ii = labels[ii]
+            labels_jj = labels[jj]
+            ts_ii = timepoints[ii]
+            ts_jj = timepoints[jj]
+            nodes_ii = np.array(
+                tuple(time_labels_to_id[(t, lab)] for t, lab in zip(ts_ii, labels_ii))
+            )
+            nodes_jj = np.array(
+                tuple(time_labels_to_id[(t, lab)] for t, lab in zip(ts_jj, labels_jj))
+            )
 
-        # weight middle parts higher
-        t_middle = t + (model.config["window"] - 1) / 2
-        ddt = timepoints[:, None] - t_middle * np.ones_like(dt)
-        window_weight = np.exp(-intra_window_weight * ddt**2)  # default is 1
-        # window_weight = np.exp(4*A) # smooth max
-        sp_weights[nodes_ii, nodes_jj] += window_weight[ii, jj] * A[ii, jj]
-        sp_accum[nodes_ii, nodes_jj] += window_weight[ii, jj]
+            # weight middle parts higher
+            t_middle = t + (model.config["window"] - 1) / 2
+            ddt = timepoints[:, None] - t_middle * np.ones_like(dt)
+            window_weight = np.exp(-intra_window_weight * ddt**2)  # default is 1
+            # window_weight = np.exp(4*A) # smooth max
+            sp_weights[nodes_ii, nodes_jj] += window_weight[ii, jj] * A[ii, jj]
+            sp_accum[nodes_ii, nodes_jj] += window_weight[ii, jj]
 
     sp_weights_coo = sp_weights.tocoo()
     sp_accum_coo = sp_accum.tocoo()
