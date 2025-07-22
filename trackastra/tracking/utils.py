@@ -454,8 +454,18 @@ def write_to_geff(
     root = zarr.open_group(outdir, mode="w")
     segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
     segmentation[:] = masks
+
+    # TODO implement optional axes spec
+    # if masks.ndim == 3:
+    #     axes_names = ["t", "y", "x"]
+    #     axes_types = ["time", "space", "space"]
+    # elif masks.ndim == 4:
+    #     axes_names = ["t", "z", "y", "x"]
+    #     axes_types = ["time", "space", "space", "space"]
+    # else:
+    #     raise ValueError(f"Unsupported number of dimensions: {masks.ndim}")
+
     write_nx(
         graph=graph,
         path=Path(outdir) / tracking_graph_name,
-        position_attr=position_attr,
     )
