@@ -107,7 +107,7 @@ from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks, write_to_geff
 from trackastra.data import example_data_bacteria
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "automatic" # explicit choices: [cuda, mps, cpu]
 
 # load some test data images and masks
 imgs, masks = example_data_bacteria()

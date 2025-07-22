@@ -1470,15 +1470,16 @@ def collate_sequence_padding(batch):
         )
         for k, v in normal_keys.items()
     )
-    batch_new["assoc_matrix"] = torch.stack(
-        [
-            pad_tensor(
-                pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
-            )
-            for x in batch
-        ],
-        dim=0,
-    )
+    if "assoc_matrix" in batch[0]:
+        batch_new["assoc_matrix"] = torch.stack(
+            [
+                pad_tensor(
+                    pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
+                )
+                for x in batch
+            ],
+            dim=0,
+        )
 
     # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
     pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)

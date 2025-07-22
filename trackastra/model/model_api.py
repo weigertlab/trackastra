@@ -52,6 +52,7 @@ class Trackastra:
         transformer: TrackingTransformer,
         train_args: dict,
         device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
+        batch_size: int | None = None,
     ):
         """Initialize Trackastra model.
 
@@ -59,6 +60,7 @@ class Trackastra:
             transformer: The underlying transformer model.
             train_args: Training configuration arguments.
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
+            batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
         """
         if device == "cuda":
             if torch.cuda.is_available():
@@ -97,6 +99,20 @@ class Trackastra:
             raise ValueError(f"Device {device} not recognized.")
 
         logger.info(f"Using device {self.device}")
+
+        if batch_size is None:
+            if self.device == "cpu":
+                self.batch_size = 1
+                logger.info(
+                    f"Using batch size {self.batch_size} for predicting on CPU."
+                )
+            else:
+                self.batch_size = 16
+                logger.info(
+                    f"Using batch size {self.batch_size} for model on {self.device}."
+                )
+        else:
+            self.batch_size = batch_size
 
         self.transformer = transformer.to(self.device)
         self.train_args = train_args
@@ -171,6 +187,7 @@ class Trackastra:
             features,
             window_size=self.transformer.config["window"],
             progbar_class=progbar_class,
+            as_torch=True,
         )
 
         logger.info("Predicting windows")
@@ -181,6 +198,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
             progbar_class=progbar_class,
+            batch_size=self.batch_size,
         )
 
         return predictions
