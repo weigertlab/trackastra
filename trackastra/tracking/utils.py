@@ -432,6 +432,26 @@ def apply_solution_graph_to_masks(
     return masks
 
 
+def split_coords_attr(graph: nx.DiGraph, position_attr: str = "coords"):
+    """Split coordinate list into z, y, x attributes."""
+    for node_id in tqdm(
+        graph.nodes, desc="Splitting coordinates to scalars", leave=False
+    ):
+        coords = graph.nodes[node_id].get(position_attr)
+        if coords is not None:
+            if len(coords) < 2 or len(coords) > 3:
+                raise ValueError(
+                    f"Expected coords to have 2 or 3 elements, got {len(coords)} for node {node_id}"
+                )
+            if len(coords) >= 2:
+                graph.nodes[node_id]["x"] = coords[-1]
+                graph.nodes[node_id]["y"] = coords[-2]
+            if len(coords) == 3:
+                graph.nodes[node_id]["z"] = coords[-3]
+
+    return graph
+
+
 def write_to_geff(
     graph: nx.DiGraph,
     masks: np.ndarray,
@@ -455,17 +475,20 @@ def write_to_geff(
     segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
     segmentation[:] = masks
 
-    # TODO implement optional axes spec
-    # if masks.ndim == 3:
-    #     axes_names = ["t", "y", "x"]
-    #     axes_types = ["time", "space", "space"]
-    # elif masks.ndim == 4:
-    #     axes_names = ["t", "z", "y", "x"]
-    #     axes_types = ["time", "space", "space", "space"]
-    # else:
-    #     raise ValueError(f"Unsupported number of dimensions: {masks.ndim}")
+    if masks.ndim == 3:
+        axis_names = ["time", "y", "x"]
+        axis_types = ["time", "space", "space"]
+    elif masks.ndim == 4:
+        axis_names = ["time", "z", "y", "x"]
+        axis_types = ["time", "space", "space", "space"]
+    else:
+        raise ValueError(f"Unsupported number of dimensions: {masks.ndim}")
+
+    graph = split_coords_attr(graph, position_attr=position_attr)
 
     write_nx(
         graph=graph,
         path=Path(outdir) / tracking_graph_name,
+        axis_types=axis_types,
+        axis_names=axis_names,
     )
