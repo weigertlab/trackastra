@@ -432,6 +432,9 @@ class TrackingTransformer(torch.nn.Module):
         # spatial distances
         dist = torch.cdist(coords[:, :, 1:], coords[:, :, 1:])
         invalid = dist > self.config["spatial_pos_cutoff"]
+        invalid = (
+            invalid | (timepoints.unsqueeze(1) == -1) | (timepoints.unsqueeze(2) == -1)
+        )
 
         if self.config["causal_norm"] == "none":
             # Spatially distant entries are set to zero

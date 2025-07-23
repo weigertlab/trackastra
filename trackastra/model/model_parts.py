@@ -282,4 +282,5 @@ class RelativePositionalAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, N, D)
         # output projection
         y = self.proj(y)
+
         return y
