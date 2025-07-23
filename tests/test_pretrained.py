@@ -44,7 +44,7 @@ def run_predictions(name, device):
 
 @pytest.mark.parametrize("name", ["ctc", "general_2d"])
 @pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
-@pytest.mark.parametrize("batch_size", [None, 1, 7])
+@pytest.mark.parametrize("batch_size", [None, 1, 3])
 def test_integration(name, device, batch_size):
     """
     Test that the number of edges and nodes in the track graph is consistent with the pretrained model.
@@ -66,4 +66,4 @@ def test_integration(name, device, batch_size):
 
 
 if __name__ == "__main__":
-    test_integration("ctc", "mps", 7)
+    test_integration("ctc", "mps", 3)
