@@ -1,5 +1,5 @@
 /data
-/tracked
+/tracked*
 
 /scripts/data
 /scripts/runs

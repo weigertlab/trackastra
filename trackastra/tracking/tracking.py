@@ -89,7 +89,7 @@ def build_graph(
     max_distance: int | None = None,
     max_neighbors: int | None = None,
     delta_t=1,
-):
+) -> nx.DiGraph:
     logger.info(f"Build candidate graph with {delta_t=}")
     G = nx.DiGraph()
 
