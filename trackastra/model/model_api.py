@@ -21,6 +21,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _default_batch_size(device: str | torch.device):
+    if isinstance(device, torch.device):
+        device = device.type
+    d = {"cpu": 1, "cuda": 16, "mps": 1}
+    batch_size = d[device]
+    logger.info(f"Default batch size = {batch_size} for model on {device}.")
+    return batch_size
+
+
 class Trackastra:
     """A transformer-based tracking model for time-lapse data.
 
@@ -51,7 +60,6 @@ class Trackastra:
         transformer: TrackingTransformer,
         train_args: dict,
         device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
-        batch_size: int | None = None,
     ):
         """Initialize Trackastra model.
 
@@ -99,19 +107,7 @@ class Trackastra:
 
         logger.info(f"Using device {self.device}")
 
-        if batch_size is None:
-            if self.device == "cpu":
-                self.batch_size = 1
-                logger.info(
-                    f"Using batch size {self.batch_size} for predicting on CPU."
-                )
-            else:
-                self.batch_size = 16
-                logger.info(
-                    f"Using batch size {self.batch_size} for model on {self.device}."
-                )
-        else:
-            self.batch_size = batch_size
+        self.batch_size = _default_batch_size(self.device)
 
         self.transformer = transformer.to(self.device)
         self.train_args = train_args
@@ -164,7 +160,10 @@ class Trackastra:
         n_workers: int = 0,
         normalize_imgs: bool = True,
         progbar_class=tqdm,
+        batch_size: int | None = None,
     ):
+        batch_size = self.batch_size if batch_size is None else batch_size
+
         logger.info("Predicting weights for candidate graph")
         if normalize_imgs:
             if isinstance(imgs, da.Array):
@@ -197,7 +196,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
             progbar_class=progbar_class,
-            batch_size=self.batch_size,
+            batch_size=batch_size,
         )
 
         return predictions
@@ -243,6 +242,7 @@ class Trackastra:
         normalize_imgs: bool = True,
         progbar_class=tqdm,
         n_workers: int = 0,
+        batch_size: int | None = None,
         **kwargs,
     ) -> TrackGraph:
         """Track objects across time frames.
@@ -271,6 +271,7 @@ class Trackastra:
             normalize_imgs=normalize_imgs,
             progbar_class=progbar_class,
             n_workers=n_workers,
+            batch_size=batch_size,
         )
 
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)

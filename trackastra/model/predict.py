@@ -40,17 +40,20 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     feats = padded_batch["features"]
     coords = padded_batch["coords"]
     timepoints = padded_batch["timepoints"].long()
+    padding_mask = padded_batch["padding_mask"]
 
     # Hack that assumes that all parameters of a model are on the same device
     device = next(model.parameters()).device
     feats = feats.to(device)
     timepoints = timepoints.to(device)
     coords = coords.to(device)
+    padding_mask = padding_mask.to(device)
 
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     with torch.no_grad():
-        A = model(coords, features=feats)
+        A = model(coords, features=feats, padding_mask=padding_mask)
+
         A = model.normalize_output(A, timepoints, coords)
 
         # # Spatially far entries should not influence the causal normalization
