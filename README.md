@@ -1,7 +1,7 @@
-![PyPI](https://img.shields.io/pypi/v/trackastra)
+[![PyPI](https://img.shields.io/pypi/v/trackastra)](https://pypi.org/project/trackastra/)
 ![Python](https://img.shields.io/pypi/pyversions/trackastra)
 ![Build](https://img.shields.io/github/actions/workflow/status/weigertlab/trackastra/python-package-conda.yml?branch=main)
-![License](https://img.shields.io/github/license/weigertlab/trackastra)
+[![License](https://img.shields.io/github/license/weigertlab/trackastra)](https://github.com/weigertlab/trackastra/blob/main/LICENSE)
 
 
 <div align="center">
