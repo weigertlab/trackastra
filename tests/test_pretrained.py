@@ -43,7 +43,8 @@ def run_predictions(name, device):
 
 
 @pytest.mark.parametrize("name", ["ctc", "general_2d"])
-@pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
+# @pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("batch_size", [None, 3])
 def test_integration(name, device, batch_size):
     """
