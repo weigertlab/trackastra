@@ -488,7 +488,7 @@ def write_to_geff(
 
     write_nx(
         graph=graph,
-        path=Path(outdir) / tracking_graph_name,
+        store=Path(outdir) / tracking_graph_name,
         axis_types=axis_types,
         axis_names=axis_names,
     )
