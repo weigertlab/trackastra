@@ -1,3 +1,9 @@
+![PyPI](https://img.shields.io/pypi/v/trackastra)
+![Python](https://img.shields.io/pypi/pyversions/trackastra)
+![Build](https://img.shields.io/github/actions/workflow/status/weigertlab/trackastra/python-package-conda.yml?branch=main)
+![License](https://img.shields.io/github/license/weigertlab/trackastra)
+
+
 <div align="center">
   <img src="artwork/trackastra_logo.png" alt="Optimus Prime" style="width:25%;"/>
 </div>
