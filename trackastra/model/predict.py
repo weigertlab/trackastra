@@ -53,7 +53,7 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     with torch.no_grad():
         output = model(coords, features=feats, padding_mask=padding_mask)
-        A = output["association_matrix"]
+        A = output["assoc_matrix"]
 
         A = model.normalize_output(A, timepoints, coords)
 

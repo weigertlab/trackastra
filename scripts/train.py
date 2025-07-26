@@ -209,7 +209,7 @@ class WrappedLightningModule(pl.LightningModule):
         padding_mask = padding_mask.bool()
 
         output = self.model(coords, feats, padding_mask=padding_mask)
-        A_pred = output["association_matrix"]
+        A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
 

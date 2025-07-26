@@ -12,7 +12,7 @@ def test_model():
     padding_mask[:, -10:] = True
     coords[padding_mask] += 100
     output = model(coords, padding_mask=padding_mask)
-    A = output["association_matrix"]
+    A = output["assoc_matrix"]
     M = torch.logical_or(padding_mask.unsqueeze(1), padding_mask.unsqueeze(2))
     A[M] = 0
 

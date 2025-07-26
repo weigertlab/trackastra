@@ -410,7 +410,7 @@ class TrackingTransformer(torch.nn.Module):
         A = torch.einsum("bnd,bmd->bnm", x, y)
 
         return dict(
-            association_matrix=A,
+            assoc_matrix=A,
             encoder=x,
             decoder=y,
         )
