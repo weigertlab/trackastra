@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def _default_batch_size(device: str | torch.device):
     if isinstance(device, torch.device):
         device = device.type
-    d = {"cpu": 1, "cuda": 16, "mps": 1}
+    d = {"cpu": 1, "cuda": 4, "mps": 4}
     batch_size = d[device]
     logger.info(f"Default batch size = {batch_size} for model on {device}.")
     return batch_size
