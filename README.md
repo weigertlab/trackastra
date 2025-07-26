@@ -1,12 +1,18 @@
+<div align="center">
+
+<p align="center">
+<img src="artwork/trackastra_logo.png" alt="Optimus Prime" style="width:25%;"/>
+</p>
+
+
 [![PyPI](https://img.shields.io/pypi/v/trackastra)](https://pypi.org/project/trackastra/)
 ![Python](https://img.shields.io/pypi/pyversions/trackastra)
 ![Build](https://img.shields.io/github/actions/workflow/status/weigertlab/trackastra/python-package-conda.yml?branch=main)
 [![License](https://img.shields.io/github/license/weigertlab/trackastra)](https://github.com/weigertlab/trackastra/blob/main/LICENSE)
 
 
-<div align="center">
-  <img src="artwork/trackastra_logo.png" alt="Optimus Prime" style="width:25%;"/>
 </div>
+
 
 # *Trackastra* - Tracking by Association with Transformers
 
@@ -15,8 +21,20 @@
 
 ![Overview](overview.png)
 
-If you are using this code in your research, please cite our [paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf):
-> Benjamin Gallusser and Martin Weigert<br>*Trackastra - Transformer-based cell tracking for live-cell microscopy*<br> European Conference on Computer Vision, 2024
+## Reference
+
+Paper: [Trackastra: Transformer-based cell tracking for live-cell microscopy](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf)
+
+```
+@inproceedings{gallusser2024trackastra,
+  title={Trackastra: Transformer-based cell tracking for live-cell microscopy},
+  author={Gallusser, Benjamin and Weigert, Martin},
+  booktitle={European conference on computer vision},
+  pages={467--484},
+  year={2024},
+  organization={Springer}
+}
+```
 
 ## Examples
 Nuclei tracking | Bacteria tracking
