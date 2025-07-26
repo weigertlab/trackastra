@@ -7,7 +7,7 @@ authors:
     given-names: Martin
 title: 'Trackastra: Transformer-based cell tracking for live-cell microscopy'
 version: 1.0.0
-date-released: '2024-11-27'
+date-released: '2024-07-26'
 preferred-citation:
   authors:
     - family-names: Gallusser
@@ -18,6 +18,6 @@ preferred-citation:
   type: conference-paper
   pages: 467--484
   year: '2024'
-  collection-title: European Conference on Computer Vision
+  collection-title: European conference on computer vision
   conference: {}
   publisher: {}

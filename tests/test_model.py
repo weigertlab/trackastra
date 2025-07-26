@@ -11,7 +11,8 @@ def test_model():
     padding_mask = torch.zeros(1, 100).bool()
     padding_mask[:, -10:] = True
     coords[padding_mask] += 100
-    A = model(coords, padding_mask=padding_mask)
+    output = model(coords, padding_mask=padding_mask)
+    A = output["association_matrix"]
     M = torch.logical_or(padding_mask.unsqueeze(1), padding_mask.unsqueeze(2))
     A[M] = 0
 

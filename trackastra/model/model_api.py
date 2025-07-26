@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def _default_batch_size(device: str | torch.device):
     if isinstance(device, torch.device):
         device = device.type
-    d = {"cpu": 1, "cuda": 16, "mps": 1}
+    d = {"cpu": 1, "cuda": 1, "mps": 8}
     batch_size = d[device]
     logger.info(f"Default batch size = {batch_size} for model on {device}.")
     return batch_size
@@ -126,9 +126,8 @@ class Trackastra:
             Trackastra model instance.
         """
         # Always load to cpu first
-        transformer = TrackingTransformer.from_folder(
-            Path(dir).expanduser(), map_location="cpu"
-        )
+        dir = Path(dir).expanduser()
+        transformer = TrackingTransformer.from_folder(dir, map_location="cpu")
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
 
@@ -189,6 +188,7 @@ class Trackastra:
         )
 
         logger.info("Predicting windows")
+
         predictions = predict_windows(
             windows=windows,
             features=features,
