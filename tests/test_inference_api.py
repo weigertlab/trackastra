@@ -4,6 +4,7 @@ import tempfile
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 from pathlib import Path
 
+import numpy as np
 import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
@@ -72,7 +73,6 @@ def test_write_to_geff(example_data):
         masks,
         mode="greedy",
     )
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         write_to_geff(
@@ -80,3 +80,22 @@ def test_write_to_geff(example_data):
             masks_tracked,
             outdir=tmp / "tracked_geff.zarr",
         )
+
+
+def test_empty_frame():
+    """Minimal test case with an intermediate empty mask."""
+
+    imgs = np.zeros((3, 100, 100), dtype=np.uint16)
+    masks = np.zeros((3, 100, 100), dtype=np.uint16)
+
+    masks[0, 5:10, 5:10] = 1  # Detection in frame 0
+    # frame 1 is empty
+    masks[2, 80:85, 80:85] = 2  # Detection in frame 2
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+
+    model.track(
+        imgs,
+        masks,
+        mode="greedy",
+    )
