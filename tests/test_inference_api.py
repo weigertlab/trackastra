@@ -4,6 +4,7 @@ import tempfile
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 from pathlib import Path
 
+import numpy as np
 import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
@@ -51,3 +52,22 @@ def test_api(example_data):
         )
 
     _napari_tracks, _napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
+
+
+def test_empty_frame():
+    """Minimal test case with an intermediate empty mask."""
+
+    imgs = np.zeros((3, 100, 100), dtype=np.uint16)
+    masks = np.zeros((3, 100, 100), dtype=np.uint16)
+
+    masks[0, 5:10, 5:10] = 1  # Detection in frame 0
+    # frame 1 is empty
+    masks[2, 80:85, 80:85] = 2  # Detection in frame 2
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+
+    model.track(
+        imgs,
+        masks,
+        mode="greedy",
+    )
