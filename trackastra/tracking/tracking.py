@@ -125,6 +125,17 @@ def build_graph(
     for t_begin, t_end in iterator:
         n_edges_t = len(G.edges)
         ni, nj = graph.nodes_by_frame(t_begin), graph.nodes_by_frame(t_end)
+
+        if len(ni) == 0:
+            # skip edge creation for empty frames
+            logger.warning(f"No nodes in frame {t_begin}")
+            continue
+
+        if len(nj) == 0:
+            # skip edge creation for empty frames
+            logger.warning(f"No nodes in frame {t_end}")
+            continue
+
         pi = []
         for _ni in ni:
             pi.append(np.array(G.nodes[_ni]["coords"]))
