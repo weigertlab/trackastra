@@ -68,7 +68,7 @@ def download_pretrained(name: str, download_dir: Path | None = None):
         url = _MODELS[name]
     except KeyError:
         raise ValueError(
-            "Pretrained model `name` is not available. Choose from"
+            f"Pretrained model `{name}` is not available. Choose from"
             f" {list(_MODELS.keys())}"
         )
     folder = download_dir / name

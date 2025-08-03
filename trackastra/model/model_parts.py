@@ -263,6 +263,8 @@ class RelativePositionalAttention(nn.Module):
                 attn_mask += torch.exp(
                     -5 * spatial_dist.unsqueeze(1) / self.cutoff_spatial
                 )
+            elif self.attn_dist_mode == "v2":
+                pass
             else:
                 raise ValueError(f"Unknown attn_dist_mode {self.attn_dist_mode}")
 

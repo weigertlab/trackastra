@@ -113,11 +113,11 @@ class Trackastra:
         self.train_args = train_args
 
     @classmethod
-    def from_folder(cls, dir: Path | str, device: str | None = None):
+    def from_folder(cls, path: Path | str, device: str | None = None):
         """Load a Trackastra model from a local folder.
 
         Args:
-            dir: Path to model folder containing:
+            path: Path to model folder containing:
                 - model weights
                 - train_config.yaml with training arguments
             device: Device to run model on.
@@ -126,10 +126,9 @@ class Trackastra:
             Trackastra model instance.
         """
         # Always load to cpu first
-        transformer = TrackingTransformer.from_folder(
-            Path(dir).expanduser(), map_location="cpu"
-        )
-        train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
+        path = Path(path).expanduser()
+        transformer = TrackingTransformer.from_folder(path, map_location="cpu")
+        train_args = yaml.load(open(path / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
 
     @classmethod

@@ -988,6 +988,7 @@ class CTCData(Dataset):
     def _setup_features_augs_wrfeat(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
+        logger.info(f"Augmentation level {augment} and crop_size {crop_size}")
         # FIXME: hardcoded
         feat_dim = 7 if ndim == 2 else 12
         if augment == 1:
