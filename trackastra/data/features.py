@@ -35,7 +35,6 @@ _PROPERTIES = {
             "intensity_mean",
             "inertia_tensor",
         ),
-        "pretrained_feats": (),
     },
     3: {
         "regionprops2": (

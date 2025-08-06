@@ -22,11 +22,13 @@ This repository contains the Python implementation of Trackastra.
 
 Please first set up a Python environment (with Python version 3.10 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
 
+### Simple installation
 Trackastra can then be installed from PyPI using `pip`:
 ```bash
 pip install trackastra
 ```
 
+### With ILP support
 For tracking with an integer linear program (ILP, which is optional)
 ```bash
 conda create --name trackastra python=3.10 --no-default-packages
@@ -34,8 +36,21 @@ conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
+<details>
+<summary>📄 <h4>Development installation</h4></summary>
+  
+```bash
+conda create --name trackastra python=3.10 --no-default-packages
+conda activate trackastra
+conda install -c conda-forge -c gurobi -c funkelab ilpy
+git clone https://github.com/weigertlab/trackastra.git
+pip install -e "./trackastra[ilp,dev]"
+```
 
-Notes:
+</details>
+<details>
+<summary>📄 <h4></b>Notes/Troubleshooting</h4></summary>
+  
 - For the optional ILP linking, this will install [`motile`](https://funkelab.github.io/motile/index.html) and binaries for two discrete optimizers:
 
   1. The [Gurobi Optimizer](https://www.gurobi.com/). This is a commercial solver, which requires a valid license. Academic licenses are provided for free, see [here](https://www.gurobi.com/academia/academic-program-and-licenses/) for how to obtain one.
@@ -43,6 +58,9 @@ Notes:
   2. The [SCIP Optimizer](https://www.scipopt.org/), a free and open source solver. If `motile` does not find a valid Gurobi license, it will fall back to using SCIP.
 - On MacOS, installing packages into the conda environment before installing `ilpy` can cause problems.
 - 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
+  
+</details>
+
 
 ## Usage
 
@@ -113,7 +131,54 @@ v.add_labels(masks_tracked)
 v.add_tracks(data=napari_tracks, graph=napari_tracks_graph)
 ```
 
-### Training a model on your own data
+<h3>
+  <!-- <img src="https://camo.githubusercontent.com/5d68a2c2564bc50ca534f939922482779202499b14901e0671d5362def6ff59f/68747470733a2f2f696d6167656a2e6e65742f6d656469612f69636f6e732f747261636b6d6174652e706e67" alt="icon" height="20" style="vertical-align: middle;"/> -->
+  <img src="https://fiji.sc/site/logo.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Fiji (via TrackMate)
+</h3>
+
+Trackastra is one of the available trackers in [TrackMate](https://imagej.net/plugins/trackmate/). For installation and usage instructions take a look at this [tutorial](
+https://imagej.net/plugins/trackmate/trackers/trackmate-trackastra).
+
+<h3>
+  <img src="docs/icons/docker-mark-blue.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Docker images
+</h3>
+
+Some of our models are available as docker images on [Docker Hub](https://hub.docker.com/r/bentaculum/trackastra-track/tags). Currently, we only provide CPU-based docker images.
+
+Track within a docker container with the following command, filling the `<VARIABLES>`:
+
+```bash
+docker run -it -v <LOCAL_DATA_DIR>:/data -v <LOCAL_RESULTS_DIR>:/results bentaculum/trackastra-track:<MODEL_TAG> --input_test /data/<DATASET_IN_CTC_FORMAT> --detection_folder <TRA/SEG/ETC>"
+```
+<details>
+<summary>📄 <i>Show example with Cell Tracking Challenge model:</i></summary>
+<br>
+
+```bash
+wget http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DH-GOWT1.zip 
+chmod -R 775 Fluo-N2DH-GOWT1
+docker pull bentaculum/trackastra-track:model.ctc-linking.ilp 
+docker run -it -v ./:/data -v ./:/results bentaculum/trackastra-track:model.ctc-linking.ilp --input_test data/Fluo-N2DH-GOWT1/01 --detection_folder TRA
+```
+
+</details>
+
+<h3>
+  <img src="docs/icons/terminal-cli-fill.256x224.png" alt="icon" height="20" style="vertical-align: middle;"/>
+  Command Line Interface
+</h3>
+After [installation](#installation), simply run in your terminal 
+
+```bash
+trackastra track --help
+```
+
+to build a command for tracking directly from images and corresponding instance segmentation masks saved on disk as two series of TIF files.
+
+
+## Usage: Training a model on your own data
 
 To run an example
 - clone this repository and got into the scripts directory with `cd trackastra/scripts`.

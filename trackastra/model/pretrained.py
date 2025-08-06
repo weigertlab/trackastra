@@ -2,6 +2,7 @@ import logging
 import shutil
 import tempfile
 import zipfile
+from importlib.resources import files
 from pathlib import Path
 
 import requests
@@ -10,10 +11,8 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 _MODELS = {
-    "ctc": (
-        "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip"
-    ),
-    "general_2d": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1.1/general_2d.zip",
+    "ctc": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/ctc.zip",
+    "general_2d": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/general_2d.zip",
 }
 
 
@@ -57,7 +56,7 @@ def download(url: str, fname: Path):
 def download_pretrained(name: str, download_dir: Path | None = None):
     # TODO make safe, introduce versioning
     if download_dir is None:
-        download_dir = Path("~/.trackastra/.models").expanduser()
+        download_dir = files("trackastra").joinpath(".models")
     else:
         download_dir = Path(download_dir)
 

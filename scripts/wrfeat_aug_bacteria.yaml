@@ -1,22 +1,21 @@
 # Forked from zih_bacteria.yaml
-name: vanvliet_sam21_quiet_softmax_aug
+name: vanvliet_wrfeat
 # model: /home/achard/trastra_v2/BEST_2025-06-04_13-23-38_vanvliet_sam21_aug
-epochs: 1000
+epochs: 800
 warmup_epochs: 5
 window: 4
 attn_dist_mode: v1
 delta_cutoff: 1
 num_encoder_layers: 4
 num_decoder_layers: 4
-# causal_norm: none
-causal_norm: quiet_softmax
-d_model: 128
-dropout: 0.0
+causal_norm: none
+d_model: 256
+# dropout: 0.05
 pos_embed_per_dim: 32
 lr: 0.0001
 train_samples: 32000
 max_tokens: 2048
-batch_size: 60
+batch_size: 64
 detection_folders:
 - TRA
 crop_size:
@@ -25,26 +24,26 @@ crop_size:
 attn_positional_bias: rope
 ndim: 2
 # Features config
-features: pretrained_feats_aug
+# features: pretrained_feats_aug
 # features: pretrained_feats
-# features: wrfeat
+features: wrfeat
 #### Additional parameters for pretrained_feats
 augment: 3
-pretrained_n_augs: 25
-pretrained_feats_model: facebook/sam2.1-hiera-base-plus
+# pretrained_n_augs: 25
+# pretrained_feats_model: facebook/sam2.1-hiera-base-plus
 # pretrained_feats_model: facebookresearch/co-tracker
 # pretrained_feats_model: weigertlab/tarrow
 # pretrained_model_path: /home/achard/tarrow_runs/vanvliet_backbone_unet_delta1-2
 # pretrained_feats_model: debug/encoded_labels
-reduced_pretrained_feat_dim: 128
-pretrained_feats_mode: mean_patches_exact
+# reduced_pretrained_feat_dim: 128
+# pretrained_feats_mode: mean_patches_exact
 # pretrained_feats_mode: nearest_patch
-pretrained_feats_additional_props: regionprops_small
+# pretrained_feats_additional_props: regionprops_small
 # feat_embed_per_dim: 8 # Reduce additional dimensions added to the features via positional embedding
-rotate_features: true
+# rotate_features: true
 # disable_xy_coords: true
 # disable_all_coords: True
-cachedir: /home/achard/cache
+cachedir: /backup/achard/cache
 outdir: /home/achard/trastra_v2
 # weight_decay: 0.01
 #### Logger

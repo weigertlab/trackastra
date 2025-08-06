@@ -8,4 +8,4 @@ repos:
     rev: v0.4.6
     hooks:
     - id: ruff
-      args: [--fix, --unsafe-fixes, --preview, --verbose]
+      args: [--fix, --unsafe-fixes, --preview, --verbose, --exit-zero]

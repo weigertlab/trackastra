@@ -17,26 +17,41 @@ logger.setLevel(logging.INFO)
 
 
 def predict(batch, model):
-    """Args:
-        batch (_type_): _description_
-        model (_type_): _description_.
-
+    """Predict association scores between objects in a batch.
+    
+    Args:
+        batch: Dictionary containing:
+            - features: Object features array
+            - coords: Object coordinates array
+            - timepoints: Time points array
+        model: TrackingTransformer model to use for prediction.
+    
     Returns:
-        _type_: _description_
+        Array of association scores between objects.
     """
-    feats = torch.from_numpy(batch["features"])
+    if batch["features"] is not None:
+        feats = torch.from_numpy(batch["features"])
+    else:
+        feats = None
+    if batch["pretrained_features"] is not None:
+        pretrained_feats = torch.from_numpy(batch["pretrained_features"])
+    else:
+        pretrained_feats = None
     coords = torch.from_numpy(batch["coords"])
     timepoints = torch.from_numpy(batch["timepoints"]).long()
     # Hack that assumes that all parameters of a model are on the same device
     device = next(model.parameters()).device
-    feats = feats.unsqueeze(0).to(device)
-    timepoints = timepoints.unsqueeze(0).to(device)
     coords = coords.unsqueeze(0).to(device)
+    timepoints = timepoints.unsqueeze(0).to(device)
+    if feats is not None:
+        feats = feats.unsqueeze(0).to(device)
+    if pretrained_feats is not None:
+        pretrained_feats = pretrained_feats.unsqueeze(0).to(device)
 
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     with torch.no_grad():
-        A = model(coords, features=feats)
+        A = model(coords, features=feats, pretrained_features=pretrained_feats)
         A = model.normalize_output(A, timepoints, coords)
 
         # # Spatially far entries should not influence the causal normalization
@@ -62,20 +77,37 @@ def predict_windows(
     progbar_class=tqdm,
     pred_func_override=None,
 ) -> dict:
-    """_summary_.
-
+    """Predict associations between objects across sliding windows.
+    
+    This function processes a sequence of sliding windows to predict associations
+    between objects across time frames. It handles:
+    - Object tracking across time
+    - Weight normalization across windows
+    - Edge thresholding
+    - Time-based filtering
+    
     Args:
-        windows (_type_): _description_
-        features (_type_): _description_
-        model (_type_): _description_
-        intra_window_weight (_type_, optional): _description_. Defaults to 0.
-        delta_t (_type_, optional): _description_. Defaults to 1.
-        edge_threshold (_type_, optional): _description_. Defaults to 0.05.
-        spatial_dim: Dimensionality of the input masks. This might be < model.coord_dim
-        pred_func_override: Function to override the prediction function. This is useful for debugging.
+        windows: List of window dictionaries containing:
+            - timepoints: Array of time points
+            - labels: Array of object labels
+            - features: Object features
+            - coords: Object coordinates
+        features: List of feature objects containing:
+            - labels: Object labels
+            - timepoints: Time points
+            - coords: Object coordinates
+        model: TrackingTransformer model to use for prediction.
+        intra_window_weight: Weight factor for objects in middle of window. Defaults to 0.
+        delta_t: Maximum time difference between objects to consider. Defaults to 1.
+        edge_threshold: Minimum association score to consider. Defaults to 0.05.
+        spatial_dim: Dimensionality of input masks. May be less than model.coord_dim.
+        progbar_class: Progress bar class to use. Defaults to tqdm.
+        pred_func_override: Function to override the prediction function. This is useful for debugging or testing other prediction methods.
 
     Returns:
-        _type_: _description_
+        Dictionary containing:
+            - nodes: List of node properties (id, coords, time, label)
+            - weights: Tuple of ((node_i, node_j), weight) pairs
     """
     # first get all objects/coords
     time_labels_to_id = dict()
@@ -122,7 +154,6 @@ def predict_windows(
         else:
             A = pred_func_override(batch) 
         
-
         dt = timepoints[None, :] - timepoints[:, None]
         time_mask = np.logical_and(dt <= delta_t, dt > 0)
         A[~time_mask] = 0

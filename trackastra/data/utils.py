@@ -1,6 +1,6 @@
 import logging
 import sys
-from pathlib import Path
+from pathlib import Path, WindowsPath
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,23 @@ import pandas as pd
 import tifffile
 from tqdm import tqdm
 
+from trackastra.data.pretrained_features import PretrainedFeatureExtractorConfig
+
 logger = logging.getLogger(__name__)
+
+
+def make_hashable(obj):
+    if isinstance(obj, tuple | list):
+        return tuple(make_hashable(e) for e in obj)
+    elif isinstance(obj, Path | WindowsPath):
+        return obj.as_posix()
+    elif isinstance(obj, dict):
+        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+    elif isinstance(obj, PretrainedFeatureExtractorConfig):
+        cfg_dict = obj.to_dict()
+        return make_hashable(cfg_dict)
+    else:
+        return obj
 
 
 def load_tiff_timeseries(

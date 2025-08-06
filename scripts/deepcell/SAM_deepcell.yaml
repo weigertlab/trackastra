@@ -1,0 +1,100 @@
+name: deepcell_cotrack_aug_no_drpt
+# model: /home/achard/tratra_runs_eval/2025-05-28_10-04-50_vanvliet_sam21_aug
+epochs: 1000
+warmup_epochs: 5
+window: 4
+attn_dist_mode: v1
+delta_cutoff: 1
+num_encoder_layers: 4
+num_decoder_layers: 4
+causal_norm: none
+d_model: 128
+# dropout: 0.05
+pos_embed_per_dim: 32
+lr: 0.0001
+train_samples: 32000
+max_tokens: 2048
+batch_size: 128
+detection_folders:
+- TRA
+crop_size:
+- 320
+- 320
+attn_positional_bias: rope
+ndim: 2
+# Features config
+features: pretrained_feats_aug
+# features: pretrained_feats
+# features: wrfeat
+#### Additional parameters for pretrained_feats
+augment: 3
+pretrained_n_augs: 25
+pretrained_feats_model: facebook/sam-vit-base
+reduced_pretrained_feat_dim: 128
+# pretrained_feats_model: weigertlab/tarrow
+# pretrained_model_path: /home/achard/tarrow_runs/vanvliet_backbone_unet_delta1-2
+# pretrained_feats_model: debug/encoded_labels
+pretrained_feats_mode: mean_patches_exact
+# pretrained_feats_mode: nearest_patch
+pretrained_feats_additional_props: regionprops_small
+# feat_embed_per_dim: 8 # Reduce additional dimensions added to the features via positional embedding
+# rotate_features: true
+# disable_xy_coords: true
+# disable_all_coords: True
+cachedir: /backup/achard/cache
+outdir: /home/achard/trastra_runs_v2
+#### Logger
+logger: wandb
+wandb_project: "trackstra_v2_deepcell"
+# Paths config
+cache: True
+compress: True
+distributed: True
+
+input_train:
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/00
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/01
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/02
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/03
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/04
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/05
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/06
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/07
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/08
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/09
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/10
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/11
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/12
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/13
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/14
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/15
+# - /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/16
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/16_corrected
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/17
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/18
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/19
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/20
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/23
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/25
+
+input_val:
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/21
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/22
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/24
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/44
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/train/45
+
+
+input_test:
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/00
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/01
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/02
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/03
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/04
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/05
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/06
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/07
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/08
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/09
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/10
+- /backup/achard/CTC_DATA/deepcell/deepcell_orig/test/11

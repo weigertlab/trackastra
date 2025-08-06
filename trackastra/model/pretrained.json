@@ -1,9 +1,9 @@
 {
     "general_2d": {
-        "tags": ["cells, nuclei, bacteria, epithelial"],
+        "tags": ["cells, nuclei, bacteria, epithelial, yeast, particles"],
         "dimensionality": [2],
-        "description": "For tracking fluorescent nuclei, bacteria (PhC), whole cells (BF, PhC, DIC), epithelial cells with fluorescent membrane.",
-        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1.1/general_2d.zip",
+        "description": "For tracking fluorescent nuclei, bacteria (PhC), whole cells (BF, PhC, DIC), epithelial cells with fluorescent membrane, budding yeast cells (PhC), fluorescent particles, .",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/general_2d.zip",
         "datasets": {
             "Subset of Cell Tracking Challenge 2d datasets": {
                 "url": "https://celltrackingchallenge.net/2d-datasets/",
@@ -16,6 +16,10 @@
             "Bacteria ObiWan-Microbi": {
                 "url": "https://zenodo.org/records/7260137",
                 "reference": "Seiffarth J, Scherr T, Wollenhaupt B, Neumann O, Scharr H, Kohlheyer D, Mikut R, Nöh K. ObiWan-Microbi: OMERO-based integrated workflow for annotating microbes in the cloud. SoftwareX. 2024 May 1;26:101638."
+            },
+            "Bacteria Persat": {
+                "url": "https://www.p-lab.science",
+                "reference": "Datasets kindly provided by Persat lab, EPFL."
             },
             "DeepCell": {
                 "url": "https://datasets.deepcell.org/data",
@@ -36,14 +40,37 @@
             },
             "Synthetic nuclei": {
                 "reference": "Weigert group live cell simulator."
+            },
+            "Synthetic particles": {
+                "reference": "Weigert group particle simulator."
+            },
+            "Particle Tracking Challenge": {
+                "url": "http://bioimageanalysis.org/track/#data",
+                "reference": "Chenouard, N., Smal, I., De Chaumont, F., Maška, M., Sbalzarini, I. F., Gong, Y., ... & Meijering, E. (2014). Objective comparison of particle tracking methods. Nature methods, 11(3), 281-289."
+            },
+            "Yeast Cell-ACDC": {
+                "url": "https://zenodo.org/records/6795124",
+                "reference": "Padovani, F., Mairhörmann, B., Falter-Braun, P., Lengefeld, J., & Schmoller, K. M. (2022). Segmentation, tracking and cell cycle analysis of live-cell imaging data with Cell-ACDC. BMC biology, 20(1), 174."
+            },
+            "DeepSea": {
+                "url": "https://deepseas.org/datasets/",
+                "reference": "Zargari, A., Lodewijk, G. A., Mashhadi, N., Cook, N., Neudorf, C. W., Araghbidikashani, K., ... & Shariati, S. A. (2023). DeepSea is an efficient deep-learning model for single-cell segmentation and tracking in time-lapse microscopy. Cell Reports Methods, 3(6)."
+            },
+            "Btrack" : {
+                "url": "https://rdr.ucl.ac.uk/articles/dataset/Cell_tracking_reference_dataset/16595978",
+                "reference": "Ulicna, K., Vallardi, G., Charras, G., & Lowe, A. R. (2021). Automated deep lineage tree analysis using a Bayesian single cell tracking approach. Frontiers in Computer Science, 3, 734559."
+            },
+            "E. coli in mother machine": {
+                "url": "https://zenodo.org/records/11237127",
+                "reference": "O’Connor, O. M., & Dunlop, M. J. (2024). Cell-TRACTR: A transformer-based model for end-to-end segmentation and tracking of cells. bioRxiv, 2024-07."
             }
         }
     },
     "ctc": {
-        "tags": ["ctc", "isbi2024"],
+        "tags": ["ctc", "Cell Tracking Challenge", "Cell Linking Benchmark"],
         "dimensionality": [2, 3],
-        "description": "For tracking Cell Tracking Challenge datasets. Winner of the ISBI 2024 CTC generalizable linking challenge.",
-        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.1/ctc.zip",
+        "description": "For tracking Cell Tracking Challenge datasets. This is the successor of the winning model of the ISBI 2024 CTC generalizable linking challenge.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/ctc.zip",
         "datasets": {
             "All Cell Tracking Challenge 2d+3d datasets with available GT and ERR_SEG": {
                 "url": "https://celltrackingchallenge.net/3d-datasets/",

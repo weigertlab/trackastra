@@ -7,8 +7,6 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-import warnings
-from einops import rearrange
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
@@ -17,12 +15,11 @@ except ImportError:
     flash_attn_varlen_qkvpacked_func = None
     _FLASH_ATTN = False
 
-if not _FLASH_ATTN:
-    warnings.warn("flash_attn not found or not available for device, falling back to normal attention.")
-    warnings.warn("Install with\n\npip install flash-attn --no-build-isolation\n\n")
+# if not _FLASH_ATTN:
+#     warnings.warn("flash_attn not found or not available for device, falling back to normal attention.")
+#     warnings.warn("Install with\n\npip install flash-attn --no-build-isolation\n\n")
     
 from .rope import RotaryPositionalEncoding
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +69,7 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, coords: torch.Tensor):
         _B, _N, D = coords.shape
-        assert D == len(self.freqs)
+        assert D == len(self.freqs), f"coords dim {D} must be equal to number of frequencies {len(self.freqs)}"
         embed = torch.cat(
             tuple(
                 torch.cat(
@@ -188,7 +185,7 @@ class RelativePositionalAttention(nn.Module):
         attn_dist_mode: str
             v0: exponential decay
             v1: exponential decay with cutoff_spatial
-            v2: no masking (except padding_mask)
+            v2: no masking (except padding_mask).
         """ 
         super().__init__()
 
@@ -240,7 +237,6 @@ class RelativePositionalAttention(nn.Module):
 
         self._mode = mode
 
-
     def forward(
             self,
             query: torch.Tensor,
@@ -264,7 +260,6 @@ class RelativePositionalAttention(nn.Module):
 
         # add negative value but not too large to keep mixed precision loss from becoming nan
         attn_ignore_val = -1e3
-
 
         if self.attn_dist_mode != 'v2':
             # spatial cutoff
@@ -304,7 +299,7 @@ class RelativePositionalAttention(nn.Module):
 
         self.attn_mask = attn_mask.clone()
 
-        if _FLASH_ATTN and self.attn_dist_mode == 'v2' and False: # Disable for now
+        if _FLASH_ATTN and self.attn_dist_mode == 'v2' and False:  # Disable for now
             y = compute_attention_with_unpadding(q, k, v, padding_mask)
         else:
             y = F.scaled_dot_product_attention(
@@ -317,11 +312,8 @@ class RelativePositionalAttention(nn.Module):
         return y
 
 
-
-
 def compute_attention_with_unpadding(q, k, v, padding_mask):
-    """
-    Compute self-attention using flash_attn_varlen_qkvpacked_func with unpadding.
+    """Compute self-attention using flash_attn_varlen_qkvpacked_func with unpadding.
 
     Args:
         q, k, v: Tensors of shape (B, H, N, D)
@@ -334,15 +326,15 @@ def compute_attention_with_unpadding(q, k, v, padding_mask):
     assert q.shape == k.shape == v.shape
     assert padding_mask.shape == (B, N)
 
-    #Extract sequence lengths and create cumulative sequence lengths
+    # Extract sequence lengths and create cumulative sequence lengths
     valid_tokens_mask = ~padding_mask  # Flip the mask so True means valid
     lens = valid_tokens_mask.sum(dim=-1).tolist()  # Length of each sequence
-    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lens), dim=0).tolist(), dtype=torch.int32, device=q.device)
+    cu_seqlens = torch.tensor([0, *torch.cumsum(torch.tensor(lens), dim=0).tolist()], dtype=torch.int32, device=q.device)
     
     # Unpad Q, K, V
-    q_unpadded = q.transpose(1,2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
-    k_unpadded = k.transpose(1,2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
-    v_unpadded = v.transpose(1,2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
+    q_unpadded = q.transpose(1, 2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
+    k_unpadded = k.transpose(1, 2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
+    v_unpadded = v.transpose(1, 2)[valid_tokens_mask]  # Shape: (total_tokens, H, D)
 
     # Stack Q, K, V into a single tensor for FlashAttention
     qkv_unpadded = torch.stack([q_unpadded, k_unpadded, v_unpadded], dim=1)  # Shape: (total_tokens, 3, H, D)
@@ -365,3 +357,135 @@ def compute_attention_with_unpadding(q, k, v, padding_mask):
     output_padded = output_padded.transpose(1, 2)  # Shape: (B, H, N, D)
 
     return output_padded
+
+# class BidirectionalRelativePositionalAttention(RelativePositionalAttention):
+#     def forward(
+#         self,
+#         query1: torch.Tensor,
+#         query2: torch.Tensor,
+#         coords: torch.Tensor,
+#         padding_mask: torch.Tensor = None,
+#     ):
+#         B, N, D = query1.size()
+#         q1 = self.q_pro(query1)  # (B, N, D)
+#         q2 = self.q_pro(query2)  # (B, N, D)
+#         v1 = self.v_pro(query1)  # (B, N, D)
+#         v2 = self.v_pro(query2)  # (B, N, D)
+
+#         # (B, nh, N, hs)
+#         q1 = q1.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+#         v1 = v1.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+#         q2 = q2.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+#         v2 = v2.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+
+#         attn_mask = torch.zeros(
+#             (B, self.n_head, N, N), device=query1.device, dtype=q1.dtype
+#         )
+
+#         # add negative value but not too large to keep mixed precision loss from becoming nan
+#         attn_ignore_val = -1e3
+
+#         # spatial cutoff
+#         yx = coords[..., 1:]
+#         spatial_dist = torch.cdist(yx, yx)
+#         spatial_mask = (spatial_dist > self.cutoff_spatial).unsqueeze(1)
+#         attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
+
+#         # dont add positional bias to self-attention if coords is None
+#         if coords is not None:
+#             if self._mode == "bias":
+#                 attn_mask = attn_mask + self.pos_bias(coords)
+#             elif self._mode == "rope":
+#                 q1, q2 = self.rot_pos_enc(q1, q2, coords)
+#             else:
+#                 pass
+
+#             dist = torch.cdist(coords, coords, p=2)
+#             attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))
+
+#         # if given key_padding_mask = (B,N) then ignore those tokens (e.g. padding tokens)
+#         if padding_mask is not None:
+#             ignore_mask = torch.logical_or(
+#                 padding_mask.unsqueeze(1), padding_mask.unsqueeze(2)
+#             ).unsqueeze(1)
+#             attn_mask.masked_fill_(ignore_mask, attn_ignore_val)
+
+#         self.attn_mask = attn_mask.clone()
+
+#         y1 = nn.functional.scaled_dot_product_attention(
+#             q1,
+#             q2,
+#             v1,
+#             attn_mask=attn_mask,
+#             dropout_p=self.dropout if self.training else 0,
+#         )
+#         y2 = nn.functional.scaled_dot_product_attention(
+#             q2,
+#             q1,
+#             v2,
+#             attn_mask=attn_mask,
+#             dropout_p=self.dropout if self.training else 0,
+#         )
+
+#         y1 = y1.transpose(1, 2).contiguous().view(B, N, D)
+#         y1 = self.proj(y1)
+#         y2 = y2.transpose(1, 2).contiguous().view(B, N, D)
+#         y2 = self.proj(y2)
+#         return y1, y2
+
+
+# class BidirectionalCrossAttention(nn.Module):
+#     def __init__(
+#         self,
+#         coord_dim: int = 2,
+#         d_model=256,
+#         num_heads=4,
+#         dropout=0.1,
+#         window: int = 16,
+#         cutoff_spatial: int = 256,
+#         positional_bias: Literal["bias", "rope", "none"] = "bias",
+#         positional_bias_n_spatial: int = 32,
+#     ):
+#         super().__init__()
+#         self.positional_bias = positional_bias
+#         self.attn = BidirectionalRelativePositionalAttention(
+#             coord_dim,
+#             d_model,
+#             num_heads,
+#             cutoff_spatial=cutoff_spatial,
+#             n_spatial=positional_bias_n_spatial,
+#             cutoff_temporal=window,
+#             n_temporal=window,
+#             dropout=dropout,
+#             mode=positional_bias,
+#         )
+
+#         self.mlp = FeedForward(d_model)
+#         self.norm1 = nn.LayerNorm(d_model)
+#         self.norm2 = nn.LayerNorm(d_model)
+
+#     def forward(
+#         self,
+#         x: torch.Tensor,
+#         y: torch.Tensor,
+#         coords: torch.Tensor,
+#         padding_mask: torch.Tensor = None,
+#     ):
+#         x = self.norm1(x)
+#         y = self.norm1(y)
+
+#         # cross attention
+#         # setting coords to None disables positional bias
+#         x2, y2 = self.attn(
+#             x,
+#             y,
+#             coords=coords if self.positional_bias else None,
+#             padding_mask=padding_mask,
+#         )
+#         # print(torch.norm(x2).item()/torch.norm(x).item())
+#         x = x + x2
+#         x = x + self.mlp(self.norm2(x))
+#         y = y + y2
+#         y = y + self.mlp(self.norm2(y))
+
+#         return x, y

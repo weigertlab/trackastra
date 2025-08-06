@@ -20,26 +20,18 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from .data import CTCData
+from .data import CTCData, CTCDataAugPretrainedFeats, determine_ctc_class
+from .utils import make_hashable
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def cache_class(cachedir=None):
+def cache_class(dataset_kwargs, cachedir=None):
     """A simple file cache for CTCData."""
 
-    def make_hashable(obj):
-        if isinstance(obj, tuple | list):
-            return tuple(make_hashable(e) for e in obj)
-        elif isinstance(obj, Path):
-            return obj.as_posix()
-        elif isinstance(obj, dict):
-            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-        else:
-            return obj
-
     def hash_args_kwargs(*args, **kwargs):
+        # FIXME rotate_features arg should not be part of hash, if it changes cached data does not change
         hashable_args = tuple(make_hashable(arg) for arg in args)
         hashable_kwargs = make_hashable(kwargs)
         combined_serialized = json.dumps(
@@ -49,7 +41,7 @@ def cache_class(cachedir=None):
         return hash_obj.hexdigest()
 
     if cachedir is None:
-        return CTCData
+        return determine_ctc_class(dataset_kwargs)
     else:
         cachedir = Path(cachedir)
 
@@ -60,11 +52,25 @@ def cache_class(cachedir=None):
             if cache_file.exists():
                 logger.info(f"Loading cached dataset from {cache_file}")
                 with open(cache_file, "rb") as f:
-                    return pickle.load(f)
+                    c = pickle.load(f)
+                    # if c.pretrained_config is not None:
+                    #     cfg = c.pretrained_config
+                        # if cfg.pca_preprocessor_path is not None:
+                        #     pca = EmbeddingsPCACompression.from_pretrained_cfg(cfg)
+                        #     pca.load_from_file(cfg.pca_preprocessor_path)
+                        #     c.pca_preprocessor = pca
+                        
+                    return c
             else:
                 c = CTCData(*args, **kwargs)
+                if c.pretrained_config is not None:
+                    c.pretrained_config = c.pretrained_config.to_dict()
+                    c.feature_extractor = None
+                if isinstance(c, CTCDataAugPretrainedFeats):
+                    c.augmented_feature_extractor = None
                 logger.info(f"Saving cached dataset to {cache_file}")
                 pickle.dump(c, open(cache_file, "wb"))
+                logger.debug(f"Cache file size: {cache_file.stat().st_size / 1e6:.2f} MB")
             return c
 
         return _wrapped
@@ -156,6 +162,7 @@ class BalancedBatchSampler(BatchSampler):
                 #     continue
                 batch = idx_pool[j : j + self.batch_size]
                 batches.append(batch)
+        
         return batches
 
     def __iter__(self):
@@ -232,44 +239,83 @@ class BalancedDataModule(LightningDataModule):
 
         Running on the main CPU process.
         """
-        CTCData = cache_class(self.cachedir)
+        CachedData = cache_class(
+            dataset_kwargs=self.dataset_kwargs,
+            cachedir=self.cachedir
+            )
         datasets = dict()
+        
         for split, inps in zip(
             ("train", "val"),
             (self.input_train, self.input_val),
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
-            datasets[split] = torch.utils.data.ConcatDataset(
-                # TODO(cy) add saving pretrained_feats to cache from here
-                CTCData(
+            local_kwargs = deepcopy(self.dataset_kwargs)
+            if self.dataset_kwargs.get("features") == "pretrained_feats_aug" and split == "val":
+                # do not compute augmented pretrained features for the val set
+                local_kwargs["features"] = "pretrained_feats"
+
+            ctc_datasets = [
+                CachedData(
                     root=Path(inp),
                     augment=self.augment if split == "train" else 0,
-                    **self.dataset_kwargs,
+                    **local_kwargs,
                 )
                 for inp in inps
+            ]
+            [
+                d.feature_extractor_save_path for d in ctc_datasets if split == "train"
+            ]
+            datasets[split] = torch.utils.data.ConcatDataset(
+                ctc_datasets
             )
+            del ctc_datasets
             logger.info(
                 f"Loaded {len(datasets[split])} {split.upper()} samples (in"
                 f" {(default_timer() - start):.1f} s)\n\n"
             )
 
+            # if self.dataset_kwargs.get("pretrained_backbone_config") is not None and split == "train":
+            #     cfg = self.dataset_kwargs["pretrained_backbone_config"]
+            #     if cfg.pca_preprocessor_path is not None:
+            #         pca = EmbeddingsPCACompression.from_pretrained_cfg(cfg)
+            #         embeddings_paths = []
+            #         for p in feature_extractor_save_paths:
+            #             embeddings_paths.append(p)
+            #         pca.fit_on_embeddings(embeddings_paths)
+        
         del datasets
 
     def setup(self, stage: str):
-        CTCData = cache_class(self.cachedir)
+        CachedData = cache_class(
+            dataset_kwargs=self.dataset_kwargs,
+            cachedir=self.cachedir
+            )
         self.datasets = dict()
+        
+        # if self.dataset_kwargs.get("pretrained_backbone_config") is not None:
+        # cfg = self.dataset_kwargs["pretrained_backbone_config"]
+        # if cfg.pca_preprocessor_path is not None:
+        # pca = EmbeddingsPCACompression.from_pretrained_cfg(cfg)
+        # pca.load_from_file(cfg.pca_preprocessor_path)
+        # self.dataset_kwargs["pca_preprocessor"] = pca
+        
         for split, inps in zip(
             ("train", "val"),
             (self.input_train, self.input_val),
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
+            local_kwargs = deepcopy(self.dataset_kwargs)
+            if self.dataset_kwargs.get("features") == "pretrained_feats_aug" and split == "val":
+                # do not computea augmented pretrained features for the val set
+                local_kwargs["features"] = "pretrained_feats"
             self.datasets[split] = torch.utils.data.ConcatDataset(
-                CTCData(
+                CachedData(
                     root=Path(inp),
                     augment=self.augment if split == "train" else 0,
-                    **self.dataset_kwargs,
+                    **local_kwargs,
                 )
                 for inp in inps
             )

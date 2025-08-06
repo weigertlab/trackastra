@@ -179,3 +179,4 @@ cython_debug/
 trackastra/_version.py
 
 CTC_DATA/*
+.vscode/settings.json
