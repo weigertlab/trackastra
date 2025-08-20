@@ -276,7 +276,7 @@ class WRRandomCrop:
         self._crop_bounds = crop_size[::2], crop_size[1::2]
         self._rng = np.random.RandomState()
 
-    def __call__(self, features: WRFeatures):
+    def __call__(self, features: WRFeatures, assoc_matrix: np.ndarray | None = None):
         crop_size = self._rng.randint(self._crop_bounds[0], self._crop_bounds[1] + 1)
         points = features.coords
 
@@ -295,6 +295,11 @@ class WRRandomCrop:
         )
 
         idx = _filter_points(points, shape=crop_size, origin=corner)
+
+        if assoc_matrix is not None:
+            # addiitonally keep all idx that are in the lineage of the cropped
+            # note, as each object is associated with itself, this will never decrease the number of points
+            idx = np.where(assoc_matrix[idx].max(axis=0))[0]
 
         return (
             WRFeatures(
@@ -362,15 +367,15 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     if k == "area":
         v = np.abs(np.linalg.det(M)) * v
     elif k == "equivalent_diameter_area":
-        v = np.abs(np.linalg.det(M)) ** (1 / len(M)) * v
+        v = np.abs(np.linalg.det(M)) ** (1 / ndim) * v
 
     elif k == "inertia_tensor":
         # v' = M * v  * M^T
         v = v.reshape(-1, ndim, ndim)
-        # v * M^T
-        v = np.einsum("ijk, mk -> ijm", v, M)
-        # M * v
-        v = np.einsum("ij, kjm -> kim", M, v)
+        # v = M * v * M^T
+        # v = np.einsum("ijk, mk -> ijm", v, M)
+        # v = np.einsum("ij, kjm -> kim", M, v)
+        v = np.einsum("ik,bkl,jl->bij", M, v, M)
         v = v.reshape(-1, ndim * ndim)
     elif k in (
         "intensity_mean",
@@ -390,17 +395,22 @@ class WRRandomAffine(WRBaseAugmentation):
         self,
         degrees: float = 10,
         scale: float = (0.9, 1.1),
+        isotropic_scale: float = (0.9, 1.1),
         shear: float = (0.1, 0.1),
         p: float = 0.5,
     ):
         super().__init__(p)
         self.degrees = degrees if degrees is not None else 0
         self.scale = scale if scale is not None else (1, 1)
+        self.isotropic_scale = (
+            isotropic_scale if isotropic_scale is not None else (1, 1)
+        )
         self.shear = shear if shear is not None else (0, 0)
 
     def _augment(self, features: WRFeatures):
         degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
         scale = self._rng.uniform(*self.scale, 3)
+        scale *= self._rng.uniform(*self.isotropic_scale)
         shy = self._rng.uniform(-self.shear[0], self.shear[0])
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
 

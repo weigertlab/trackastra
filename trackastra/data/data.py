@@ -1013,7 +1013,11 @@ class CTCData(Dataset):
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
                 wrfeat.WRRandomAffine(
-                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    p=0.8,
+                    degrees=180,
+                    scale=(0.8, 1.2),
+                    isotropic_scale=(0.33, 3),
+                    shear=(0.1, 0.1),
                 ),
                 wrfeat.WRRandomBrightness(p=0.8),
                 wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
@@ -1207,7 +1211,7 @@ class CTCData(Dataset):
         # cropping
         if self.cropper is not None:
             # Use only if there is at least one timepoint per detection
-            cropped_feat, cropped_idx = self.cropper(feat)
+            cropped_feat, cropped_idx = self.cropper(feat, assoc_matrix)
             cropped_timepoints = timepoints[cropped_idx]
             if len(np.unique(cropped_timepoints)) == self.window_size:
                 idx = cropped_idx

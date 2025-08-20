@@ -381,7 +381,7 @@ class TrackingTransformer(torch.nn.Module):
         coords = coords - min_time
 
         pos = self.pos_embed(coords)
-
+        # with torch.amp.autocast(enabled=False, device_type=coords.device.type):
         if features is None or features.numel() == 0:
             features = pos
         else:
@@ -389,6 +389,8 @@ class TrackingTransformer(torch.nn.Module):
             features = torch.cat((pos, features), axis=-1)
 
         features = self.proj(features)
+        # features = features.clamp(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
+            
         features = self.norm(features)
 
         x = features
