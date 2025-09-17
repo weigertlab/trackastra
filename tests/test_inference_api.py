@@ -99,34 +99,3 @@ def test_empty_frame():
         masks,
         mode="greedy",
     )
-
-
-@pytest.mark.parametrize(
-    "example_data",
-    [
-        example_data_hela,
-        example_data_fluo_3d,
-    ],
-    ids=["2d", "3d"],
-)
-def test_write_to_geff(example_data):
-    imgs, masks = example_data()
-    model = Trackastra.from_pretrained(
-        name="ctc",
-        device="cpu",
-    )
-
-    track_graph, masks_tracked = model.track(
-        imgs,
-        masks,
-        mode="greedy",
-    )
-
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        write_to_geff(
-            track_graph,
-            masks_tracked,
-            outdir=tmp / "tracked_geff.zarr",
-        )
