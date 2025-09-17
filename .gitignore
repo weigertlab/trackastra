@@ -1,5 +1,5 @@
 /data
-/tracked
+/tracked*
 
 /scripts/data
 /scripts/runs
@@ -14,6 +14,8 @@
 /tests/data
 /tests/tmp
 .models
+
+.vscode
 
 
 # Byte-compiled / optimized / DLL files

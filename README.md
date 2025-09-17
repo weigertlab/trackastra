@@ -128,7 +128,7 @@ Apart from that, no hyperparameters to choose :)
 ```python
 import torch
 from trackastra.model import Trackastra
-from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks
+from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks, write_to_geff
 from trackastra.data import example_data_bacteria
 
 device = "automatic" # explicit choices: [cuda, mps, cpu]
@@ -143,14 +143,20 @@ model = Trackastra.from_pretrained("general_2d", device=device)
 # model = Trackastra.from_folder('path/my_model_folder/', device=device)
 
 # Track the cells
-track_graph = model.track(imgs, masks, mode="greedy")  # or mode="ilp", or "greedy_nodiv"
+track_graph, masks_tracked = model.track(imgs, masks, mode="greedy")  # or mode="ilp", or "greedy_nodiv"
 
+# Relabel the masks and write to cell tracking challenge format (CTC), 
+ctc_tracks, ctc_masks = graph_to_ctc(
+    track_graph,
+    masks_tracked,
+    outdir="tracked_ctc",
+)
 
-# Write to cell tracking challenge format
-ctc_tracks, masks_tracked = graph_to_ctc(
-      track_graph,
-      masks,
-      outdir="tracked",
+# Or write to the graph exchange file format (GEFF)
+write_to_geff(
+    track_graph,
+    masks_tracked,
+    outdir="tracked_geff.zarr",
 )
 ```
 
@@ -163,7 +169,7 @@ napari_tracks, napari_tracks_graph, _ = graph_to_napari_tracks(track_graph)
 import napari
 v = napari.Viewer()
 v.add_image(imgs)
-v.add_labels(masks_tracked)
+v.add_labels(ctc_masks)
 v.add_tracks(data=napari_tracks, graph=napari_tracks_graph)
 ```
 </details>

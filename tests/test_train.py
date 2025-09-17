@@ -42,6 +42,7 @@ def test_train_dry_run(download_gt_example_ctc):
         " --num_decoder_layers 1 --num_decoder_layers 1"
         " --d_model 128 --num_workers 2"
         " --cachedir None"
+        " --distributed False"
     )
     print(cmd)
     result = os.system(cmd)
