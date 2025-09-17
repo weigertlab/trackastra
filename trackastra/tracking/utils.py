@@ -87,9 +87,9 @@ def ctc_tracklets(G: nx.DiGraph, frame_attribute: str = "time") -> list[CtcTrack
 
     # Queue of tuples(parent id, start node id)
     starts = deque()
-    starts.extend(
-        [(p, d) for p in G.nodes for d in G.successors(p) if G.out_degree[p] == 2]
-    )
+    starts.extend([
+        (p, d) for p in G.nodes for d in G.successors(p) if G.out_degree[p] == 2
+    ])
     # set parent = -1 since there is no parent
     starts.extend([(-1, n) for n in G.nodes if G.in_degree[n] == 0])
     while starts:
