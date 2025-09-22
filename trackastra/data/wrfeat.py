@@ -19,6 +19,13 @@ from tqdm import tqdm
 
 from trackastra.data.utils import load_tiff_timeseries
 
+try:
+    from trackastra_pretrained_feats import FeatureExtractor, WRPretrainedFeatures
+
+    PRETRAINED_FEATS_INSTALLED = True
+except ImportError:
+    PRETRAINED_FEATS_INSTALLED = False
+
 logger = logging.getLogger(__name__)
 
 _PROPERTIES = {
@@ -504,10 +511,13 @@ class WRAugmentationPipeline:
 def get_features(
     detections: np.ndarray,
     imgs: np.ndarray | None = None,
-    features: Literal["none", "wrfeat"] = "wrfeat",
+    features: Literal[
+        "none", "wrfeat", "pretrained_feats", "pretrained_feats_aug"
+    ] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
     progbar_class=tqdm,
+    feature_extractor: FeatureExtractor | None = None,
 ) -> list[WRFeatures]:
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
@@ -527,6 +537,18 @@ def get_features(
                 desc="Extracting features",
             )
         )
+    elif features == "pretrained_feats" or features == "pretrained_feats_aug":
+        feature_extractor.precompute_image_embeddings(imgs)
+        features = [
+            WRPretrainedFeatures.from_mask_img(
+                img=img[np.newaxis],
+                mask=mask[np.newaxis],
+                feature_extractor=feature_extractor,
+                t_start=t,
+                additional_properties=feature_extractor.additional_features,
+            )
+            for t, (mask, img) in enumerate(zip(detections, imgs))
+        ]
     else:
         logger.info("Using single process for feature extraction")
         features = tuple(
@@ -572,6 +594,7 @@ def build_windows(
         desc="Building windows",
     ):
         feat = WRFeatures.concat(features[t1:t2])
+        pt_feats = feat.pretrained_feats if feat.pretrained_feats is not None else None
 
         labels = feat.labels
         timepoints = feat.timepoints
@@ -588,6 +611,7 @@ def build_windows(
             features=torch.from_numpy(feat.features_stacked)
             if as_torch
             else feat.features_stacked,
+            pretrained_feats=pt_feats,
         )
         windows.append(w)
 
