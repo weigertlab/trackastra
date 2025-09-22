@@ -142,7 +142,23 @@ class WRFeatures:
 
     @property
     def features_stacked(self):
-        return np.concatenate([v for k, v in self.features.items()], axis=-1)
+        # Do not include pretrained_feats here
+        # They are handled separately and should not be added to shallow features
+        if not self.features or (
+            len(self.features) == 1 and "pretrained_feats" in self.features
+        ):
+            return None
+        feats = np.concatenate(
+            [v for k, v in self.features.items() if k != "pretrained_feats"], axis=-1
+        )
+        return feats
+
+    @property
+    def pretrained_feats(self):
+        # for compatibility with WRPretrainedFeatures
+        if "pretrained_feats" in self.features:
+            return self.features["pretrained_feats"]
+        return None
 
     def __len__(self):
         return len(self.labels)
@@ -523,7 +539,7 @@ def get_features(
 ) -> list[WRFeatures]:
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
-    logger.info(f"Extracting features from {len(detections)} detections")
+    logger.info(f"Extracting features from {len(detections)} frames.")
     if n_workers > 0:
         logger.info(f"Using {n_workers} processes for feature extraction")
         features = joblib.Parallel(n_jobs=n_workers, backend="loky")(
@@ -598,8 +614,12 @@ def build_windows(
         desc="Building windows",
     ):
         feat = WRFeatures.concat(features[t1:t2])
-        pt_feats = feat.pretrained_feats if feat.pretrained_feats is not None else None
-
+        try:
+            pt_feats = (
+                feat.pretrained_feats if feat.pretrained_feats is not None else None
+            )
+        except AttributeError:
+            pt_feats = None
         labels = feat.labels
         timepoints = feat.timepoints
         coords = feat.coords
@@ -615,7 +635,7 @@ def build_windows(
             features=torch.from_numpy(feat.features_stacked)
             if as_torch
             else feat.features_stacked,
-            pretrained_feats=pt_feats,
+            pretrained_feats=torch.from_numpy(pt_feats) if as_torch else pt_feats,
         )
         windows.append(w)
 

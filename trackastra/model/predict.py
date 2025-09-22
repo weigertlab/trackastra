@@ -33,17 +33,17 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     # timepoints = torch.stack([torch.from_numpy(b["timepoints"]) for b in batch]).long()
 
     padded_batch = collate_sequence_padding(batch)
-    if batch["features"] is not None:
-        feats = torch.from_numpy(batch["features"])
+    if padded_batch["features"] is not None:
+        feats = padded_batch["features"]
     else:
         feats = None
-    if batch["pretrained_features"] is not None:
-        pretrained_feats = torch.from_numpy(batch["pretrained_features"])
+    if padded_batch["pretrained_feats"] is not None:
+        pretrained_feats = padded_batch["pretrained_feats"]
     else:
         pretrained_feats = None
 
-    coords = torch.from_numpy(batch["coords"])
-    timepoints = torch.from_numpy(batch["timepoints"]).long()
+    coords = padded_batch["coords"]
+    timepoints = padded_batch["timepoints"].long()
     padding_mask = padded_batch["padding_mask"]
 
     # Hack that assumes that all parameters of a model are on the same device
