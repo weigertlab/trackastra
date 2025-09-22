@@ -20,13 +20,6 @@ from .model_parts import (
     RelativePositionalAttention,
 )
 
-try:
-    from trackastra_pretrained_feats import TrackingTransformerwPretrainedFeats
-
-    PRETRAINED_FEATS_INSTALLED = True
-except ImportError:
-    PRETRAINED_FEATS_INSTALLED = False
-
 logger = logging.getLogger(__name__)
 
 
@@ -467,6 +460,12 @@ class TrackingTransformer(torch.nn.Module):
         model_classes = {
             "default": TrackingTransformer,
         }
+        try:
+            from trackastra_pretrained_feats import TrackingTransformerwPretrainedFeats
+
+            PRETRAINED_FEATS_INSTALLED = True
+        except ImportError:
+            PRETRAINED_FEATS_INSTALLED = False
         if PRETRAINED_FEATS_INSTALLED:
             model_classes["pretrained_feats"] = TrackingTransformerwPretrainedFeats
 

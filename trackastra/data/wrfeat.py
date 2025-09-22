@@ -7,7 +7,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from functools import reduce
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 import joblib
 import numpy as np
@@ -20,11 +20,15 @@ from tqdm import tqdm
 from trackastra.data.utils import load_tiff_timeseries
 
 try:
-    from trackastra_pretrained_feats import FeatureExtractor, WRPretrainedFeatures
+    from trackastra_pretrained_feats import WRPretrainedFeatures
 
     PRETRAINED_FEATS_INSTALLED = True
+    if TYPE_CHECKING:
+        from trackastra_pretrained_feats import FeatureExtractor
 except ImportError:
     PRETRAINED_FEATS_INSTALLED = False
+    if TYPE_CHECKING:
+        FeatureExtractor = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -517,7 +521,7 @@ def get_features(
     ndim: int = 2,
     n_workers=0,
     progbar_class=tqdm,
-    feature_extractor: FeatureExtractor | None = None,
+    feature_extractor: Optional["FeatureExtractor"] | None = None,
 ) -> list[WRFeatures]:
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
