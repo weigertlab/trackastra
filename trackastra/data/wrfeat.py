@@ -20,8 +20,6 @@ from tqdm import tqdm
 from trackastra.data.utils import load_tiff_timeseries
 
 try:
-    from trackastra_pretrained_feats import WRPretrainedFeatures
-
     PRETRAINED_FEATS_INSTALLED = True
     if TYPE_CHECKING:
         from trackastra_pretrained_feats import FeatureExtractor
@@ -543,6 +541,8 @@ def get_features(
         )
     elif features == "pretrained_feats" or features == "pretrained_feats_aug":
         feature_extractor.precompute_image_embeddings(imgs)
+        from trackastra_pretrained_feats import WRPretrainedFeatures
+
         features = [
             WRPretrainedFeatures.from_mask_img(
                 img=img[np.newaxis],

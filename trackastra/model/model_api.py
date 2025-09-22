@@ -182,6 +182,7 @@ class Trackastra:
         n_workers: int = 0,
         normalize_imgs: bool = True,
         progbar_class=tqdm,
+        batch_size: int | None = None,
     ):
         logger.info("Predicting weights for candidate graph")
         if normalize_imgs:
@@ -217,7 +218,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
             progbar_class=progbar_class,
-            batch_size=self.batch_size,
+            batch_size=batch_size or self.batch_size,
         )
 
         return predictions
