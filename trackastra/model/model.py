@@ -20,6 +20,13 @@ from .model_parts import (
     RelativePositionalAttention,
 )
 
+try:
+    from trackastra_pretrained_feats import TrackingTransformerwPretrainedFeats
+
+    PRETRAINED_FEATS_INSTALLED = True
+except ImportError:
+    PRETRAINED_FEATS_INSTALLED = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -455,6 +462,27 @@ class TrackingTransformer(torch.nn.Module):
         yaml.safe_dump(self.config, open(folder / "config.yaml", "w"))
         torch.save(self.state_dict(), folder / "model.pt")
 
+    @staticmethod
+    def create(config):
+        model_classes = {
+            "default": TrackingTransformer,
+        }
+        if PRETRAINED_FEATS_INSTALLED:
+            model_classes["pretrained_feats"] = TrackingTransformerwPretrainedFeats
+
+        model_type = (
+            "pretrained_feats" if "pretrained_feat_dim" in config else "default"
+        )
+        # FIXME add explicit field in config to dispatch to different model classes
+
+        if model_type == "pretrained_feats" and not PRETRAINED_FEATS_INSTALLED:
+            raise ImportError(
+                "Model was trained with pretrained features, but trackastra_pretrained_feats is not installed. "
+                "Please install it with `pip install trackastra[pretrained_feats]`."
+            )
+
+        return model_classes[model_type](**config)
+
     @classmethod
     def from_folder(
         cls, folder, map_location=None, args=None, checkpoint_path: str = "model.pt"
@@ -474,8 +502,7 @@ class TrackingTransformer(torch.nn.Module):
                         )
             if errors:
                 raise ValueError("\n".join(errors))
-
-        model = cls(**config)
+        model = cls.create(config)
 
         # try:
         #     # Try to load from lightning checkpoint first
