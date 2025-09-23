@@ -635,8 +635,11 @@ def build_windows(
             features=torch.from_numpy(feat.features_stacked)
             if as_torch
             else feat.features_stacked,
-            pretrained_feats=torch.from_numpy(pt_feats) if as_torch else pt_feats,
         )
+        # Add pre-trained features
+        if pt_feats is not None:
+            w["pretrained_feats"] = torch.from_numpy(pt_feats) if as_torch else pt_feats
+
         windows.append(w)
 
     logger.debug(f"Built {len(windows)} track windows.\n")

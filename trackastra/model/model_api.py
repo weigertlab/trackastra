@@ -289,16 +289,16 @@ class Trackastra:
             nx.DiGraph containing the tracking results.
             np.ndarray of tracked masks of shape (T,(Z),Y,X).
         """
-        # Pretrained feature extraction requires the trackastra_pretrained_feats package
-        if not imgs.shape == masks.shape:
-            raise RuntimeError(
-                f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
-            )
+        # if not imgs.shape == masks.shape:
+        #     raise RuntimeError(
+        #         f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
+        #     )
 
-        if not imgs.ndim == self.transformer.config["coord_dim"] + 1:
-            raise RuntimeError(
-                f"images should be a sequence of {self.transformer.config['coord_dim']}D images"
-            )
+        # if not imgs.ndim == self.transformer.config["coord_dim"] + 1:
+        #     raise RuntimeError(
+        #         f"images should be a sequence of {self.transformer.config['coord_dim']}D images"
+        #     )
+        # Pretrained feature extraction requires the trackastra_pretrained_feats package
         feat_type = self.train_args["features"]
         if feat_type == "pretrained_feats" or feat_type == "pretrained_feats_aug":
             if not PRETRAINED_FEATS_INSTALLED:
