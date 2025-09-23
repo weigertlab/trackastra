@@ -33,13 +33,19 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     # timepoints = torch.stack([torch.from_numpy(b["timepoints"]) for b in batch]).long()
 
     padded_batch = collate_sequence_padding(batch)
-    if padded_batch["features"] is not None:
-        feats = padded_batch["features"]
-    else:
+    try:
+        if padded_batch["features"] is not None:
+            feats = padded_batch["features"]
+        else:
+            feats = None
+    except KeyError:
         feats = None
-    if padded_batch["pretrained_feats"] is not None:
-        pretrained_feats = padded_batch["pretrained_feats"]
-    else:
+    try:
+        if padded_batch["pretrained_feats"] is not None:
+            pretrained_feats = padded_batch["pretrained_feats"]
+        else:
+            pretrained_feats = None
+    except KeyError:
         pretrained_feats = None
 
     coords = padded_batch["coords"]
