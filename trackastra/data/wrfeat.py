@@ -7,7 +7,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from functools import reduce
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 import joblib
 import numpy as np
@@ -18,6 +18,15 @@ from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
 
 from trackastra.data.utils import load_tiff_timeseries
+
+try:
+    PRETRAINED_FEATS_INSTALLED = True
+    if TYPE_CHECKING:
+        from trackastra_pretrained_feats import FeatureExtractor
+except ImportError:
+    PRETRAINED_FEATS_INSTALLED = False
+    if TYPE_CHECKING:
+        FeatureExtractor = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +142,23 @@ class WRFeatures:
 
     @property
     def features_stacked(self):
-        return np.concatenate([v for k, v in self.features.items()], axis=-1)
+        # Do not include pretrained_feats here
+        # They are handled separately and should not be added to shallow features
+        if not self.features or (
+            len(self.features) == 1 and "pretrained_feats" in self.features
+        ):
+            return None
+        feats = np.concatenate(
+            [v for k, v in self.features.items() if k != "pretrained_feats"], axis=-1
+        )
+        return feats
+
+    @property
+    def pretrained_feats(self):
+        # for compatibility with WRPretrainedFeatures
+        if "pretrained_feats" in self.features:
+            return self.features["pretrained_feats"]
+        return None
 
     def __len__(self):
         return len(self.labels)
@@ -504,14 +529,17 @@ class WRAugmentationPipeline:
 def get_features(
     detections: np.ndarray,
     imgs: np.ndarray | None = None,
-    features: Literal["none", "wrfeat"] = "wrfeat",
+    features: Literal[
+        "none", "wrfeat", "pretrained_feats", "pretrained_feats_aug"
+    ] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
     progbar_class=tqdm,
+    feature_extractor: Optional["FeatureExtractor"] | None = None,
 ) -> list[WRFeatures]:
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
-    logger.info(f"Extracting features from {len(detections)} detections")
+    logger.info(f"Extracting features from {len(detections)} frames.")
     if n_workers > 0:
         logger.info(f"Using {n_workers} processes for feature extraction")
         features = joblib.Parallel(n_jobs=n_workers, backend="loky")(
@@ -527,6 +555,20 @@ def get_features(
                 desc="Extracting features",
             )
         )
+    elif features == "pretrained_feats" or features == "pretrained_feats_aug":
+        feature_extractor.precompute_image_embeddings(imgs)
+        from trackastra_pretrained_feats import WRPretrainedFeatures
+
+        features = [
+            WRPretrainedFeatures.from_mask_img(
+                img=img[np.newaxis],
+                mask=mask[np.newaxis],
+                feature_extractor=feature_extractor,
+                t_start=t,
+                additional_properties=feature_extractor.additional_features,
+            )
+            for t, (mask, img) in enumerate(zip(detections, imgs))
+        ]
     else:
         logger.info("Using single process for feature extraction")
         features = tuple(
@@ -572,7 +614,12 @@ def build_windows(
         desc="Building windows",
     ):
         feat = WRFeatures.concat(features[t1:t2])
-
+        try:
+            pt_feats = (
+                feat.pretrained_feats if feat.pretrained_feats is not None else None
+            )
+        except AttributeError:
+            pt_feats = None
         labels = feat.labels
         timepoints = feat.timepoints
         coords = feat.coords
@@ -589,6 +636,10 @@ def build_windows(
             if as_torch
             else feat.features_stacked,
         )
+        # Add pre-trained features
+        if pt_feats is not None:
+            w["pretrained_feats"] = torch.from_numpy(pt_feats) if as_torch else pt_feats
+
         windows.append(w)
 
     logger.debug(f"Built {len(windows)} track windows.\n")
