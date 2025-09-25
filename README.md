@@ -52,6 +52,11 @@ Trackastra can then be installed from PyPI using `pip`:
 pip install trackastra
 ```
 
+Currently, Trackastra needs GEFF in version 0.5.0. Geff can be installed from PyPI using `pip`:
+```bash
+pip install geff==0.5.0
+```
+
 ### With ILP support
 For tracking with an integer linear program (ILP, which is optional)
 ```bash
