@@ -146,6 +146,11 @@ def predict_windows(
     ):
         # This assumes that the samples in the dataset are ordered by time and start at 0.
         batch = windows[t : t + batch_size]
+        lengths = [len(b["timepoints"]) for b in batch]
+        if np.all(np.array(lengths) == 0):
+            logger.warning(f"No detections in window {t} - {t + batch_size}, skipping")
+            continue
+
         A_batch = predict(batch, model)
 
         for i, A in enumerate(A_batch):

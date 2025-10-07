@@ -63,6 +63,9 @@ def track_ilp(
     params_file: str | None = None,
     **kwargs,
 ) -> nx.DiGraph:
+    if len(candidate_graph) == 0:
+        return candidate_graph
+
     candidate_graph_motile = motile.TrackGraph(candidate_graph, frame_attribute="time")
 
     ilp, _used_costs = solve_full_ilp(
