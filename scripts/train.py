@@ -32,10 +32,10 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
-    BalancedDataModule,
     CTCData,
     collate_sequence_padding,
 )
+from trackastra.data.distributed import BalancedDataModule
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from scipy.ndimage import maximum_filter
-from trackastra.data import AugmentationPipeline
+from trackastra.data.augmentations import AugmentationPipeline
 
 
 def plot_augs(b1, b2):

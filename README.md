@@ -223,11 +223,16 @@ to build a command for tracking directly from images and corresponding instance 
 
 ## Usage: Training a model on your own data
 
-To run an example
-- clone this repository and got into the scripts directory with `cd trackastra/scripts`.
-- download the [Fluo-N2DL-HeLa](http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DL-HeLa.zip) dataset from the Cell Tracking Challenge into `data/ctc`.
+**Note:** Training requires additional dependencies. Make sure to install with:
+```bash
+pip install "trackastra[train]"
+```
 
-Now, run
+To run an example:
+- Clone this repository and go into the scripts directory with `cd trackastra/scripts`.
+- Download the [Fluo-N2DL-HeLa](http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DL-HeLa.zip) dataset from the Cell Tracking Challenge into `data/ctc`.
+
+Then run:
 ```bash
 python train.py --config example_config.yaml
 ```

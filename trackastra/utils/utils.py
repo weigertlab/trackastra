@@ -7,7 +7,6 @@ from pathlib import Path
 from timeit import default_timer
 
 import dask.array as da
-import matplotlib
 import numpy as np
 import torch
 
@@ -136,6 +135,8 @@ def render_label(
 
 
 def random_label_cmap(n=2**16, h=(0, 1), lightness=(0.4, 1), s=(0.2, 0.8)):
+    import matplotlib.colors
+
     h, lightness, s = (
         np.random.uniform(*h, n),
         np.random.uniform(*lightness, n),
