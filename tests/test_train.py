@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+# Mark all tests in this module as requiring training dependencies
+pytestmark = pytest.mark.train
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 

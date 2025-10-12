@@ -23,8 +23,8 @@ jobs:
       - name: Run pre-commit linting
         run: pipx run pre-commit run --all-files
         
-  test:
-    name: ${{ matrix.platform }} py${{ matrix.python-version }} ilp=${{ matrix.ilp }}
+  test-core:
+    name: Core Tests - ${{ matrix.platform }} py${{ matrix.python-version }} ilp=${{ matrix.ilp }}
     runs-on: ${{ matrix.platform }}
     defaults:
       run:
@@ -60,16 +60,40 @@ jobs:
       - name: Install ilp dependencies
         if: matrix.ilp == 'true'
         run: mamba install -c gurobi -c funkelab ilpy
-          
-      - name: Install package and dependencies
+
+      - name: Install package with core dependencies
         run: python -m pip install -e .[test]
 
-      - name: Test
-        run: pytest tests -v -s --color=yes
+      - name: Run core tests
+        run: pytest tests -v -s --color=yes -m core
+
+  test-train:
+    name: Training Tests - ubuntu-latest py3.10
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: "3.10"
+          miniforge-version: latest
+          use-mamba: true
+          channels: conda-forge
+          channel-priority: true
+
+      - name: Install package with training dependencies
+        run: python -m pip install -e .[train,test]
+
+      - name: Run training tests
+        run: pytest tests -v -s --color=yes -m train
 
   upload_pypi:
     name: Upload package to PyPi
-    needs: [lint, test]
+    needs: [lint, test-core, test-train]
     runs-on: ubuntu-latest
     if: github.event_name == 'release' && github.event.action == 'published' # upload to pypi only on release
     steps:

@@ -1,9 +1,11 @@
 import numpy as np
 import pytest
 from scipy.ndimage import maximum_filter
-from trackastra.data.augmentations import AugmentationPipeline
+
+# Mark all tests in this module as requiring training dependencies
 
 
+@pytest.mark.train
 def plot_augs(b1, b2):
     import matplotlib.pyplot as plt
 
@@ -20,6 +22,7 @@ def plot_augs(b1, b2):
         axs[1, i].plot(*p2[t2 == t].T[::-1], "o", color="C2", alpha=0.4)
 
 
+@pytest.mark.train
 def generate_data(ndim: int = 2):
     y = np.zeros((4,) + (64,) * ndim, np.uint16)
 
@@ -39,6 +42,8 @@ def generate_data(ndim: int = 2):
 @pytest.mark.skip(reason="outdated")
 def test_augpipeline(plot=False):
     x, y, points, ts = generate_data()
+    from trackastra.data.augmentations import AugmentationPipeline
+
     pipe = AugmentationPipeline(level=3, p=1)
     (x2, y2, p2), idx = pipe(x, y, points, ts)
     t2 = ts[idx]

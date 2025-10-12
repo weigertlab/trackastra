@@ -1,7 +1,12 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from test_data import example_dataset
+
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
 
 
 def test_cli_parser():

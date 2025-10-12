@@ -60,6 +60,12 @@ conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
+
+### Installation with training support
+```bash
+pip install "trackastra[train]"
+```
+
 <details>
 <summary>📄 <h4>Development installation</h4></summary>
   
@@ -223,10 +229,7 @@ to build a command for tracking directly from images and corresponding instance 
 
 ## Usage: Training a model on your own data
 
-**Note:** Training requires additional dependencies. Make sure to install with:
-```bash
-pip install "trackastra[train]"
-```
+
 
 To run an example:
 - Clone this repository and go into the scripts directory with `cd trackastra/scripts`.

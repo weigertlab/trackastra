@@ -7,6 +7,9 @@ import torch
 from trackastra.data import example_data_hela
 from trackastra.model import Trackastra
 
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
+
 
 @pytest.mark.parametrize("name", ["ctc", "general_2d"])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

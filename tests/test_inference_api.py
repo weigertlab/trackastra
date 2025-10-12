@@ -10,6 +10,9 @@ from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks, write_to_geff
 
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
+
 try:
     import motile  # noqa: F401
 
