@@ -74,7 +74,7 @@ conda create --name trackastra python=3.10 --no-default-packages
 conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 git clone https://github.com/weigertlab/trackastra.git
-pip install -e "./trackastra[ilp,dev]"
+pip install -e "./trackastra[all]"
 ```
 
 </details>
