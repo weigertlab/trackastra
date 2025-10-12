@@ -7,6 +7,10 @@ import torch
 from tifffile import imwrite
 from trackastra.data import CTCData, collate_sequence_padding
 
+# Mark all tests in this module as requiring training dependencies
+# (most tests are skipped as outdated, but they use CTCData which requires training pipeline)
+pytestmark = pytest.mark.train
+
 
 def example_dataset():
     img_dir = Path("test_data/img")

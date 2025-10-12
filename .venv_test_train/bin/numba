@@ -1,0 +1,7 @@
+#!/Users/bgallusser/code/trackastra/.venv_test_train/bin/python3
+# -*- coding: UTF-8 -*-
+
+from numba.misc.numba_entry import main
+
+if __name__ == "__main__":
+    main()

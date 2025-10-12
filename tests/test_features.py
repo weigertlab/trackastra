@@ -1,10 +1,13 @@
 import numpy as np
+import pytest
 from scipy.ndimage import maximum_filter
 from trackastra.data.wrfeat import (
     WRAugmentationPipeline,
     WRFeatures,
     WRRandomMovement,
 )
+
+pytestmark = pytest.mark.core
 
 
 def generate_data(ndim: int = 2, ngrid=10):

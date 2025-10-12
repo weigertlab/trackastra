@@ -39,3 +39,13 @@ convention = "google"
 
 [tool.setuptools_scm]
 write_to = "trackastra/_version.py"
+
+[tool.pytest.ini_options]
+markers = [
+    "train: marks tests as requiring training dependencies (lightning, wandb, tensorboard, kornia, matplotlib)",
+    "core: marks tests as requiring only core/inference dependencies (default)",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
