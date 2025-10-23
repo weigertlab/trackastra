@@ -180,3 +180,5 @@ cython_debug/
 #.idea/
 
 trackastra/_version.py
+# Used by pre-trained feature extractors
+embeddings/* 
