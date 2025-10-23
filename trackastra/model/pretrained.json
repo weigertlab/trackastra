@@ -77,5 +77,72 @@
                 "reference": "Maška M, Ulman V, Delgado-Rodriguez P, Gómez-de-Mariscal E, Nečasová T, Guerrero Peña FA, Ren TI, Meyerowitz EM, Scherr T, Löffler K, Mikut R. The Cell Tracking Challenge: 10 years of objective benchmarking. Nature Methods. 2023 Jul;20(7):1010-20."
             }
         }
+    },
+    "tastraetultra_SAM21_general_2d": {
+        "tags": ["cells, nuclei, bacteria, epithelial, yeast, particles"],
+        "dimensionality": [2],
+        "description": "A SAM2.1-features enhanced version of the general_2d model for general-purpose 2D tracking. Benefits were mostly seen on bacteria datasets. Please cite as indicated at https://github.com/facebookresearch/sam2 if you use this model.",
+        "url": "--- TBD ---",
+        "datasets": {
+            "Subset of Cell Tracking Challenge 2d datasets": {
+                "url": "https://celltrackingchallenge.net/2d-datasets/",
+                "reference": "Maška M, Ulman V, Delgado-Rodriguez P, Gómez-de-Mariscal E, Nečasová T, Guerrero Peña FA, Ren TI, Meyerowitz EM, Scherr T, Löffler K, Mikut R. The Cell Tracking Challenge: 10 years of objective benchmarking. Nature Methods. 2023 Jul;20(7):1010-20."
+            },
+            "Bacteria van Vliet": {
+                "url": "https://zenodo.org/records/268921", 
+                "reference": "van Vliet S, Winkler AR, Spriewald S, Stecher B, Ackermann M. Spatially correlated gene expression in bacterial groups: the role of lineage history, spatial gradients, and cell-cell interactions. Cell systems. 2018 Apr 25;6(4):496-507."
+            },
+            "Bacteria ObiWan-Microbi": {
+                "url": "https://zenodo.org/records/7260137",
+                "reference": "Seiffarth J, Scherr T, Wollenhaupt B, Neumann O, Scharr H, Kohlheyer D, Mikut R, Nöh K. ObiWan-Microbi: OMERO-based integrated workflow for annotating microbes in the cloud. SoftwareX. 2024 May 1;26:101638."
+            },
+            "Bacteria Persat": {
+                "url": "https://www.p-lab.science",
+                "reference": "Datasets kindly provided by Persat lab, EPFL."
+            },
+            "DeepCell": {
+                "url": "https://datasets.deepcell.org/data",
+                "reference": "Schwartz, M, Moen E, Miller G, Dougherty T, Borba E, Ding R, Graf W, Pao E, Van Valen D. Caliban: Accurate cell tracking and lineage construction in live-cell imaging experiments with deep learning. Biorxiv. 2023 Sept 13:803205."
+            },
+            "Ker phase contrast": {
+                "url": "https://osf.io/ysaq2/",
+                "reference": "Ker DF, Eom S, Sanami S, Bise R, Pascale C, Yin Z, Huh SI, Osuna-Highley E, Junkers SN, Helfrich CJ, Liang PY. Phase contrast time-lapse microscopy datasets with automated and manual cell tracking annotations. Scientific data. 2018 Nov 13;5(1):1-2."
+            },
+            "Epithelia benchmark": {
+                "reference": "Funke J, Mais L, Champion A, Dye N, Kainmueller D. A benchmark for epithelial cell tracking. InProceedings of The European Conference on Computer Vision (ECCV) Workshops 2018 (pp. 0-0)."
+            },
+            "T Cells": {
+                "url": "https://zenodo.org/records/5206119"
+            },
+            "Neisseria meningitidis bacterial growth": {
+                "url": "https://zenodo.org/records/5419619"
+            },
+            "Synthetic nuclei": {
+                "reference": "Weigert group live cell simulator."
+            },
+            "Synthetic particles": {
+                "reference": "Weigert group particle simulator."
+            },
+            "Particle Tracking Challenge": {
+                "url": "http://bioimageanalysis.org/track/#data",
+                "reference": "Chenouard, N., Smal, I., De Chaumont, F., Maška, M., Sbalzarini, I. F., Gong, Y., ... & Meijering, E. (2014). Objective comparison of particle tracking methods. Nature methods, 11(3), 281-289."
+            },
+            "Yeast Cell-ACDC": {
+                "url": "https://zenodo.org/records/6795124",
+                "reference": "Padovani, F., Mairhörmann, B., Falter-Braun, P., Lengefeld, J., & Schmoller, K. M. (2022). Segmentation, tracking and cell cycle analysis of live-cell imaging data with Cell-ACDC. BMC biology, 20(1), 174."
+            },
+            "DeepSea": {
+                "url": "https://deepseas.org/datasets/",
+                "reference": "Zargari, A., Lodewijk, G. A., Mashhadi, N., Cook, N., Neudorf, C. W., Araghbidikashani, K., ... & Shariati, S. A. (2023). DeepSea is an efficient deep-learning model for single-cell segmentation and tracking in time-lapse microscopy. Cell Reports Methods, 3(6)."
+            },
+            "Btrack" : {
+                "url": "https://rdr.ucl.ac.uk/articles/dataset/Cell_tracking_reference_dataset/16595978",
+                "reference": "Ulicna, K., Vallardi, G., Charras, G., & Lowe, A. R. (2021). Automated deep lineage tree analysis using a Bayesian single cell tracking approach. Frontiers in Computer Science, 3, 734559."
+            },
+            "E. coli in mother machine": {
+                "url": "https://zenodo.org/records/11237127",
+                "reference": "O’Connor, O. M., & Dunlop, M. J. (2024). Cell-TRACTR: A transformer-based model for end-to-end segmentation and tracking of cells. bioRxiv, 2024-07."
+            }
+        }
     }
 }
