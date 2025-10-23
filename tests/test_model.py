@@ -1,5 +1,9 @@
+import pytest
 import torch
 from trackastra.model import TrackingTransformer
+
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
 
 
 def test_model():

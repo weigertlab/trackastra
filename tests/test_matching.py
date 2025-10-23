@@ -1,5 +1,9 @@
 import numpy as np
+import pytest
 from trackastra.data.matching import matching
+
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
 
 
 def repeat_tile(x, repeats=(4, 4)):

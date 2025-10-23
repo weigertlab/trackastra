@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 import zarr
-from geff import write_nx
+from geff import write
 from skimage.measure import regionprops
 from tqdm import tqdm
 
@@ -486,7 +486,7 @@ def write_to_geff(
 
     graph = split_coords_attr(graph, position_attr=position_attr)
 
-    write_nx(
+    write(
         graph=graph,
         store=Path(outdir) / tracking_graph_name,
         axis_types=axis_types,

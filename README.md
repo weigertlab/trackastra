@@ -60,6 +60,12 @@ conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
+
+### Installation with training support
+```bash
+pip install "trackastra[train]"
+```
+
 <details>
 <summary>📄 <h4>Development installation</h4></summary>
   
@@ -68,7 +74,7 @@ conda create --name trackastra python=3.10 --no-default-packages
 conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 git clone https://github.com/weigertlab/trackastra.git
-pip install -e "./trackastra[ilp,dev]"
+pip install -e "./trackastra[all]"
 ```
 
 </details>
@@ -223,11 +229,13 @@ to build a command for tracking directly from images and corresponding instance 
 
 ## Usage: Training a model on your own data
 
-To run an example
-- clone this repository and got into the scripts directory with `cd trackastra/scripts`.
-- download the [Fluo-N2DL-HeLa](http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DL-HeLa.zip) dataset from the Cell Tracking Challenge into `data/ctc`.
 
-Now, run
+
+To run an example:
+- Clone this repository and go into the scripts directory with `cd trackastra/scripts`.
+- Download the [Fluo-N2DL-HeLa](http://data.celltrackingchallenge.net/training-datasets/Fluo-N2DL-HeLa.zip) dataset from the Cell Tracking Challenge into `data/ctc`.
+
+Then run:
 ```bash
 python train.py --config example_config.yaml
 ```

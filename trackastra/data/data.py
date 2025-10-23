@@ -21,11 +21,9 @@ from tqdm import tqdm
 
 from trackastra.data import wrfeat
 from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
-from trackastra.data.augmentations import (
-    AugmentationPipeline,
-    RandomCrop,
-    default_augmenter,
-)
+
+# Lazy import of augmentations (training-only dependencies)
+# from trackastra.data.augmentations import AugmentationPipeline, RandomCrop, default_augmenter
 from trackastra.data.features import (
     _PROPERTIES,
     extract_features_patch,
@@ -338,6 +336,13 @@ class CTCData(Dataset):
     def _setup_features_augs(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
+        # Lazy import of training-only augmentation dependencies
+        from trackastra.data.augmentations import (
+            AugmentationPipeline,
+            RandomCrop,
+            default_augmenter,
+        )
+
         if self.features == "wrfeat":
             return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
 

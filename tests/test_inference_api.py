@@ -10,6 +10,16 @@ from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
 from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks, write_to_geff
 
+# Mark all tests in this module as core/inference tests
+pytestmark = pytest.mark.core
+
+try:
+    import motile  # noqa: F401
+
+    ILP_TESTS = True
+except ModuleNotFoundError:
+    ILP_TESTS = False
+
 
 @pytest.mark.parametrize(
     "example_data",
@@ -98,4 +108,60 @@ def test_empty_frame():
         imgs,
         masks,
         mode="greedy",
+    )
+
+
+def test_empty_window_greedy():
+    imgs, masks = example_data_hela()
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+    window_size = model.transformer.config["window"]
+    masks[:window_size] = 0
+
+    model.track(
+        imgs,
+        masks,
+        mode="greedy",
+    )
+
+
+@pytest.mark.skipif(not ILP_TESTS, reason="Package for ILP tracking not installed")
+def test_empty_window_ilp():
+    imgs, masks = example_data_hela()
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+    window_size = model.transformer.config["window"]
+    masks[:window_size] = 0
+
+    model.track(
+        imgs,
+        masks,
+        mode="ilp",
+    )
+
+
+def test_empty_sequence_greedy():
+    imgs = np.zeros((10, 100, 100), dtype=float)
+    masks = np.zeros((10, 100, 100), dtype=int)
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+
+    model.track(
+        imgs,
+        masks,
+        mode="greedy",
+    )
+
+
+@pytest.mark.skipif(not ILP_TESTS, reason="Package for ILP tracking not installed")
+def test_empty_sequence_ilp():
+    imgs = np.zeros((10, 100, 100), dtype=float)
+    masks = np.zeros((10, 100, 100), dtype=int)
+
+    model = Trackastra.from_pretrained("general_2d", device="cpu")
+
+    model.track(
+        imgs,
+        masks,
+        mode="ilp",
     )

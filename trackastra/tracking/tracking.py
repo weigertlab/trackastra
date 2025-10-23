@@ -93,6 +93,10 @@ def build_graph(
     logger.info(f"Build candidate graph with {delta_t=}")
     G = nx.DiGraph()
 
+    if len(nodes) == 0:
+        logger.warning("No nodes provided, returning empty graph")
+        return G
+
     for node in nodes:
         G.add_node(
             node["id"],
