@@ -78,11 +78,11 @@
             }
         }
     },
-    "tastraetultra_SAM21_general_2d": {
+    "SAM21_general_2d": {
         "tags": ["cells, nuclei, bacteria, epithelial, yeast, particles"],
         "dimensionality": [2],
-        "description": "A SAM2.1-features enhanced version of the general_2d model for general-purpose 2D tracking. Benefits were mostly seen on bacteria datasets. Please cite as indicated at https://github.com/facebookresearch/sam2 if you use this model.",
-        "url": "--- TBD ---",
+        "description": "A SAM2.1-features enhanced version of the general_2d model for general-purpose 2D tracking, with strong benefits on bacteria datasets. Please cite SAM2 as indicated at https://github.com/facebookresearch/sam2 if you use this model.",
+        "url": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/SAM21_general_2d.zip",
         "datasets": {
             "Subset of Cell Tracking Challenge 2d datasets": {
                 "url": "https://celltrackingchallenge.net/2d-datasets/",
