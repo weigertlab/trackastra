@@ -319,7 +319,7 @@ class Trackastra:
                 imgs.shape[-2:],
                 save_path=save_path,
                 mode=self.train_args["pretrained_feats_mode"],
-                device="cuda" if torch.cuda.is_available() else "cpu",
+                device=self.device,
                 additional_features=additional_features,
             )
             self.feature_extractor.force_recompute = True
