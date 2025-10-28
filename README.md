@@ -21,6 +21,12 @@
 
 ![Overview](overview.png)
 
+## News
+
+A new model variant is now available, which uses **SAM2.1 features to improve tracking performance on certain datasets**, especially bacteria.
+
+ Please see the [installation instructions](#trackastra-et-ultra-installation).
+
 ## Reference
 
 Paper: [Trackastra: Transformer-based cell tracking for live-cell microscopy](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf)
@@ -60,6 +66,29 @@ conda activate trackastra
 conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
+
+### Trackastra et Ultra installation (bacteria tracking)
+
+A new model variant is now available, which uses **SAM2.1 features to improve tracking performance on certain datasets**, especially bacteria.
+```bash
+pip install "trackastra[etultra]"
+```
+and select the `"SAM21_general_2d"` pre-trained model when loading. 
+
+<details>
+<summary>📄 <h4>About Trackastra et Ultra</h4></summary>
+
+The SAM2.1 General model performs especially well on :
+
+- Bacteria datasets
+- When good segmentation masks are available
+- For optimal performance on bacteria tracking (at the cost of speed)
+
+This model is slower than general_2d due to the feature extraction step by a factor of ~2-2.5x, depending on the number of objects and frames.
+
+For more information about this extension, please refer to the [Trackastra et Ultra repository](https://github.com/C-Achard/Trackastra-et-Ultra).
+</details>
+
 
 ### Installation with training support
 ```bash

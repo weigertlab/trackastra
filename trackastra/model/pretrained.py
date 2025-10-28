@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _MODELS = {
     "ctc": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/ctc.zip",
     "general_2d": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/general_2d.zip",
+    "SAM21_general_2d": "https://github.com/weigertlab/trackastra-models/releases/download/v0.3.0/SAM21_general_2d.zip",
 }
 
 
