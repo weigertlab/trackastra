@@ -472,12 +472,12 @@ class TrackingTransformer(torch.nn.Module):
         model_type = (
             "pretrained_feats" if "pretrained_feat_dim" in config else "default"
         )
-        # FIXME add explicit field in config to dispatch to different model classes
+        # TODO instead we could add explicit field in config to dispatch to different model classes rather than a train arg
 
         if model_type == "pretrained_feats" and not PRETRAINED_FEATS_INSTALLED:
             raise ImportError(
                 "Model was trained with pretrained features, but trackastra_pretrained_feats is not installed. "
-                "Please install it with `pip install trackastra[pretrained_feats]`."
+                "Please install it with `pip install trackastra[etultra]`."
             )
 
         return model_classes[model_type](**config)

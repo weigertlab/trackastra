@@ -305,7 +305,7 @@ class Trackastra:
                 raise ImportError(
                     "The trackastra_pretrained_feats package is required for pretrained feature extraction."
                     "Please install it with :"
-                    "pip install trackastra[pretrained_feats]"
+                    "pip install trackastra[etultra]"
                 )
             additional_features = self.train_args.get(
                 "pretrained_feats_additional_props", None
