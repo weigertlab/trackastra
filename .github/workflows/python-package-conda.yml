@@ -49,7 +49,7 @@ jobs:
             python-version: "3.10"
             ilp: "true"
             sam2: "false"
-          - platform: ubuntu-latest
+          - platform: macos-latest
             python-version: "3.12"
             ilp: "false"
             sam2: "true"
