@@ -21,26 +21,8 @@
 
 ![Overview](overview.png)
 
-## News
+If you use this code in your research, please cite [our paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf) ([BibTeX](./CITATION.cff)).
 
-A new model variant is now available, which uses **SAM2.1 features to improve tracking performance on certain datasets**, especially bacteria.
-
- Please see the [installation instructions](#trackastra-et-ultra-installation).
-
-## Reference
-
-Paper: [Trackastra: Transformer-based cell tracking for live-cell microscopy](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf)
-
-```
-@inproceedings{gallusser2024trackastra,
-  title={Trackastra: Transformer-based cell tracking for live-cell microscopy},
-  author={Gallusser, Benjamin and Weigert, Martin},
-  booktitle={European conference on computer vision},
-  pages={467--484},
-  year={2024},
-  organization={Springer}
-}
-```
 
 ## Examples
 Nuclei tracking | Bacteria tracking
@@ -67,28 +49,13 @@ conda install -c conda-forge -c gurobi -c funkelab ilpy
 pip install "trackastra[ilp]"
 ```
 
-### Trackastra et Ultra installation (bacteria tracking)
+### 🆕😎 With pretrained features
 
-A new model variant is now available, which uses **SAM2.1 features to improve tracking performance on certain datasets**, especially bacteria.
+For our [new model variant](https://github.com/C-Achard/Trackastra-et-Ultra) that uses SAM2 features improves tracking performance on certain data, for example for tracking bacteria:
 ```bash
 pip install "trackastra[etultra]"
 ```
-and select the `"SAM21_general_2d"` pre-trained model when loading. 
-
-<details>
-<summary>📄 <h4>About Trackastra et Ultra</h4></summary>
-
-The SAM2.1 General model performs especially well on :
-
-- Bacteria datasets
-- When good segmentation masks are available
-- For optimal performance on bacteria tracking (at the cost of speed)
-
-This model is slower than general_2d due to the feature extraction step by a factor of ~2-2.5x, depending on the number of objects and frames.
-
-For more information about this extension, please refer to the [Trackastra et Ultra repository](https://github.com/C-Achard/Trackastra-et-Ultra).
-</details>
-
+and select the `general_2d_w_SAM2_features` pre-trained model for predictions, preferably on a machine with a GPU (slow on CPU!).
 
 ### Installation with training support
 ```bash
