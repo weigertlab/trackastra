@@ -77,18 +77,26 @@ def test_integration(name, device, batch_size):
     assert (len(track_graph.edges), len(track_graph.nodes)) == length_edges_nodes[name]
 
 
-def limit_mps_memory(target=6 * 2**30):
+def limit_mps_memory(target=5 * 2**30):
     """Limit MPS memory usage to target bytes."""
     if torch.backends.mps.is_available():
-        # Get Metal's recommended max working set (bytes)
-        max_bytes = (
-            torch.mps.recommended_max_memory() / 0.8
+        # Get Metal's recommended max working set (bytes)j
+        max_bytes = torch.mps.recommended_max_memory()
+        print(f"Recommended max MPS memory: {max_bytes / 2**30:.2f} GB.")
+        max_bytes = int(
+            max_bytes / 0.8
         )  # 80% is recommended, this gets the full amount
+
         fraction = target / max_bytes
         if fraction > 1.0:
-            raise ValueError("Target memory limit exceeds maximum available memory.")
+            raise ValueError(
+                f"Target memory limit ({target / 2**30:.2f} GB) exceeds maximum available memory ({max_bytes / 2**30:.2f} GB)."
+            )
         else:
             torch.mps.set_per_process_memory_fraction(fraction)
+            print(
+                f"Set MPS memory limit to {target / 2**30:.2f} GB ({fraction * 100:.1f}% of max)."
+            )
 
 
 @pytest.mark.skipif(
