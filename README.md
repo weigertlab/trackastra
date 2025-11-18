@@ -6,31 +6,34 @@
 
 
 [![PyPI](https://img.shields.io/pypi/v/trackastra)](https://pypi.org/project/trackastra/)
-![Python](https://img.shields.io/pypi/pyversions/trackastra)
-![Build](https://img.shields.io/github/actions/workflow/status/weigertlab/trackastra/python-package-conda.yml?branch=main)
+[![Python](https://img.shields.io/pypi/pyversions/trackastra)](https://pypi.org/project/trackastra/)
+[![Build](https://img.shields.io/github/actions/workflow/status/weigertlab/trackastra/python-package-conda.yml?branch=main)](https://github.com/weigertlab/trackastra/actions/workflows/python-package-conda.yml)
+[![Downloads](https://static.pepy.tech/badge/trackastra)](https://pepy.tech/project/trackastra)
 [![License](https://img.shields.io/github/license/weigertlab/trackastra)](https://github.com/weigertlab/trackastra/blob/main/LICENSE)
-
-
 </div>
 
 
 # *Trackastra* - Tracking by Association with Transformers
 
 
-*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting associations with a transformer model that was trained on a diverse set of microscopy videos.
+*Trackastra* is a cell tracking approach that links already segmented cells in a microscopy timelapse by predicting associations with a transformer model. It comes with [pretrained models](trackastra/model/pretrained.json) that perform well out of the box for many types of live-cell imaging data.
 
 ![Overview](overview.png)
 
-If you use this code in your research, please cite [our paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf) ([BibTeX](./CITATION.cff)).
+Give it a try with our easy-to-use [napari plugin](https://github.com/weigertlab/napari-trackastra/)!
 
+<p align="center">
+  <img src="https://github.com/weigertlab/napari-trackastra/assets/8866751/097eb82d-0fef-423e-9275-3fb528c20f7d" alt="demo" width="80%">
+</p>
 
-## Examples
+## Example tracking results
 Nuclei tracking | Bacteria tracking
 :-: | :-:
 <video src='https://github.com/weigertlab/trackastra/assets/8866751/807a8545-2f65-4697-a175-89b90dfdc435' width=180></video>| <video src='https://github.com/weigertlab/trackastra/assets/8866751/e7426d34-4407-4acb-ad79-fae3bc7ee6f9' width=180/></video>
 
 ## Installation
 This repository contains the Python implementation of Trackastra.
+If you use Trackastra in your research, please cite [our paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf) ([BibTeX](#reference)).
 
 Please first set up a Python environment (with Python version 3.10 or higher), preferably via [conda](https://conda.io/projects/conda/en/latest/user-guide/install/index.html) or [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html#mamba-install).
 
@@ -90,11 +93,7 @@ pip install -e "./trackastra[all]"
 
 ## Usage: Tracking with a pretrained model
 
-The input to Trackastra is a sequence of images and their corresponding cell (instance) segmentations.
-
-![demo](https://github.com/weigertlab/napari-trackastra/assets/8866751/097eb82d-0fef-423e-9275-3fb528c20f7d)
-
-> The available pretrained models are described in detail [here](trackastra/model/pretrained.json).
+The input to Trackastra is a sequence of images and their corresponding cell (instance) segmentations.  The available pretrained models are described in detail [here](trackastra/model/pretrained.json).
 
 Tracking with Trackastra can be done via:
 
@@ -237,3 +236,18 @@ python train.py --config example_config.yaml
 ```
 
 Generally, training data needs to be provided in the [Cell Tracking Challenge (CTC) format](http://public.celltrackingchallenge.net/documents/Naming%20and%20file%20content%20conventions.pdf), i.e. annotations are located in a folder containing one or several subfolders named `TRA`, with masks and tracklet information.
+
+## Reference
+
+Paper: [Trackastra: Transformer-based cell tracking for live-cell microscopy](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf)
+
+```bibtex
+@inproceedings{gallusser2024trackastra,
+  title={Trackastra: Transformer-based cell tracking for live-cell microscopy},
+  author={Gallusser, Benjamin and Weigert, Martin},
+  booktitle={European conference on computer vision},
+  pages={467--484},
+  year={2024},
+  organization={Springer}
+}
+```
