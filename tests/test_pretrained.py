@@ -77,7 +77,7 @@ def test_integration(name, device, batch_size):
     assert (len(track_graph.edges), len(track_graph.nodes)) == length_edges_nodes[name]
 
 
-def limit_mps_memory(target=8 * 2**30):
+def limit_mps_memory(target=6 * 2**30):
     """Limit MPS memory usage to target bytes."""
     if torch.backends.mps.is_available():
         # Get Metal's recommended max working set (bytes)
