@@ -9,10 +9,6 @@ from tqdm import tqdm
 from trackastra.data import collate_sequence_padding
 from trackastra.model import TrackingTransformer
 
-# TODO fix circular import
-# from .model import TrackingTransformer
-# from trackastra.data import WRFeatures
-
 warnings.simplefilter("ignore", SparseEfficiencyWarning)
 
 logger = logging.getLogger(__name__)
@@ -37,14 +33,31 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     # timepoints = torch.stack([torch.from_numpy(b["timepoints"]) for b in batch]).long()
 
     padded_batch = collate_sequence_padding(batch)
-    feats = padded_batch["features"]
+    try:
+        if padded_batch["features"] is not None:
+            feats = padded_batch["features"]
+        else:
+            feats = None
+    except KeyError:
+        feats = None
+    try:
+        if padded_batch["pretrained_feats"] is not None:
+            pretrained_feats = padded_batch["pretrained_feats"]
+        else:
+            pretrained_feats = None
+    except KeyError:
+        pretrained_feats = None
+
     coords = padded_batch["coords"]
     timepoints = padded_batch["timepoints"].long()
     padding_mask = padded_batch["padding_mask"]
 
     # Hack that assumes that all parameters of a model are on the same device
     device = next(model.parameters()).device
-    feats = feats.to(device)
+    if feats is not None:
+        feats = feats.to(device)
+    if pretrained_feats is not None:
+        pretrained_feats = pretrained_feats.unsqueeze(0).to(device)
     timepoints = timepoints.to(device)
     coords = coords.to(device)
     padding_mask = padding_mask.to(device)
@@ -52,7 +65,15 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     with torch.no_grad():
-        A = model(coords, features=feats, padding_mask=padding_mask)
+        if pretrained_feats is None:
+            A = model(coords, features=feats, padding_mask=padding_mask)
+        else:
+            A = model(
+                coords,
+                features=feats,
+                pretrained_features=pretrained_feats,
+                padding_mask=padding_mask,
+            )
 
         A = model.normalize_output(A, timepoints, coords)
 

@@ -24,27 +24,35 @@ jobs:
         run: pipx run pre-commit run --all-files
         
   test-core:
-    name: Core Tests - ${{ matrix.platform }} py${{ matrix.python-version }} ilp=${{ matrix.ilp }}
+    name: Core Tests - ${{ matrix.platform }} py${{ matrix.python-version }} ilp=${{ matrix.ilp }} sam2=${{ matrix.sam2 }}
     runs-on: ${{ matrix.platform }}
     defaults:
       run:
         shell: bash -l {0}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         platform: [ubuntu-latest]
         ilp: ["false"]
+        sam2: ["false"]
         include:
           - platform: windows-latest
             python-version: "3.10"
             ilp: "false"
+            sam2: "false"
           - platform: macos-latest
             python-version: "3.10"
             ilp: "false"
+            sam2: "false"
           - platform: ubuntu-latest
             python-version: "3.10"
             ilp: "true"
+            sam2: "false"
+          - platform: macos-latest
+            python-version: "3.12"
+            ilp: "false"
+            sam2: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +71,10 @@ jobs:
 
       - name: Install package with core dependencies
         run: python -m pip install -e .[test]
+
+      - name: Install additional dependencies for SAM2 features tests
+        if: matrix.sam2 == 'true'
+        run: python -m pip install -e .[test,etultra]
 
       - name: Run core tests
         run: pytest tests -v -s --color=yes -m core

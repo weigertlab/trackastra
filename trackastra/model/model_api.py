@@ -18,6 +18,13 @@ from .model import TrackingTransformer
 from .predict import predict_windows
 from .pretrained import download_pretrained
 
+try:
+    from trackastra_pretrained_feats import FeatureExtractor
+
+    PRETRAINED_FEATS_INSTALLED = True
+except ImportError:
+    PRETRAINED_FEATS_INSTALLED = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -61,6 +68,7 @@ class Trackastra:
         transformer: TrackingTransformer,
         train_args: dict,
         device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
+        batch_size: int | None = None,
     ):
         """Initialize Trackastra model.
 
@@ -108,13 +116,23 @@ class Trackastra:
 
         logger.info(f"Using device {self.device}")
 
-        self.batch_size = _default_batch_size(self.device)
+        self.batch_size = (
+            _default_batch_size(self.device) if batch_size is None else batch_size
+        )
 
         self.transformer = transformer.to(self.device)
         self.train_args = train_args
+        self.imgs_path = None
+        self.masks_path = None
+        self.feature_extractor = None
 
     @classmethod
-    def from_folder(cls, dir: Path | str, device: str | None = None):
+    def from_folder(
+        cls,
+        dir: Path | str,
+        device: str | None = None,
+        checkpoint_path: str | None = None,
+    ):
         """Load a Trackastra model from a local folder.
 
         Args:
@@ -122,13 +140,16 @@ class Trackastra:
                 - model weights
                 - train_config.yaml with training arguments
             device: Device to run model on.
+            checkpoint_path: Path to model checkpoint file (defaults to "model.pt" in dir).
 
         Returns:
             Trackastra model instance.
         """
         # Always load to cpu first
+        if checkpoint_path is None:
+            checkpoint_path = "model.pt"
         transformer = TrackingTransformer.from_folder(
-            Path(dir).expanduser(), map_location="cpu"
+            Path(dir).expanduser(), map_location="cpu", checkpoint_path=checkpoint_path
         )
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
         return cls(transformer=transformer, train_args=train_args, device=device)
@@ -163,8 +184,6 @@ class Trackastra:
         progbar_class=tqdm,
         batch_size: int | None = None,
     ):
-        batch_size = self.batch_size if batch_size is None else batch_size
-
         logger.info("Predicting weights for candidate graph")
         if normalize_imgs:
             if isinstance(imgs, da.Array):
@@ -177,6 +196,8 @@ class Trackastra:
         features = get_features(
             detections=masks,
             imgs=imgs,
+            features=self.train_args["features"],
+            feature_extractor=self.feature_extractor,
             ndim=self.transformer.config["coord_dim"],
             n_workers=n_workers,
             progbar_class=progbar_class,
@@ -197,7 +218,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
             progbar_class=progbar_class,
-            batch_size=batch_size,
+            batch_size=batch_size or self.batch_size,
         )
 
         return predictions
@@ -261,23 +282,51 @@ class Trackastra:
             progbar_class: Progress bar class to use.
             n_workers: Number of worker processes for feature extraction.
             normalize_imgs: Whether to normalize the images.
+            batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
             nx.DiGraph containing the tracking results.
+            np.ndarray of tracked masks of shape (T,(Z),Y,X).
         """
+        # Pretrained feature extraction requires the trackastra_pretrained_feats package
+        feat_type = self.train_args["features"]
+        if feat_type == "pretrained_feats" or feat_type == "pretrained_feats_aug":
+            if not PRETRAINED_FEATS_INSTALLED:
+                raise ImportError(
+                    "The trackastra_pretrained_feats package is required for pretrained feature extraction."
+                    "Please install it with :"
+                    "pip install trackastra[etultra]"
+                )
+            additional_features = self.train_args.get(
+                "pretrained_feats_additional_props", None
+            )
+            if self.imgs_path is None:
+                save_path = "./embeddings"
+            else:
+                save_path = self.imgs_path / "embeddings"
+            self.feature_extractor = FeatureExtractor.from_model_name(
+                self.train_args["pretrained_feats_model"],
+                imgs.shape[-2:],
+                save_path=save_path,
+                mode=self.train_args["pretrained_feats_mode"],
+                device=self.device,
+                additional_features=additional_features,
+                batch_size=batch_size or self.batch_size,
+            )
+            self.feature_extractor.force_recompute = True
+
         predictions = self._predict(
             imgs,
             masks,
             normalize_imgs=normalize_imgs,
             progbar_class=progbar_class,
             n_workers=n_workers,
-            batch_size=batch_size,
+            batch_size=batch_size or self.batch_size,
         )
 
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         masks_tracked = apply_solution_graph_to_masks(track_graph, masks)
-
         return track_graph, masks_tracked
 
     def track_from_disk(
@@ -313,6 +362,9 @@ class Trackastra:
             raise FileNotFoundError(f"{imgs_path=} does not exist.")
         if not masks_path.exists():
             raise FileNotFoundError(f"{masks_path=} does not exist.")
+
+        self.imgs_path = imgs_path
+        self.masks_path = masks_path
 
         if imgs_path.is_dir():
             imgs = load_tiff_timeseries(imgs_path)

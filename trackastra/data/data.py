@@ -1462,9 +1462,16 @@ def collate_sequence_padding(batch):
     normal_keys = {
         "coords": 0,
         "features": 0,
+        "pretrained_feats": 0,
         "labels": 0,  # Not needed, remove for speed.
         "timepoints": -1,  # There are real timepoints with t=0. -1 for distinction from that.
     }
+    set_keys = {
+        k: v
+        for k, v in normal_keys.items()
+        if k in batch[0] and batch[0][k] is not None
+    }
+    none_keys = [k for k in normal_keys.keys() if k in batch[0] and batch[0][k] is None]
     n_pads = tuple(n_max_len - s for s in lens)
     batch_new = dict(
         (
@@ -1473,8 +1480,12 @@ def collate_sequence_padding(batch):
                 [pad_tensor(x[k], n_max=n_max_len, value=v) for x in batch], dim=0
             ),
         )
-        for k, v in normal_keys.items()
+        for k, v in set_keys.items()
     )
+    for k in (
+        none_keys
+    ):  # keys that are None or not present in the input dicts are set to None
+        batch_new[k] = None
     if "assoc_matrix" in batch[0]:
         batch_new["assoc_matrix"] = torch.stack(
             [
