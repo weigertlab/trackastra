@@ -20,16 +20,20 @@
 
 ![Overview](overview.png)
 
-Give it a try with our easy-to-use [napari plugin](https://github.com/weigertlab/napari-trackastra/)!
+Give it a try with our easy-to-use [napari plugin](https://github.com/weigertlab/napari-trackastra/), no parameters to tune!
 
 <p align="center">
   <img src="https://github.com/weigertlab/napari-trackastra/assets/8866751/097eb82d-0fef-423e-9275-3fb528c20f7d" alt="demo" width="80%">
 </p>
 
-## Example tracking results
+## Tracking results
 Nuclei tracking | Bacteria tracking
 :-: | :-:
-<video src='https://github.com/weigertlab/trackastra/assets/8866751/807a8545-2f65-4697-a175-89b90dfdc435' width=180></video>| <video src='https://github.com/weigertlab/trackastra/assets/8866751/e7426d34-4407-4acb-ad79-fae3bc7ee6f9' width=180/></video>
+<img src='https://github.com/user-attachments/assets/27e99b88-9d79-4613-b555-51bdcd0c4dff'>| <img src='https://github.com/user-attachments/assets/a747c327-e705-4846-ac5e-098a0d382907'>
+
+> Error visualisations made with [Divisualisation](https://github.com/bentaculum/divisualisation/)
+
+🏆 Trackastra (EPFL-CH) won the [7th Cell Tracking Challenge](docs/ctc_2024-05-27.png) held at ISBI 2024, focusing on [generalizable cell linking](https://celltrackingchallenge.net/latest-clb-results/). For more results, please refer to [our paper](https://www.ecva.net/papers/eccv_2024/papers_ECCV/papers/09819.pdf).
 
 ## Installation
 This repository contains the Python implementation of Trackastra.
