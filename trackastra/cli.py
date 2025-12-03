@@ -90,6 +90,12 @@ def cli():
         default=None,
         help="Batch size for model inference. If not set, uses device-dependent default.",
     )
+    p_track.add_argument(
+        "--n-workers",
+        type=int,
+        default=0,
+        help="Number of workers for feature extraction.",
+    )
     p_track.set_defaults(cmd=_track_from_disk)
 
     if len(sys.argv) == 1:
@@ -125,6 +131,7 @@ def _track_from_disk(args):
         mode=args.mode,
         max_distance=args.max_distance,
         batch_size=args.batch_size,
+        n_workers=args.n_workers,
     )
 
     if args.output_ctc:
