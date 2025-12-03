@@ -132,6 +132,7 @@ class Trackastra:
         dir: Path | str,
         device: str | None = None,
         checkpoint_path: str | None = None,
+        **kwargs,
     ):
         """Load a Trackastra model from a local folder.
 
@@ -152,11 +153,17 @@ class Trackastra:
             Path(dir).expanduser(), map_location="cpu", checkpoint_path=checkpoint_path
         )
         train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
-        return cls(transformer=transformer, train_args=train_args, device=device)
+        return cls(
+            transformer=transformer, train_args=train_args, device=device, **kwargs
+        )
 
     @classmethod
     def from_pretrained(
-        cls, name: str, device: str | None = None, download_dir: Path | None = None
+        cls,
+        name: str,
+        device: str | None = None,
+        download_dir: Path | None = None,
+        **kwargs,
     ):
         """Load a pretrained Trackastra model.
 
@@ -172,7 +179,7 @@ class Trackastra:
         """
         folder = download_pretrained(name, download_dir)
         # download zip from github to location/name, then unzip
-        return cls.from_folder(folder, device=device)
+        return cls.from_folder(folder, device=device, **kwargs)
 
     def _predict(
         self,
@@ -210,7 +217,8 @@ class Trackastra:
             as_torch=True,
         )
 
-        logger.info("Predicting windows")
+        batch_size = batch_size or self.batch_size
+        logger.info(f"Predicting windows with batch size {batch_size}")
         predictions = predict_windows(
             windows=windows,
             features=features,
@@ -218,7 +226,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             spatial_dim=masks.ndim - 1,
             progbar_class=progbar_class,
-            batch_size=batch_size or self.batch_size,
+            batch_size=batch_size,
         )
 
         return predictions
