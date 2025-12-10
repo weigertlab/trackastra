@@ -2,10 +2,10 @@ import logging
 import shutil
 import tempfile
 import zipfile
-from importlib.resources import files
 from pathlib import Path
 
 import requests
+from platformdirs import user_data_dir
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def download(url: str, fname: Path):
 def download_pretrained(name: str, download_dir: Path | None = None):
     # TODO make safe, introduce versioning
     if download_dir is None:
-        download_dir = files("trackastra").joinpath(".models")
+        download_dir = Path(user_data_dir("trackastra")) / "models"
     else:
         download_dir = Path(download_dir)
 
