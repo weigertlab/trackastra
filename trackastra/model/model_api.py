@@ -172,7 +172,7 @@ class Trackastra:
         Args:
             name: Name of pretrained model (e.g. "general_2d").
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
-            download_dir: Directory to download model to (defaults to ~/.cache/trackastra).
+            download_dir: Directory to download model. Default handled by platformdirs.
 
         Returns:
             Trackastra model instance.
