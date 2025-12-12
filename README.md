@@ -58,7 +58,7 @@ pip install "trackastra[ilp]"
 
 ### 🆕😎 With pretrained features
 
-For our [new model variant](https://github.com/C-Achard/Trackastra-et-Ultra) that uses SAM2 features improves tracking performance on certain data, for example for tracking bacteria:
+For our [new model variant](https://github.com/C-Achard/Trackastra-et-Ultra) that uses SAM2 features for improved tracking performance on certain data, for example for tracking bacteria:
 ```bash
 pip install "trackastra[etultra]"
 ```
