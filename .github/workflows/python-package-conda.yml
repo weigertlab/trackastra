@@ -41,6 +41,10 @@ jobs:
             python-version: "3.10"
             ilp: "false"
             sam2: "false"
+          - platform: windows-11-arm
+            python-version: "3.10"
+            ilp: "false"
+            sam2: "false"
           - platform: macos-latest
             python-version: "3.10"
             ilp: "false"
