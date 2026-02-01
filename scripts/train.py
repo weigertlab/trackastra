@@ -40,7 +40,7 @@ from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,
     blockwise_sum,
-    none_or_path,
+    none_or_str,
     normalize,
     preallocate_memory,
     random_label_cmap,
@@ -1087,7 +1087,7 @@ def parse_train_args():
     )
     parser.add_argument(
         "--cachedir",
-        type=none_or_path,
+        type=none_or_str,
         default=".cache",
         help="cache dir for CTCData. Set to `None` to disable caching.",
     )

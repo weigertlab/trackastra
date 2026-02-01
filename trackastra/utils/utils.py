@@ -464,6 +464,14 @@ def str2path(x: str) -> Path:
         return Path(x).expanduser().resolve()
 
 
+def none_or_str(x: str | None) -> str | None:
+    """Allow for none value in string parsing."""
+    if x in (None, "None", "none"):
+        return None
+    else:
+        return str(x)
+
+
 def none_or_path(x: str | None) -> Path | None:
     """Cast string to resolved absolute path or return None."""
     if x in (None, "None", "none"):

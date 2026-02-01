@@ -4,6 +4,7 @@ from .utils import (
     blockwise_causal_norm,
     blockwise_sum,
     none_or_path,
+    none_or_str,
     normalize,
     preallocate_memory,
     random_label_cmap,
