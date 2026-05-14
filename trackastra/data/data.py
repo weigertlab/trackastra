@@ -93,6 +93,10 @@ class _CompressedArray:
         self._dtype = data.dtype.type
         self._shape = data.shape
 
+    @property
+    def shape(self):
+        return self._shape
+
     def decompress(self):
         s = lz4.frame.decompress(self._data)
         data = np.frombuffer(s, dtype=self._dtype).reshape(self._shape)
@@ -187,6 +191,8 @@ class CTCData(Dataset):
         self.pretrained_feats_additional_props = kwargs.get(
             "pretrained_feats_additional_props", None
         )
+        self.pretrained_n_augs = kwargs.get("pretrained_n_augs", 3)
+        self.rotate_features = kwargs.get("rotate_features", False)
 
         if (
             features
@@ -1005,7 +1011,7 @@ class CTCData(Dataset):
     def _setup_features_augs_wrfeat(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
-        # FIXME: hardcoded
+        # FIXME: hardcoded for wrfeat; for pretrained_feats the actual dim depends on additional_props
         feat_dim = 7 if ndim == 2 else 12
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([
@@ -1082,6 +1088,33 @@ class CTCData(Dataset):
         windows = []
         self.properties_by_time = dict()
         self.det_masks = dict()
+
+        # Build the pretrained feature extractor once, before the detection folder loop,
+        # so embeddings are not recomputed for each detection folder.
+        self.feature_extractor = None
+        WRPretrainedFeatures = None
+        if self.features in ("pretrained_feats", "pretrained_feats_aug"):
+            from trackastra_pretrained_feats import (
+                FeatureExtractor,
+                WRPretrainedFeatures,
+            )
+            if self.pretrained_n_augs != 3:
+                logger.warning(
+                    "pretrained_n_augs is not yet wired into FeatureExtractor"
+                    " - the value will be ignored."
+                )
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.feature_extractor = FeatureExtractor.from_model_name(
+                self.pretrained_feats_model,
+                self.imgs.shape[-2:],
+                save_path=self.root / "embeddings",
+                mode=self.pretrained_feats_mode,
+                device=device,
+                additional_features=self.pretrained_feats_additional_props,
+            )
+            imgs_for_extractor = raw_imgs if raw_imgs is not None else self.imgs
+            self.feature_extractor.precompute_image_embeddings(imgs_for_extractor)
+
         logger.info("Loading detections")
         for _f in self.detection_folders:
             det_folder = self.root / _f
@@ -1123,29 +1156,13 @@ class CTCData(Dataset):
 
             # build features
             if self.features in ("pretrained_feats", "pretrained_feats_aug"):
-                from trackastra_pretrained_feats import (
-                    FeatureExtractor,
-                    WRPretrainedFeatures,
-                )
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                feature_extractor = FeatureExtractor.from_model_name(
-                    self.pretrained_feats_model,
-                    self.imgs.shape[-2:],
-                    save_path=self.root / "embeddings",
-                    mode=self.pretrained_feats_mode,
-                    device=device,
-                    additional_features=self.pretrained_feats_additional_props,
-                )
-                imgs_for_extractor = raw_imgs if raw_imgs is not None else self.imgs
-                feature_extractor.precompute_image_embeddings(imgs_for_extractor)
                 features = [
                     WRPretrainedFeatures.from_mask_img(
                         img=img[None],
                         mask=mask[None],
-                        feature_extractor=feature_extractor,
+                        feature_extractor=self.feature_extractor,
                         t_start=t,
-                        additional_properties=feature_extractor.additional_features,
+                        additional_properties=self.feature_extractor.additional_features,
                     )
                     for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
                 ]
@@ -1271,7 +1288,8 @@ class CTCData(Dataset):
         coords0 = np.concatenate((feat.timepoints[:, None], feat.coords), axis=-1)
         coords0 = torch.from_numpy(coords0).float()
         assoc_matrix = torch.from_numpy(assoc_matrix.astype(np.float32))
-        features = torch.from_numpy(feat.features_stacked).float()
+        stacked = feat.features_stacked
+        features = torch.from_numpy(stacked).float() if stacked is not None else torch.zeros(len(feat), 0)
         pretrained_feats = feat.pretrained_feats
         if pretrained_feats is not None:
             pretrained_feats = torch.from_numpy(pretrained_feats).float()
@@ -1291,6 +1309,11 @@ class CTCData(Dataset):
             logger.debug(
                 f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
             )
+
+        if self.rotate_features and pretrained_feats is not None and self.feature_extractor is not None:
+            spatial_coords = coords0[:, 1:].numpy()
+            centroids = spatial_coords / np.array(self.imgs.shape[-2:], dtype=np.float32)
+            pretrained_feats = self.feature_extractor.apply_rot_to_features(pretrained_feats, centroids)
 
         if self.augmenter is not None:
             coords = coords0.clone()

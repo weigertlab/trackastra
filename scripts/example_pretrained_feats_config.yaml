@@ -1,0 +1,51 @@
+name: example_sam2_finetune
+outdir: runs
+
+# Data
+ndim: 2
+input_train:
+  - data/ctc/Fluo-N2DL-HeLa/02
+input_val:
+  - data/ctc/Fluo-N2DL-HeLa/01
+detection_folders:
+  - TRA
+
+# SAM2 feature backbone
+# Requires trackastra_pretrained_feats to be installed.
+# Use features: wrfeat to fall back to the standard feature extractor.
+features: pretrained_feats_aug
+pretrained_feats_model: facebook/sam2.1-hiera-base-plus  # HuggingFace model name
+pretrained_feats_mode: mean_patches_exact  # recommended pooling mode
+pretrained_feats_additional_props: regionprops_small  # concatenated with SAM2 features
+reduced_pretrained_feat_dim: 128  # FC layer output dim fed to encoder
+pretrained_n_augs: 3  # augmented copies per sequence; increase for larger datasets
+rotate_features: true  # feature disambiguation; recommended with pretrained_feats_aug
+
+# Finetuning from a pretrained SAM2-features model.
+# Remove or set to null to train from scratch (not supported for pretrained_feats).
+model: general_2d_w_SAM2_features  # auto-downloaded if not already present
+
+# Model architecture - must match the pretrained model config
+d_model: 256
+num_encoder_layers: 4
+num_decoder_layers: 4
+dropout: 0.05
+window: 4
+attn_dist_mode: v1
+causal_norm: none
+
+# Training
+epochs: 500
+warmup_epochs: 5
+train_samples: 32000
+batch_size: 16
+max_tokens: 2048
+lr: 1e-4
+weight_decay: 0.01
+weight_by_dataset: true
+crop_size:
+  - 320
+  - 320
+
+# Caching
+cachedir: .cache
