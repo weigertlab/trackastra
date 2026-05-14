@@ -239,10 +239,14 @@ class WrappedLightningModule(pl.LightningModule):
 
         if self.causal_norm != "none":
             # TODO speedup: I could softmax only the part of the matrix (upper triangular) that is not masked out
-            A_pred_soft = torch.stack([
-                blockwise_causal_norm(_A, _t, mode=self.causal_norm, mask_invalid=_m)
-                for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
-            ])
+            A_pred_soft = torch.stack(
+                [
+                    blockwise_causal_norm(
+                        _A, _t, mode=self.causal_norm, mask_invalid=_m
+                    )
+                    for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
+                ]
+            )
             with torch.cuda.amp.autocast(enabled=False):
                 if len(A) > 0:
                     # debug
@@ -326,7 +330,9 @@ class WrappedLightningModule(pl.LightningModule):
             return None
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
         return dict(
             optimizer=optimizer,
             lr_scheduler=WarmupCosineLRScheduler(
@@ -711,7 +717,10 @@ def train(args):
             " Provide --model or --pretrained_model_path with a compatible pretrained model."
         )
 
-    if args.features in ("pretrained_feats", "pretrained_feats_aug") and args.pretrained_feats_model is None:
+    if (
+        args.features in ("pretrained_feats", "pretrained_feats_aug")
+        and args.pretrained_feats_model is None
+    ):
         raise ValueError(
             "pretrained_feats modes require --pretrained_feats_model"
             " (e.g. facebook/sam2.1-hiera-base-plus)"
@@ -918,7 +927,11 @@ def train(args):
         callbacks.append(ExampleImages())
 
     # load the model if it was given
-    model_path = args.pretrained_model_path if args.pretrained_model_path is not None else args.model
+    model_path = (
+        args.pretrained_model_path
+        if args.pretrained_model_path is not None
+        else args.model
+    )
     if model_path is not None and model_path in _MODELS:
         logger.info(f"Downloading pretrained model '{model_path}'")
         model_path = str(download_pretrained(model_path))
