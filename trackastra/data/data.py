@@ -530,18 +530,16 @@ class CTCData(Dataset):
         logger.debug(
             f"Temporal downscaling of {folder.name} by {self.downscale_temporal}"
         )
-        x = np.stack(
-            [
-                tifffile.imread(f).astype(dtype)
-                for f in tqdm(
-                    sorted(folder.glob("*.tif"))[
-                        self.start_frame : self.end_frame : self.downscale_temporal
-                    ],
-                    leave=False,
-                    desc=f"Loading [{self.start_frame}:{self.end_frame}]",
-                )
-            ]
-        )
+        x = np.stack([
+            tifffile.imread(f).astype(dtype)
+            for f in tqdm(
+                sorted(folder.glob("*.tif"))[
+                    self.start_frame : self.end_frame : self.downscale_temporal
+                ],
+                leave=False,
+                desc=f"Loading [{self.start_frame}:{self.end_frame}]",
+            )
+        ])
 
         # T, (Z), Y, X
         assert isinstance(self.downscale_spatial, int)
@@ -654,18 +652,16 @@ class CTCData(Dataset):
         else:
             logger.info("Loading images")
             imgs = self._load_tiffs(self.img_folder, dtype=np.float32)
-            self.imgs = np.stack(
-                [normalize(_x) for _x in tqdm(imgs, desc="Normalizing", leave=False)]
-            )
+            self.imgs = np.stack([
+                normalize(_x) for _x in tqdm(imgs, desc="Normalizing", leave=False)
+            ])
             self.imgs = self._check_dimensions(self.imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
-                self.imgs = np.stack(
-                    [
-                        _compress_img_mask_preproc(im, mask, self.features)
-                        for im, mask in zip(self.imgs, self.gt_masks)
-                    ]
-                )
+                self.imgs = np.stack([
+                    _compress_img_mask_preproc(im, mask, self.features)
+                    for im, mask in zip(self.imgs, self.gt_masks)
+                ])
 
         assert len(self.gt_masks) == len(self.imgs)
 
@@ -1018,39 +1014,33 @@ class CTCData(Dataset):
         # FIXME: hardcoded for wrfeat; for pretrained_feats the actual dim depends on additional_props
         feat_dim = 7 if ndim == 2 else 12
         if augment == 1:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=0.5),
-                    wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
-                    ),
-                    # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
-                    # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
+            augmenter = wrfeat.WRAugmentationPipeline([
+                wrfeat.WRRandomFlip(p=0.5),
+                wrfeat.WRRandomAffine(
+                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                ),
+                # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
+                # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            ])
         elif augment == 2:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=0.5),
-                    wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
-                    ),
-                    wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
+            augmenter = wrfeat.WRAugmentationPipeline([
+                wrfeat.WRRandomFlip(p=0.5),
+                wrfeat.WRRandomAffine(
+                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                ),
+                wrfeat.WRRandomBrightness(p=0.8),
+                wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            ])
         elif augment == 3:
-            augmenter = wrfeat.WRAugmentationPipeline(
-                [
-                    wrfeat.WRRandomFlip(p=0.5),
-                    wrfeat.WRRandomAffine(
-                        p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
-                    ),
-                    wrfeat.WRRandomBrightness(p=0.8),
-                    wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
-                    wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
-                ]
-            )
+            augmenter = wrfeat.WRAugmentationPipeline([
+                wrfeat.WRRandomFlip(p=0.5),
+                wrfeat.WRRandomAffine(
+                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                ),
+                wrfeat.WRRandomBrightness(p=0.8),
+                wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
+                wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            ])
         else:
             augmenter = None
 
@@ -1080,22 +1070,17 @@ class CTCData(Dataset):
             logger.info("Loading images")
             imgs = self._load_tiffs(self.img_folder, dtype=np.float32)
             raw_imgs = np.stack(list(imgs))  # keep raw for pretrained feature extractor
-            self.imgs = np.stack(
-                [
-                    normalize(_x)
-                    for _x in tqdm(raw_imgs, desc="Normalizing", leave=False)
-                ]
-            )
+            self.imgs = np.stack([
+                normalize(_x) for _x in tqdm(raw_imgs, desc="Normalizing", leave=False)
+            ])
             self.imgs = self._check_dimensions(self.imgs)
             raw_imgs = self._check_dimensions(raw_imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
-                self.imgs = np.stack(
-                    [
-                        _compress_img_mask_preproc(im, mask, self.features)
-                        for im, mask in zip(self.imgs, self.gt_masks)
-                    ]
-                )
+                self.imgs = np.stack([
+                    _compress_img_mask_preproc(im, mask, self.features)
+                    for im, mask in zip(self.imgs, self.gt_masks)
+                ])
 
         assert len(self.gt_masks) == len(self.imgs)
 
