@@ -1,15 +1,12 @@
 import logging
-import warnings
 
 import numpy as np
 import torch
-from scipy.sparse import SparseEfficiencyWarning, csr_array
+from scipy.sparse import coo_array
 from tqdm import tqdm
 
 from trackastra.data import collate_sequence_padding
 from trackastra.model import TrackingTransformer
-
-warnings.simplefilter("ignore", SparseEfficiencyWarning)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -155,11 +152,10 @@ def predict_windows(
             )
         )
 
-    # create assoc matrix between ids
-    sp_weights, sp_accum = (
-        csr_array((max_id, max_id), dtype=np.float32),
-        csr_array((max_id, max_id), dtype=np.float32),
-    )
+    # Accumulate edges as (row, col, weight, count) chunks and build the sparse
+    # assoc matrices once at the end. Incremental `+=` into a csr_array is O(nnz)
+    # per write and was the dominant cost of this loop.
+    edge_rows, edge_cols, edge_w, edge_a = [], [], [], []
 
     for t in progbar_class(
         range(0, len(windows), batch_size),
@@ -203,25 +199,40 @@ def predict_windows(
             ddt = timepoints[:, None] - t_middle * np.ones_like(dt)
             window_weight = np.exp(-intra_window_weight * ddt**2)  # default is 1
             # window_weight = np.exp(4*A) # smooth max
-            sp_weights[nodes_ii, nodes_jj] += window_weight[ii, jj] * A[ii, jj]
-            sp_accum[nodes_ii, nodes_jj] += window_weight[ii, jj]
+            edge_rows.append(nodes_ii)
+            edge_cols.append(nodes_jj)
+            edge_w.append(window_weight[ii, jj] * A[ii, jj])
+            edge_a.append(window_weight[ii, jj])
 
-    sp_weights_coo = sp_weights.tocoo()
-    sp_accum_coo = sp_accum.tocoo()
-    assert np.allclose(sp_weights_coo.col, sp_accum_coo.col) and np.allclose(
-        sp_weights_coo.row, sp_accum_coo.row
-    )
-
-    # Normalize weights by the number of times they were written from different sliding window positions
-    weights = tuple(
-        ((i, j), v / a)
-        for i, j, v, a in zip(
-            sp_weights_coo.row,
-            sp_weights_coo.col,
-            sp_weights_coo.data,
-            sp_accum_coo.data,
+    if edge_rows:
+        rows = np.concatenate(edge_rows)
+        cols = np.concatenate(edge_cols)
+        # same (row, col) pattern for both -> sum_duplicates yields identical ordering
+        sp_weights_coo = coo_array(
+            (np.concatenate(edge_w).astype(np.float32), (rows, cols)),
+            shape=(max_id, max_id),
         )
-    )
+        sp_accum_coo = coo_array(
+            (np.concatenate(edge_a).astype(np.float32), (rows, cols)),
+            shape=(max_id, max_id),
+        )
+        sp_weights_coo.sum_duplicates()
+        sp_accum_coo.sum_duplicates()
+        assert np.array_equal(sp_weights_coo.col, sp_accum_coo.col) and np.array_equal(
+            sp_weights_coo.row, sp_accum_coo.row
+        )
+        # Normalize weights by the number of times they were written from different sliding window positions
+        weights = tuple(
+            ((i, j), v / a)
+            for i, j, v, a in zip(
+                sp_weights_coo.row,
+                sp_weights_coo.col,
+                sp_weights_coo.data,
+                sp_accum_coo.data,
+            )
+        )
+    else:
+        weights = tuple()
 
     results = dict()
     results["nodes"] = node_properties

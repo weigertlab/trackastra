@@ -217,26 +217,24 @@ class RelativePositionalAttention(nn.Module):
 
         self._mode = mode
 
-    def forward(
+    def build_attn_mask(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
         coords: torch.Tensor,
-        padding_mask: torch.Tensor = None,
-    ):
-        B, N, D = query.size()
-        q = self.q_pro(query)  # (B, N, D)
-        k = self.k_pro(key)  # (B, N, D)
-        v = self.v_pro(value)  # (B, N, D)
-        # (B, nh, N, hs)
-        k = k.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
-        q = q.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
-        v = v.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+        padding_mask: torch.Tensor,
+        B: int,
+        N: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Additive (B, n_head, N, N) attention mask: spatial cutoff + distance
+        bias (+ positional bias in 'bias' mode) + padding.
 
-        attn_mask = torch.zeros(
-            (B, self.n_head, N, N), device=query.device, dtype=q.dtype
-        )
+        Depends only on coords/padding (not the layer features), so in rope/none
+        modes it is identical across layers and can be precomputed once and
+        shared (see TrackingTransformer.forward). The rope rotation of q/k is
+        layer-local and handled in forward, not here.
+        """
+        attn_mask = torch.zeros((B, self.n_head, N, N), device=device, dtype=dtype)
 
         # add negative value but not too large to keep mixed precision loss from becoming nan
         attn_ignore_val = -1e3
@@ -247,14 +245,10 @@ class RelativePositionalAttention(nn.Module):
         spatial_mask = (spatial_dist > self.cutoff_spatial).unsqueeze(1)
         attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
 
-        # dont add positional bias to self-attention if coords is None
         if coords is not None:
+            # positional bias is layer-specific (only in 'bias' mode)
             if self._mode == "bias":
                 attn_mask = attn_mask + self.pos_bias(coords)
-            elif self._mode == "rope":
-                q, k = self.rot_pos_enc(q, k, coords)
-            else:
-                pass
 
             if self.attn_dist_mode == "v0":
                 dist = torch.cdist(coords, coords, p=2)
@@ -273,7 +267,36 @@ class RelativePositionalAttention(nn.Module):
             ).unsqueeze(1)
             attn_mask.masked_fill_(ignore_mask, attn_ignore_val)
 
-        # self.attn_mask = attn_mask.clone()
+        return attn_mask
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        coords: torch.Tensor,
+        padding_mask: torch.Tensor = None,
+        attn_mask: torch.Tensor = None,
+    ):
+        B, N, D = query.size()
+        q = self.q_pro(query)  # (B, N, D)
+        k = self.k_pro(key)  # (B, N, D)
+        v = self.v_pro(value)  # (B, N, D)
+        # (B, nh, N, hs)
+        k = k.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+        q = q.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+        v = v.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
+
+        # Build the additive mask unless a precomputed one is passed in (shared
+        # across layers when it is layer-independent, i.e. not 'bias' mode).
+        if attn_mask is None:
+            attn_mask = self.build_attn_mask(coords, padding_mask, B, N, q.dtype, query.device)
+        elif attn_mask.dtype != q.dtype:
+            attn_mask = attn_mask.to(q.dtype)
+
+        # rope rotation is layer-local (applied to this layer's q/k)
+        if coords is not None and self._mode == "rope":
+            q, k = self.rot_pos_enc(q, k, coords)
 
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0

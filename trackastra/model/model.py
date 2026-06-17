@@ -59,6 +59,7 @@ class EncoderLayer(nn.Module):
         x: torch.Tensor,
         coords: torch.Tensor,
         padding_mask: torch.Tensor = None,
+        attn_mask: torch.Tensor = None,
     ):
         x = self.norm1(x)
 
@@ -69,6 +70,7 @@ class EncoderLayer(nn.Module):
             x,
             coords=coords if self.positional_bias else None,
             padding_mask=padding_mask,
+            attn_mask=attn_mask,
         )
 
         x = x + a
@@ -116,6 +118,7 @@ class DecoderLayer(nn.Module):
         y: torch.Tensor,
         coords: torch.Tensor,
         padding_mask: torch.Tensor = None,
+        attn_mask: torch.Tensor = None,
     ):
         x = self.norm1(x)
         y = self.norm2(y)
@@ -127,6 +130,7 @@ class DecoderLayer(nn.Module):
             y,
             coords=coords if self.positional_bias else None,
             padding_mask=padding_mask,
+            attn_mask=attn_mask,
         )
 
         x = x + a
@@ -393,14 +397,25 @@ class TrackingTransformer(torch.nn.Module):
 
         x = features
 
+        # Precompute the additive attention mask once and share it across all
+        # encoder/decoder layers. Valid only when the mask is layer-independent,
+        # i.e. no per-layer learnable positional bias ('rope'/'none' modes).
+        attn_mask = None
+        if self.encoder and self.encoder[0].attn._mode != "bias":
+            a0 = self.encoder[0].attn
+            attn_mask = a0.build_attn_mask(
+                coords, padding_mask, coords.shape[0], coords.shape[1],
+                features.dtype, coords.device,
+            )
+
         # encoder
         for enc in self.encoder:
-            x = enc(x, coords=coords, padding_mask=padding_mask)
+            x = enc(x, coords=coords, padding_mask=padding_mask, attn_mask=attn_mask)
 
         y = features
         # decoder w cross attention
         for dec in self.decoder:
-            y = dec(y, x, coords=coords, padding_mask=padding_mask)
+            y = dec(y, x, coords=coords, padding_mask=padding_mask, attn_mask=attn_mask)
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
         x = self.head_x(x)

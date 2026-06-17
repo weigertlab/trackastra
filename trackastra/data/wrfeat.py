@@ -20,6 +20,14 @@ from tqdm import tqdm
 from trackastra.data.utils import load_tiff_timeseries
 
 try:
+    # Optional fast (vectorized) regionprops backend; falls back to skimage below.
+    from fast_regionprops import regionprops_table_fast
+
+    FAST_REGIONPROPS_INSTALLED = True
+except ImportError:
+    FAST_REGIONPROPS_INSTALLED = False
+
+try:
     PRETRAINED_FEATS_INSTALLED = True
     if TYPE_CHECKING:
         from trackastra_pretrained_feats import FeatureExtractor
@@ -110,6 +118,25 @@ def _border_dist_fast(mask: np.ndarray, cutoff: float = 5):
 
     dist = 1 - border
     return tuple(r.intensity_max for r in regionprops(mask, intensity_image=dist))
+
+
+def _regionprops_table(
+    mask: np.ndarray, img: np.ndarray, properties: tuple[str, ...]
+) -> dict[str, np.ndarray]:
+    """Region-property table for a single frame, keyed with skimage-style names.
+
+    Uses the vectorized ``fast_regionprops`` backend when installed (much faster
+    on region-dense data), otherwise falls back to ``skimage.regionprops_table``
+    plus ``_border_dist_fast``. Output is identical either way.
+    """
+    if FAST_REGIONPROPS_INSTALLED:
+        return regionprops_table_fast(mask, img, properties=properties)
+
+    skimage_props = tuple(p for p in properties if p != "border_dist")
+    table = regionprops_table(mask, intensity_image=img, properties=skimage_props)
+    if "border_dist" in properties:
+        table["border_dist"] = np.asarray(_border_dist_fast(mask))
+    return table
 
 
 class WRFeatures:
@@ -217,28 +244,13 @@ class WRFeatures:
                 f"label and centroid should not be in properties {properties}"
             )
 
-        if "border_dist" in properties:
-            use_border_dist = True
-            # remove border_dist from properties
-            properties = tuple(p for p in properties if p != "border_dist")
-        else:
-            use_border_dist = False
-
         df_properties = ("label", "centroid", *properties)
         dfs = []
         for i, (y, x) in enumerate(zip(mask, img)):
-            _df = pd.DataFrame(
-                regionprops_table(y, intensity_image=x, properties=df_properties)
-            )
+            _df = pd.DataFrame(_regionprops_table(y, x, df_properties))
             _df["timepoint"] = i + t_start
-            if use_border_dist:
-                _df["border_dist"] = _border_dist_fast(y)
-
             dfs.append(_df)
         df = pd.concat(dfs)
-
-        if use_border_dist:
-            properties = (*properties, "border_dist")
 
         timepoints = df["timepoint"].values.astype(np.int32)
         labels = df["label"].values.astype(np.int32)
@@ -540,6 +552,12 @@ def get_features(
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
     logger.info(f"Extracting features from {len(detections)} frames.")
+    logger.info(
+        "Using fast_regionprops backend"
+        if FAST_REGIONPROPS_INSTALLED
+        else "Using skimage regionprops backend (install trackastra[fast] to speed"
+        " up feature extraction)"
+    )
     if n_workers > 0:
         logger.info(f"Using {n_workers} processes for feature extraction")
         features = joblib.Parallel(n_jobs=n_workers, backend="loky")(

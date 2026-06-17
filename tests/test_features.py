@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from scipy.ndimage import maximum_filter
+from trackastra.data import wrfeat
 from trackastra.data.wrfeat import (
     WRAugmentationPipeline,
     WRFeatures,
@@ -35,6 +36,32 @@ def generate_data(ndim: int = 2, ngrid=10):
 def test_features():
     x, y, _p, _ts = generate_data(ndim=2, ngrid=10)
     WRFeatures.from_mask_img(mask=y, img=x)
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("properties", ["regionprops2", "regionprops"])
+def test_fast_regionprops_matches_skimage(ndim, properties, monkeypatch):
+    """fast_regionprops backend must match the skimage fallback bit-for-bit."""
+    if not hasattr(wrfeat, "regionprops_table_fast"):
+        pytest.skip("fast_regionprops not installed")
+    x, y, _p, _ts = generate_data(ndim=ndim, ngrid=6)
+
+    # force skimage fallback
+    monkeypatch.setattr(wrfeat, "FAST_REGIONPROPS_INSTALLED", False)
+    ref = WRFeatures.from_mask_img(mask=y, img=x, properties=properties)
+
+    # use fast backend
+    monkeypatch.setattr(wrfeat, "FAST_REGIONPROPS_INSTALLED", True)
+    fast = WRFeatures.from_mask_img(mask=y, img=x, properties=properties)
+
+    assert np.array_equal(ref.labels, fast.labels)
+    assert np.array_equal(ref.timepoints, fast.timepoints)
+    assert np.allclose(ref.coords, fast.coords, atol=1e-3)
+    assert ref.features.keys() == fast.features.keys()
+    for k in ref.features:
+        a, b = ref.features[k], fast.features[k]
+        atol = 1e-3 * max(1.0, np.abs(a).max())
+        assert np.allclose(a, b, atol=atol), f"feature {k} differs"
 
 
 if __name__ == "__main__":
