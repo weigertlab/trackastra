@@ -316,9 +316,14 @@ class WrappedLightningModule(pl.LightningModule):
             and self.current_epoch % self.grad_log_every_n_epochs == 0
         ):
             _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
+            # Reduce per-epoch instead of logging every step: the raw per-step
+            # (pre-clip) norm is very jagged. "grad_norm" is the epoch mean
+            # (typical magnitude / trend), "grad_norm_max" the epoch max (spike
+            # envelope) - two clean lines instead of a noisy per-step burst.
+            self.log("grad_norm", _norm, on_step=False, on_epoch=True, sync_dist=True)
             self.log(
-                "grad_norm", _norm, on_step=True, on_epoch=False,
-                prog_bar=False, sync_dist=True,
+                "grad_norm_max", _norm, on_step=False, on_epoch=True,
+                reduce_fx="max", sync_dist=True,
             )
 
     def configure_optimizers(self):
