@@ -61,7 +61,16 @@ branches; kept now-unused n_spatial/n_temporal kwargs for checkpoint-config comp
 - Commit: `Default to rope attention, remove learned bias path`
 - Gate: `--name impro_rope`
 
-## Step 3 - sparse kNN attention  `[ ]`  (new module)
+## Step 3 - sparse kNN attention  `[x]`  (new module)  -> gated
+
+Results (batch 32, train_samples 1024): dense val_loss 0.217 @ 32.5 GB / 0.35 min;
+sparse K=16 val_loss 0.217 @ **17.2 GB** / 0.47 min. Same loss at ~47% less GPU mem
+(headroom for larger batches). The slight wall-clock cost is the gradient-checkpoint
+recompute. Parity tests (`tests/test_sparse_attn.py`, K>=N == dense) pass for v0/v1.
+
+Note: naive fixed-K gather stores `k_g`/`v_g` (B,H,N,K,hd) per layer -> OOM at batch 32
+vs fused flash SDPA. Fixed by gradient-checkpointing the sparse core in training (recompute
+in backward); eval/inference runs it directly under no_grad.
 
 New file `trackastra/model/sparse_attn.py`. The dense mask is effectively local (each node only
 attends within `cutoff_spatial` + temporal window), so a fixed kNN neighbor list makes attention

@@ -801,6 +801,8 @@ def train(args):
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
             attn_dist_mode=args.attn_dist_mode,
+            attn_mode=args.attn_mode,
+            max_neighbors=args.max_neighbors,
             causal_norm=args.causal_norm,
         )
 
@@ -976,6 +978,8 @@ def train(args):
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
             attn_dist_mode=args.attn_dist_mode,
+            attn_mode=args.attn_mode,
+            max_neighbors=args.max_neighbors,
             causal_norm=args.causal_norm,
         )
 
@@ -1136,6 +1140,10 @@ def parse_train_args():
     parser.add_argument("--debug_dir", type=str, default=None)
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)
     parser.add_argument("--attn_dist_mode", type=str, default="v1")
+    parser.add_argument(
+        "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
+    )
+    parser.add_argument("--max_neighbors", type=int, default=16)
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")

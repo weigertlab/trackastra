@@ -19,6 +19,7 @@ from .model_parts import (
     PositionalEncoding,
     RelativePositionalAttention,
 )
+from .sparse_attn import SparseRelativePositionalAttention, build_knn_index
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,17 @@ class EncoderLayer(nn.Module):
         positional_bias: Literal["rope", "none"] = "rope",
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
+        attn_mode: Literal["dense", "sparse"] = "dense",
     ):
         super().__init__()
         self.positional_bias = positional_bias
-        self.attn = RelativePositionalAttention(
+        self.attn_mode = attn_mode
+        attn_cls = (
+            SparseRelativePositionalAttention
+            if attn_mode == "sparse"
+            else RelativePositionalAttention
+        )
+        self.attn = attn_cls(
             coord_dim,
             d_model,
             num_heads,
@@ -60,18 +68,19 @@ class EncoderLayer(nn.Module):
         coords: torch.Tensor,
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
+        nbr_idx: torch.Tensor = None,
+        nbr_bias: torch.Tensor = None,
     ):
         # pre-norm: the residual stream carries the raw input, norm only feeds attn/mlp
         h = self.norm1(x)
         # setting coords to None disables positional bias
-        a = self.attn(
-            h,
-            h,
-            h,
-            coords=coords if self.positional_bias else None,
-            padding_mask=padding_mask,
-            attn_mask=attn_mask,
-        )
+        coords_in = coords if self.positional_bias else None
+        if self.attn_mode == "sparse":
+            a = self.attn(h, h, h, coords=coords_in, nbr_idx=nbr_idx, nbr_bias=nbr_bias)
+        else:
+            a = self.attn(
+                h, h, h, coords=coords_in, padding_mask=padding_mask, attn_mask=attn_mask
+            )
 
         x = x + a
         x = x + self.mlp(self.norm2(x))
@@ -91,10 +100,17 @@ class DecoderLayer(nn.Module):
         positional_bias: Literal["rope", "none"] = "rope",
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
+        attn_mode: Literal["dense", "sparse"] = "dense",
     ):
         super().__init__()
         self.positional_bias = positional_bias
-        self.attn = RelativePositionalAttention(
+        self.attn_mode = attn_mode
+        attn_cls = (
+            SparseRelativePositionalAttention
+            if attn_mode == "sparse"
+            else RelativePositionalAttention
+        )
+        self.attn = attn_cls(
             coord_dim,
             d_model,
             num_heads,
@@ -119,20 +135,21 @@ class DecoderLayer(nn.Module):
         coords: torch.Tensor,
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
+        nbr_idx: torch.Tensor = None,
+        nbr_bias: torch.Tensor = None,
     ):
         # pre-norm: the residual stream (x) carries the raw input
         h = self.norm1(x)
         y = self.norm2(y)
         # cross attention
         # setting coords to None disables positional bias
-        a = self.attn(
-            h,
-            y,
-            y,
-            coords=coords if self.positional_bias else None,
-            padding_mask=padding_mask,
-            attn_mask=attn_mask,
-        )
+        coords_in = coords if self.positional_bias else None
+        if self.attn_mode == "sparse":
+            a = self.attn(h, y, y, coords=coords_in, nbr_idx=nbr_idx, nbr_bias=nbr_bias)
+        else:
+            a = self.attn(
+                h, y, y, coords=coords_in, padding_mask=padding_mask, attn_mask=attn_mask
+            )
 
         x = x + a
         x = x + self.mlp(self.norm3(x))
@@ -293,6 +310,8 @@ class TrackingTransformer(torch.nn.Module):
             "none", "linear", "softmax", "quiet_softmax"
         ] = "quiet_softmax",
         attn_dist_mode: str = "v0",
+        attn_mode: Literal["dense", "sparse"] = "dense",
+        max_neighbors: int = 16,
     ):
         super().__init__()
 
@@ -312,7 +331,13 @@ class TrackingTransformer(torch.nn.Module):
             feat_embed_per_dim=feat_embed_per_dim,
             causal_norm=causal_norm,
             attn_dist_mode=attn_dist_mode,
+            attn_mode=attn_mode,
+            max_neighbors=max_neighbors,
         )
+        self.attn_mode = attn_mode
+        self.max_neighbors = max_neighbors
+        self.spatial_pos_cutoff = spatial_pos_cutoff
+        self.attn_dist_mode = attn_dist_mode
 
         # TODO remove, alredy present in self.config
         # self.window = window
@@ -335,6 +360,7 @@ class TrackingTransformer(torch.nn.Module):
                 positional_bias=attn_positional_bias,
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
+                attn_mode=attn_mode,
             )
             for _ in range(num_encoder_layers)
         ])
@@ -349,6 +375,7 @@ class TrackingTransformer(torch.nn.Module):
                 positional_bias=attn_positional_bias,
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
+                attn_mode=attn_mode,
             )
             for _ in range(num_decoder_layers)
         ])
@@ -398,11 +425,21 @@ class TrackingTransformer(torch.nn.Module):
 
         x = features
 
-        # Precompute the additive attention mask once and share it across all
-        # encoder/decoder layers. Valid only when the mask is layer-independent,
-        # i.e. no per-layer learnable positional bias ('rope'/'none' modes).
+        # Precompute the layer-independent attention context once and share it
+        # across all encoder/decoder layers (depends only on coords/padding).
+        # dense: a single additive (B, nH, N, N) mask. sparse: a fixed kNN
+        # neighbour list + its additive distance bias.
         attn_mask = None
-        if self.encoder:
+        nbr_idx = nbr_bias = None
+        if self.attn_mode == "sparse":
+            nbr_idx, nbr_bias = build_knn_index(
+                coords,
+                padding_mask,
+                self.spatial_pos_cutoff,
+                self.max_neighbors,
+                self.attn_dist_mode,
+            )
+        elif self.encoder:
             a0 = self.encoder[0].attn
             attn_mask = a0.build_attn_mask(
                 coords, padding_mask, coords.shape[0], coords.shape[1],
@@ -411,12 +448,18 @@ class TrackingTransformer(torch.nn.Module):
 
         # encoder
         for enc in self.encoder:
-            x = enc(x, coords=coords, padding_mask=padding_mask, attn_mask=attn_mask)
+            x = enc(
+                x, coords=coords, padding_mask=padding_mask,
+                attn_mask=attn_mask, nbr_idx=nbr_idx, nbr_bias=nbr_bias,
+            )
 
         y = features
         # decoder w cross attention
         for dec in self.decoder:
-            y = dec(y, x, coords=coords, padding_mask=padding_mask, attn_mask=attn_mask)
+            y = dec(
+                y, x, coords=coords, padding_mask=padding_mask,
+                attn_mask=attn_mask, nbr_idx=nbr_idx, nbr_bias=nbr_bias,
+            )
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
         x = self.head_x(x)
