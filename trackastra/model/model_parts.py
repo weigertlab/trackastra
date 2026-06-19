@@ -158,15 +158,18 @@ class RelativePositionalAttention(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> torch.Tensor:
-        """Additive (B, n_head, N, N) attention mask: spatial cutoff + distance
-        bias + padding.
+        """Additive (B, 1, N, N) attention mask: spatial cutoff + distance bias
+        + padding.
 
-        Depends only on coords/padding (not the layer features), so it is
-        identical across layers and can be precomputed once and shared (see
-        TrackingTransformer.forward). The rope rotation of q/k is layer-local
-        and handled in forward, not here.
+        None of the terms are head-dependent (the only per-head term was the
+        learned positional bias, now removed), so the mask is built with a
+        singleton head dim and broadcast over heads by scaled_dot_product_attention
+        - this is n_head x smaller than a full (B, n_head, N, N) mask. It depends
+        only on coords/padding (not the layer features), so it is identical across
+        layers and precomputed once and shared (see TrackingTransformer.forward).
+        The rope rotation of q/k is layer-local and handled in forward, not here.
         """
-        attn_mask = torch.zeros((B, self.n_head, N, N), device=device, dtype=dtype)
+        attn_mask = torch.zeros((B, 1, N, N), device=device, dtype=dtype)
 
         # add negative value but not too large to keep mixed precision loss from becoming nan
         attn_ignore_val = -1e3

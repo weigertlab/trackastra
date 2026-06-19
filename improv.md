@@ -95,13 +95,20 @@ O(N*K) instead of O(N^2) (~125x fewer entries at N=2000, K=16).
 - Gate twice: `--name impro_sparse_dense`, then `--attn_mode sparse --name impro_sparse_knn`
   (log speed/mem delta).
 
-## Step 4 - cheap wins  `[ ]`
+## Step 4 - cheap wins  `[x]`  -> gated: dense 32.5 -> 24.3 GB, val_loss 0.245, 0.35 min
 
-- De-dup the double `cdist` in `build_attn_mask` (`model_parts.py:244,254`, `attn_dist_mode="v0"`
-  computes the distance twice).
-  - Commit: `Avoid duplicate cdist in attn mask build` - Gate: `--name impro_dedup_cdist`
-- Vectorize `normalize_output`'s per-batch Python loop (`model.py:459`).
-  - Commit: `Vectorize normalize_output over batch` - Gate: `--name impro_vec_normout`
+Done: **broadcast the additive attn mask over heads.** With the per-head `pos_bias` removed
+(Step 2), `build_attn_mask` has no head-dependent term, so it now returns `(B, 1, N, N)`
+and SDPA broadcasts over heads -> n_head x smaller mask alloc. Cut the dense path from
+32.5 GB to 24.3 GB at batch 32 with no loss/speed change.
+
+Re-scoped (the two originally-listed items did not hold up):
+- "double cdist in build_attn_mask" is NOT a duplicate: v0 uses the spatial-only distance for
+  the cutoff and the full-coord distance (incl. time) for the bias; the default v1 already
+  reuses `spatial_dist`. The per-layer recompute (improv #2) is already fixed by the shared
+  precompute. Nothing to dedup.
+- Vectorizing `normalize_output` was dropped: `blockwise_causal_norm` is inherently per-sample
+  (variable block structure + padding), inference-only, and not worth the correctness risk.
 
 ---
 
