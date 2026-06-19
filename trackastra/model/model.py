@@ -32,7 +32,7 @@ class EncoderLayer(nn.Module):
         dropout=0.1,
         cutoff_spatial: int = 256,
         window: int = 16,
-        positional_bias: Literal["bias", "rope", "none"] = "bias",
+        positional_bias: Literal["rope", "none"] = "rope",
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
     ):
@@ -88,7 +88,7 @@ class DecoderLayer(nn.Module):
         dropout=0.1,
         window: int = 16,
         cutoff_spatial: int = 256,
-        positional_bias: Literal["bias", "rope", "none"] = "bias",
+        positional_bias: Literal["rope", "none"] = "rope",
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
     ):
@@ -225,7 +225,7 @@ class DecoderLayer(nn.Module):
 #         dropout=0.1,
 #         window: int = 16,
 #         cutoff_spatial: int = 256,
-#         positional_bias: Literal["bias", "rope", "none"] = "bias",
+#         positional_bias: Literal["rope", "none"] = "rope",
 #         positional_bias_n_spatial: int = 32,
 #     ):
 #         super().__init__()
@@ -287,7 +287,7 @@ class TrackingTransformer(torch.nn.Module):
         feat_embed_per_dim: int = 1,
         window: int = 6,
         spatial_pos_cutoff: int = 256,
-        attn_positional_bias: Literal["bias", "rope", "none"] = "rope",
+        attn_positional_bias: Literal["rope", "none"] = "rope",
         attn_positional_bias_n_spatial: int = 16,
         causal_norm: Literal[
             "none", "linear", "softmax", "quiet_softmax"
@@ -402,7 +402,7 @@ class TrackingTransformer(torch.nn.Module):
         # encoder/decoder layers. Valid only when the mask is layer-independent,
         # i.e. no per-layer learnable positional bias ('rope'/'none' modes).
         attn_mask = None
-        if self.encoder and self.encoder[0].attn._mode != "bias":
+        if self.encoder:
             a0 = self.encoder[0].attn
             attn_mask = a0.build_attn_mask(
                 coords, padding_mask, coords.shape[0], coords.shape[1],

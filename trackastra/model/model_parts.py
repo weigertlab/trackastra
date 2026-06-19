@@ -93,66 +93,6 @@ class NoPositionalEncoding(nn.Module):
         # return self.token.view(1, 1, -1).expand(B, N, -1)
 
 
-def _bin_init_exp(cutoff: float, n: int):
-    return torch.exp(torch.linspace(0, math.log(cutoff + 1), n))
-
-
-def _bin_init_linear(cutoff: float, n: int):
-    return torch.linspace(-cutoff, cutoff, n)
-
-
-class RelativePositionalBias(nn.Module):
-    def __init__(
-        self,
-        n_head: int,
-        cutoff_spatial: float,
-        cutoff_temporal: float,
-        n_spatial: int = 32,
-        n_temporal: int = 16,
-    ):
-        """Learnt relative positional bias to add to self-attention matrix.
-
-        Spatial bins are exponentially spaced, temporal bins are linearly spaced.
-
-        Args:
-            n_head (int): Number of pos bias heads. Equal to number of attention heads
-            cutoff_spatial (float): Maximum distance in space.
-            cutoff_temporal (float): Maxium distance in time. Equal to window size of transformer.
-            n_spatial (int, optional): Number of spatial bins.
-            n_temporal (int, optional): Number of temporal bins in each direction. Should be equal to window size. Total = 2 * n_temporal + 1. Defaults to 16.
-        """
-        super().__init__()
-        self._spatial_bins = _bin_init_exp(cutoff_spatial, n_spatial)
-        self._temporal_bins = _bin_init_linear(cutoff_temporal, 2 * n_temporal + 1)
-        self.register_buffer("spatial_bins", self._spatial_bins)
-        self.register_buffer("temporal_bins", self._temporal_bins)
-        self.n_spatial = n_spatial
-        self.n_head = n_head
-        self.bias = nn.Parameter(
-            -0.5 + torch.rand((2 * n_temporal + 1) * n_spatial, n_head)
-        )
-
-    def forward(self, coords: torch.Tensor):
-        _B, _N, _D = coords.shape
-        t = coords[..., 0]
-        yx = coords[..., 1:]
-        temporal_dist = t.unsqueeze(-1) - t.unsqueeze(-2)
-        spatial_dist = torch.cdist(yx, yx)
-
-        spatial_idx = torch.bucketize(spatial_dist, self.spatial_bins)
-        torch.clamp_(spatial_idx, max=len(self.spatial_bins) - 1)
-        temporal_idx = torch.bucketize(temporal_dist, self.temporal_bins)
-        torch.clamp_(temporal_idx, max=len(self.temporal_bins) - 1)
-
-        # do some index gymnastics such that backward is not super slow
-        # https://discuss.pytorch.org/t/how-to-select-multiple-indexes-over-multiple-dimensions-at-the-same-time/98532/2
-        idx = spatial_idx.flatten() + temporal_idx.flatten() * self.n_spatial
-        bias = self.bias.index_select(0, idx).view((*spatial_idx.shape, self.n_head))
-        # -> B, nH, N, N
-        bias = bias.transpose(-1, 1)
-        return bias
-
-
 class RelativePositionalAttention(nn.Module):
     def __init__(
         self,
@@ -164,7 +104,7 @@ class RelativePositionalAttention(nn.Module):
         n_spatial: int = 32,
         n_temporal: int = 16,
         dropout: float = 0.0,
-        mode: Literal["bias", "rope", "none"] = "bias",
+        mode: Literal["rope", "none"] = "rope",
         attn_dist_mode: str = "v0",
     ):
         super().__init__()
@@ -188,15 +128,7 @@ class RelativePositionalAttention(nn.Module):
         self.cutoff_spatial = cutoff_spatial
         self.attn_dist_mode = attn_dist_mode
 
-        if mode == "bias" or mode is True:
-            self.pos_bias = RelativePositionalBias(
-                n_head=n_head,
-                cutoff_spatial=cutoff_spatial,
-                cutoff_temporal=cutoff_temporal,
-                n_spatial=n_spatial,
-                n_temporal=n_temporal,
-            )
-        elif mode == "rope":
+        if mode == "rope":
             # each part needs to be divisible by 2
             n_split = 2 * (embed_dim // (2 * (coord_dim + 1) * n_head))
 
@@ -227,12 +159,12 @@ class RelativePositionalAttention(nn.Module):
         device: torch.device,
     ) -> torch.Tensor:
         """Additive (B, n_head, N, N) attention mask: spatial cutoff + distance
-        bias (+ positional bias in 'bias' mode) + padding.
+        bias + padding.
 
-        Depends only on coords/padding (not the layer features), so in rope/none
-        modes it is identical across layers and can be precomputed once and
-        shared (see TrackingTransformer.forward). The rope rotation of q/k is
-        layer-local and handled in forward, not here.
+        Depends only on coords/padding (not the layer features), so it is
+        identical across layers and can be precomputed once and shared (see
+        TrackingTransformer.forward). The rope rotation of q/k is layer-local
+        and handled in forward, not here.
         """
         attn_mask = torch.zeros((B, self.n_head, N, N), device=device, dtype=dtype)
 
@@ -246,10 +178,6 @@ class RelativePositionalAttention(nn.Module):
         attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
 
         if coords is not None:
-            # positional bias is layer-specific (only in 'bias' mode)
-            if self._mode == "bias":
-                attn_mask = attn_mask + self.pos_bias(coords)
-
             if self.attn_dist_mode == "v0":
                 dist = torch.cdist(coords, coords, p=2)
                 attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))

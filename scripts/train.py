@@ -1,13 +1,19 @@
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+import pickle
+from types import SimpleNamespace
+
 import torch
 import torch.multiprocessing
 
 # torch.multiprocessing.set_sharing_strategy("file_system")
 torch.set_float32_matmul_precision("medium")
 
+import hashlib
+import json
 import logging
+import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -25,21 +31,21 @@ import yaml
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.utilities import grad_norm
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
-from torchvision.utils import make_grid
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
     CTCData,
     collate_sequence_padding,
 )
-from trackastra.data.distributed import BalancedDataModule
+from trackastra.data.distributed import BalancedBatchSampler, BalancedDataModule
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,
     blockwise_sum,
-    none_or_str,
     normalize,
     preallocate_memory,
     random_label_cmap,
@@ -53,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "mps")
 np.seterr(all="ignore")
 
 
@@ -153,15 +160,15 @@ def log_tracking_metrics(model, _data, causal_norm: str, delta: int):
             max_distance=50,
         )
         (
-            _df,
+            df,
             df_metric,
-            _df_mot,
-            _masks,
-            _graph,
-            _tracks_graph,
-            _tracks,
-            _masks_original,
-            _viewer,
+            df_mot,
+            masks,
+            graph,
+            tracks_graph,
+            tracks,
+            masks_original,
+            viewer,
         ) = tracking(args_track)
     return df_metric
 
@@ -180,6 +187,7 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
+        debug_dir:str=None,
     ):
         super().__init__()
 
@@ -198,8 +206,14 @@ class WrappedLightningModule(pl.LightningModule):
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
+        if debug_dir is not None:
+            self.debug = SimpleNamespace(dir = Path(debug_dir),
+                              values_per_epoch=  dict())                              
+            self.debug.dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.debug = None
 
-    def _common_step(self, batch, eps=torch.finfo(torch.float32).eps):
+    def _common_step(self, batch, eps=torch.finfo(torch.float16).eps):
         feats = batch["features"]
         coords = batch["coords"]
         A = batch["assoc_matrix"]
@@ -208,6 +222,7 @@ class WrappedLightningModule(pl.LightningModule):
         padding_mask = padding_mask.bool()
 
         A_pred = self.model(coords, feats, padding_mask=padding_mask)
+        # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
 
@@ -220,31 +235,19 @@ class WrappedLightningModule(pl.LightningModule):
 
         if self.causal_norm != "none":
             # TODO speedup: I could softmax only the part of the matrix (upper triangular) that is not masked out
-            A_pred_soft = torch.stack([
-                blockwise_causal_norm(_A, _t, mode=self.causal_norm, mask_invalid=_m)
-                for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
-            ])
+            A_pred_soft = torch.stack(
+                [
+                    blockwise_causal_norm(
+                        _A, _t, mode=self.causal_norm, mask_invalid=_m
+                    )
+                    for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
+                ]
+            )
             with torch.cuda.amp.autocast(enabled=False):
                 if len(A) > 0:
                     # debug
                     if torch.any(torch.isnan(A_pred_soft)):
                         print(A_pred)
-                        print(
-                            "AAAA pred",
-                            A_pred_soft.min().item(),
-                            A_pred_soft.max().item(),
-                        )
-                        print("AAAA pred", A_pred_soft.shape)
-                        print("AAAA pred", A_pred_soft.dtype)
-                        print("AAAA", A.min().item(), A.max().item())
-                        print("AAAA", A.shape)
-                        print("AAAA", A.dtype)
-                        print("A_pred_soft has nan")
-                        np.savez(
-                            "runs/nan.npz",
-                            A_pred=A_pred.detach().cpu().numpy(),
-                            timepoints=timepoints.detach().cpu().numpy(),
-                        )
 
                 # Keep the non-softmaxed loss for numerical stability
                 loss = 0.01 * loss + self.criterion_softmax(A_pred_soft, A)
@@ -322,30 +325,39 @@ class WrappedLightningModule(pl.LightningModule):
             print("NaN loss, skipping")
             return None
 
+        if self.debug is not None and loss.item()>.1 and self.current_epoch > 10: 
+            ep = self.current_epoch
+            
+            if  cur:=self.debug.values_per_epoch.get(ep, -1) < loss.item():
+                self.debug.values_per_epoch[ep] = loss.item()
+                _out = self.debug.dir / f"bad_batch_{ep:04d}.pt"
+                logger.info(f"Debug saving bad batch to {_out}")
+                _batch = batch.copy()
+                _batch['loss'] = loss.item()
+                torch.save(_batch, _out)
+            
+        _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
+        self.log("grad_norm", _norm, on_step=True, prog_bar=False, sync_dist=True)
+
         self.log(
             "train_loss",
             loss,
             prog_bar=True,
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             sync_dist=True,
         )
 
         # self.train_loss.append(loss)
-        if isinstance(self.logger, WandbLogger):
-            histogram = wandb.Histogram(
-                torch.sum(batch["timepoints"] != -1, dim=1).detach().cpu().numpy()
-            )
-            self.logger.log_metrics({"detections_per_sample": histogram})
-        else:
-            self.log_dict(
-                {
-                    "detections_per_sequence": batch["coords"].shape[1],
-                    "padding_fraction": out["padding_fraction"],
-                },
-                on_step=True,
-                on_epoch=False,
-            )
+
+        self.log_dict(
+            {
+                "detections_per_sequence": batch["coords"].shape[1],
+                "padding_fraction": out["padding_fraction"],
+            },
+            on_step=True,
+            on_epoch=False,
+        )
 
         return loss
 
@@ -399,10 +411,10 @@ class WrappedLightningModule(pl.LightningModule):
             self.tracking_frequency > 0
             and self.current_epoch % self.tracking_frequency == 0
         ):
-            data = self.trainer.val_dataloaders.dataset.datasets[0].datasets[0]
+            _data = self.trainer.val_dataloaders.dataset.datasets[0].datasets[0]
             try:
                 metrics = log_tracking_metrics(
-                    self.model, data, self.causal_norm, self.delta_cutoff
+                    self.model, _data, self.causal_norm, self.delta_cutoff
                 )
                 self.logger.experiment.add_scalar(
                     "tra_error", 1 - metrics["TRA"].mean(), self.current_epoch
@@ -463,32 +475,6 @@ class WrappedLightningModule(pl.LightningModule):
                     #     self.logger.experiment.add_scalar(
                     #         f"val_loss/delta_t={delta}", lt, self.current_epoch
                     #     )
-
-                for name, enc_decs in zip(
-                    ("encoder", "decoder"), (self.model.encoder, self.model.decoder)
-                ):
-                    for i, mod in enumerate(enc_decs):
-                        if not mod.attn._mode == "bias":
-                            continue
-
-                        pos = mod.attn.pos_bias
-                        temp, spat, nhead = (
-                            pos.temporal_bins,
-                            pos.spatial_bins,
-                            pos.bias.shape[-1],
-                        )
-
-                        bias = pos.bias.view(len(temp), len(spat), nhead).transpose(
-                            -1, 0
-                        )
-                        bias = bias.transpose(1, 2).unsqueeze(1)
-                        bias = make_grid(bias, nrow=2, normalize=True)
-                        self.logger.experiment.add_image(
-                            f"pos bias {name} {i}",
-                            bias,
-                            self.current_epoch,
-                            dataformats="CHW",
-                        )
 
             elif isinstance(self.logger, WandbLogger):
                 pass
@@ -611,7 +597,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
         if trainer.is_global_zero:
             logging.info(f"using logdir {self._logdir}")
             self._logdir.mkdir(parents=True, exist_ok=True)
-            with open(self._logdir / "train_config.yaml", "w") as f:
+            with open(self._logdir / "train_config.yaml", "tw") as f:
                 yaml.safe_dump(self._training_args, f)
 
     def on_validation_end(self, trainer, pl_module):
@@ -619,7 +605,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
             value = trainer.logged_metrics[self._monitor]
             if value < self._best:
                 self._best = value
-                logging.info(f"Saved best model with {self._monitor}={value:.5f}")
+                logging.info(f"saved best model with {self._monitor}={value:.5f}")
                 pl_module.model.save(self._logdir)
 
 
@@ -639,16 +625,60 @@ def create_run_name(args):
     return name
 
 
+def cache_class(cachedir=None):
+    """A simple file cache for CTCData."""
+
+    def make_hashable(obj):
+        if isinstance(obj, (tuple, list)):
+            return tuple(make_hashable(e) for e in obj)
+        elif isinstance(obj, Path):
+            return obj.as_posix()
+        elif isinstance(obj, dict):
+            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+        else:
+            return obj
+
+    def hash_args_kwargs(*args, **kwargs):
+        hashable_args = tuple(make_hashable(arg) for arg in args)
+        hashable_kwargs = make_hashable(kwargs)
+        combined_serialized = json.dumps(
+            [hashable_args, hashable_kwargs], sort_keys=True
+        )
+        hash_obj = hashlib.sha256(combined_serialized.encode())
+        return hash_obj.hexdigest()
+
+    if cachedir is None:
+        return CTCData
+    else:
+        cachedir = Path(cachedir)
+
+        def _wrapped(*args, **kwargs):
+            h = hash_args_kwargs(*args, **kwargs)
+            cachedir.mkdir(exist_ok=True, parents=True)
+            cache_file = cachedir / f"{h}.pkl"
+            if cache_file.exists():
+                logger.info(f"Loading cached dataset from {cache_file}")
+                with open(cache_file, "rb") as f:
+                    return pickle.load(f)
+            else:
+                c = CTCData(*args, **kwargs)
+                logger.info(f"Saving cached dataset to {cache_file}")
+                pickle.dump(c, open(cache_file, "wb"))
+            return c
+
+        return _wrapped
+
+
 def find_val_batch(loader_val, n_gpus):
     # find the val batch with most divisions for vizualisation, which runs on GPU 0
     batches_val = tuple(
         tqdm(loader_val, desc="Scanning val batches for max divs", leave=False)
     )
-
     n_divs = []
     n_dets = 0
     for batch in batches_val[: len(batches_val) // n_gpus]:
-        n_divs_ = (
+
+        _n_divs = (
             (
                 blockwise_sum(batch["assoc_matrix"][0], batch["timepoints"][0]).max(
                     dim=0
@@ -658,11 +688,11 @@ def find_val_batch(loader_val, n_gpus):
             .sum()
             .item()
         )
-        n_divs.append(n_divs_)
+        n_divs.append(_n_divs)
         assert len(batch["timepoints"]) == 1
-        n_dets_ = len(batch["timepoints"][0])
-        n_dets += n_dets_
-        logger.debug(f"{n_divs_=}, {n_dets_=}")
+        _n_dets = len(batch["timepoints"][0])
+        n_dets += _n_dets
+        logger.debug(f"{_n_divs=}, {_n_dets=}")
 
     logger.info(
         f"Validation set division/detection ratio: {np.array(n_divs).sum() / n_dets}"
@@ -672,14 +702,11 @@ def find_val_batch(loader_val, n_gpus):
 
 
 @rank_zero_only
-def _init_wandb(project, name, config):
-    _ = wandb.init(project=project, name=name, config=config)
+def _init_wandb(project, name, config, save_dir):
+    _ = wandb.init(project=project, name=name, config=config, dir=save_dir)
 
 
 def train(args):
-    device = torch.device(
-        "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
-    )
     args.seed = seed(args.seed)
     if args.model is None:
         logger.warning("Training from scratch, this is slow!\n")
@@ -706,7 +733,6 @@ def train(args):
                 mode="min",
                 save_top_k=1,
                 save_last=True,
-                verbose=True,
             )
         )
 
@@ -717,10 +743,12 @@ def train(args):
         if args.logger == "tensorboard":
             train_logger = TensorBoardLogger(logdir, name="tb")
         elif args.logger == "wandb":
-            train_logger = WandbLogger(name=run_name, project=args.wandb_project)
+            train_logger = WandbLogger(name=run_name, 
+                                       project=args.wandb_project,
+                                       save_dir=logdir)
 
             # init here to get an alert on job failure even before training
-            _init_wandb(project=args.wandb_project, name=run_name, config=vars(args))
+            _init_wandb(project=args.wandb_project, name=run_name, config=vars(args), save_dir=logdir)
 
         elif args.logger == "none":
             train_logger = False
@@ -735,11 +763,14 @@ def train(args):
             f'Logdir {logdir} exists, set "--resume t"  if you want to overwrite'
         )
 
+    datasets = dict()
+
+    CTCData = cache_class(args.cachedir if args.cache else None)
+
     n_gpus = torch.cuda.device_count() if args.distributed else 1
+
     if args.preallocate:
-        if n_gpus > 1:
-            raise ValueError("Preallocation should only be used with single GPU")
-        logger.info("Preallocating memory")
+        logger.info("Load one dataset to preallocate memory for training")
         dummy_data = CTCData(
             root=Path(args.input_train[0]),
             ndim=args.ndim,
@@ -748,12 +779,14 @@ def train(args):
             max_tokens=args.max_tokens,
             augment=args.augment,
             features=args.features,
+            slice_pct=args.slice_pct_train,
             downscale_temporal=args.downscale_temporal,
             downscale_spatial=args.downscale_spatial,
             sanity_dist=args.sanity_dist,
             crop_size=args.crop_size,
             compress=args.compress,
         )
+
         dummy_model = TrackingTransformer(
             coord_dim=dummy_data.ndim,
             feat_dim=dummy_data.feat_dim,
@@ -786,70 +819,124 @@ def train(args):
         preallocate_memory(
             dummy_data,
             dummy_model_lightning,
-            args.batch_size,
+            args.batch_size // n_gpus,
             args.max_tokens,
             device,
         )
         del dummy_model_lightning
-        del dummy_model
         del dummy_data
-        torch.cuda.empty_cache()
 
-    non_exists = tuple(
-        p for p in args.input_train + args.input_val if not Path(p).exists()
-    )
-    if len(non_exists) > 0:
-        p_non = "\n".join(non_exists)
-        raise FileNotFoundError(f"the following input folders don't exist: \n{p_non}")
+    for p in args.input_train + args.input_val:
+        if not Path(p).exists():
+            raise FileNotFoundError(f"Input folder {p} does not exist")
 
-    if args.only_prechecks:
-        return locals()
+    for split, inps, slice_pct in zip(
+        ("train", "val"),
+        (args.input_train, args.input_val),
+        (args.slice_pct_train, args.slice_pct_val),
+    ):
+        logger.info(f"Loading {split.upper()} data")
+        start = default_timer()
+        datasets[split] = torch.utils.data.ConcatDataset(
+            CTCData(
+                root=Path(inp),
+                ndim=args.ndim,
+                detection_folders=args.detection_folders,
+                window_size=args.window,
+                max_tokens=args.max_tokens,
+                augment=args.augment if split == "train" else 0,
+                features=args.features,
+                slice_pct=slice_pct,
+                downscale_temporal=args.downscale_temporal,
+                downscale_spatial=args.downscale_spatial,
+                sanity_dist=args.sanity_dist,
+                crop_size=args.crop_size if split == "train" else None,
+                compress=args.compress,
+            )
+            for inp in inps
+        )
+        logger.info(
+            f"Loaded {len(datasets[split])} {split.upper()} samples (in"
+            f" {(default_timer() - start):.1f} s)\n\n"
+        )
 
-    dataset_kwargs = dict(
-        ndim=args.ndim,
-        detection_folders=args.detection_folders,
-        window_size=args.window,
-        max_tokens=args.max_tokens,
-        features=args.features,
-        downscale_temporal=args.downscale_temporal,
-        downscale_spatial=args.downscale_spatial,
-        sanity_dist=args.sanity_dist,
-        crop_size=args.crop_size,
-        compress=args.compress,
-    )
-    sampler_kwargs = dict(
-        batch_size=args.batch_size,
-        n_pool=args.n_pool_sampler,
-        num_samples=args.train_samples,
-        weight_by_ndivs=args.weight_by_ndivs,
-        weight_by_dataset=args.weight_by_dataset,
-    )
-    loader_kwargs = dict(
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
+    common_loader_args = dict(
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
         collate_fn=collate_sequence_padding,
     )
 
+    datamodule = None
     # Sampler gets wrapped with distributed sampler, which cannot sample with replacement
-    datamodule = BalancedDataModule(
-        input_train=args.input_train,
-        input_val=args.input_val,
-        cachedir=args.cachedir,
-        augment=args.augment,
-        distributed=args.distributed,
-        dataset_kwargs=dataset_kwargs,
-        sampler_kwargs=sampler_kwargs,
-        loader_kwargs=loader_kwargs,
-    )
-    # still write cached dataset even if epochs == 0 (e.g. for parallel cache creation)
-    if args.epochs == 0:
-        datamodule.prepare_data()
+    if args.distributed:
+        datamodule = BalancedDataModule(
+            datasets["train"],
+            datasets["val"],
+            num_samples=args.train_samples if args.train_samples > 0 else None,
+            batch_size=args.batch_size,
+            n_pool=args.n_pool_sampler,
+            num_workers=args.num_workers,
+            weight_by_ndivs=args.weight_by_ndivs,
+            weight_by_dataset=args.weight_by_dataset,
+            **common_loader_args,
+        )
 
-    # FIXME: bring back the biggest batch for visualization.
-    # batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    batch_val_tb_idx = 0
+    else:
+
+        if args.n_pool_sampler > 0:
+            batch_sampler = BalancedBatchSampler(
+                datasets["train"],
+                batch_size=args.batch_size,
+                n_pool=args.n_pool_sampler,
+                num_samples=args.train_samples if args.train_samples > 0 else None,
+                weight_by_ndivs=args.weight_by_ndivs,
+                weight_by_dataset=args.weight_by_dataset,
+            )
+
+            loader_train = DataLoader(
+                datasets["train"],
+                batch_sampler=batch_sampler,
+                num_workers=args.num_workers,
+                **common_loader_args,
+            )
+        else:
+            if args.weight_by_ndivs:
+                raise NotImplementedError(
+                    "Weighting by ndivs only works with balanced samples (i.e."
+                    " n_pool_sampler > 0)"
+                )
+            sampler = torch.utils.data.RandomSampler(
+                datasets["train"],
+                num_samples=(
+                    args.train_samples
+                    if args.train_samples > 0
+                    else len(datasets["train"])
+                ),
+                replacement=True,
+            )
+            loader_train = DataLoader(
+                datasets["train"],
+                sampler=sampler,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                **common_loader_args,
+            )
+
+    loader_val = DataLoader(
+        datasets["val"],
+        batch_size=1,
+        shuffle=False,
+        num_workers=0 if args.num_workers == 0 else max(1, args.num_workers // 2),
+        **common_loader_args,
+    )
+
+    for k, v in datasets.items():
+        print(f"Dataset {k}: {len(v)} samples")
+
+     
+
+    batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
+    # batch_val_tb_idx = 0
 
     if train_logger:
         callbacks.append(
@@ -857,15 +944,6 @@ def train(args):
         )
 
     callbacks.append(pl.pytorch.callbacks.Timer(interval="epoch"))
-    # Mostly for stopping broken runs
-    callbacks.append(
-        pl.pytorch.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=args.epochs // 6,
-            mode="min",
-            verbose=True,
-        )
-    )
 
     if args.example_images:
         callbacks.append(ExampleImages())
@@ -884,13 +962,9 @@ def train(args):
         else:
             model = TrackingTransformer.from_folder(fpath, args=args)
     else:
-        feat_dim = 0 if args.features == "none" else 7 if args.ndim == 2 else 12
         model = TrackingTransformer(
-            # coord_dim=datasets["train"].datasets[0].ndim,
-            coord_dim=args.ndim,
-            # feat_dim=datasets["train"].datasets[0].feat_dim,
-            # FIXME hardcoded feat_dim
-            feat_dim=feat_dim,
+            coord_dim=datasets["train"].datasets[0].ndim,
+            feat_dim=datasets["train"].datasets[0].feat_dim,
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
@@ -915,9 +989,8 @@ def train(args):
         tracking_frequency=args.tracking_frequency,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
+        debug_dir=args.debug_dir,
     )
-    # Compiling does not work!
-    # model_lightning = torch.compile(model_lightning)
 
     # if logdir already exists and --resume option is set, load the last checkpoint (eg when continuing training after crash)
     if logdir is not None and logdir.exists() and args.resume:
@@ -944,8 +1017,8 @@ def train(args):
     logging.info(f"Model has {num_params / 1e6:.1f}M parameters")
 
     if args.distributed:
-        strategy = "ddp"
-        # strategy = "ddp_find_unused_parameters_true"
+        # strategy = "ddp"
+        strategy = "ddp_find_unused_parameters_true"
     else:
         strategy = "auto"
 
@@ -956,11 +1029,13 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        accelerator="cuda" if torch.cuda.is_available() else 'cpu',
         strategy=strategy,
-        devices=n_gpus if torch.cuda.is_available() else 1,
+        devices=n_gpus,
+        gradient_clip_val=1.0,
         precision="16-mixed" if args.mixedp else 32,
         logger=train_logger,
+        default_root_dir=logdir if not args.dry else None,
         num_nodes=1,
         max_epochs=args.epochs,
         callbacks=callbacks,
@@ -976,11 +1051,18 @@ def train(args):
         resume_path = None
 
     if args.epochs > 0:
-        logger.info("Using lightning datamodule")
-        trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
+        if args.distributed and datamodule is not None:
+            trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
+        else:
+            trainer.fit(
+                model_lightning,
+                train_dataloaders=loader_train,
+                val_dataloaders=loader_val,
+                ckpt_path=resume_path,
+            )
 
-    print(f"Time elapsed:     {(default_timer() - t) / 60:.02f} min")
-    print(f"CPU Memory used:  {(_process_memory() - memory) / 1e9:.2f} GB")
+    print(f"Time elapsed:     {(default_timer() - t)/60:.02f} min")
+    print(f"CPU Memory used:  {(_process_memory() - memory)/1e9:.2f} GB")
     print(f"GPU Memory used : {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
     return locals()
@@ -997,8 +1079,8 @@ def parse_train_args():
         "--config",
         is_config_file=True,
         help="config file path",
+        default="configs/vanvliet.yaml",
     )
-    parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("-o", "--outdir", type=str, default="runs")
     parser.add_argument("--name", type=str, help="Name to append to timestamp")
     parser.add_argument("--timestamp", type=str2bool, default=True)
@@ -1027,18 +1109,20 @@ def parse_train_args():
         ),
     )
     parser.add_argument("--input_train", type=str, nargs="+")
-    parser.add_argument("--input_val", type=str, nargs="*")
+    parser.add_argument("--input_val", type=str, nargs="+")
+    parser.add_argument("--slice_pct_train", type=float, nargs=2, default=(0.0, 1.0))
+    parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--spatial_pos_cutoff", type=int, default=256)
     parser.add_argument("--from_subfolder", action="store_true")
-    parser.add_argument("--train_samples", type=int, default=50000)
+    parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
     parser.add_argument("--feat_embed_per_dim", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.00)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_tokens", type=int, default=None)
     parser.add_argument("--delta_cutoff", type=int, default=2)
@@ -1046,11 +1130,12 @@ def parse_train_args():
     parser.add_argument(
         "--attn_positional_bias",
         type=str,
-        choices=["rope", "bias", "none"],
+        choices=["rope", "none"],
         default="rope",
     )
+    parser.add_argument("--debug_dir", type=str, default=None)
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)
-    parser.add_argument("--attn_dist_mode", default="v0")
+    parser.add_argument("--attn_dist_mode", type=str, default="v1")
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -1080,15 +1165,21 @@ def parse_train_args():
 
     parser.add_argument("--sanity_dist", action="store_true")
     parser.add_argument("--preallocate", type=str2bool, default=False)
-    parser.add_argument("--only_prechecks", action="store_true")
     parser.add_argument(
-        "--compress", type=str2bool, default=True, help="compress dataset"
+        "--compress", type=str2bool, default=False, help="compress dataset"
     )
     parser.add_argument(
+        "--cache",
+        type=str2bool,
+        default=False,
+        help="cache CTCData to disk use (useful for large datasets)",
+    )
+
+    parser.add_argument(
         "--cachedir",
-        type=none_or_str,
+        type=str,
         default=".cache",
-        help="cache dir for CTCData. Set to `None` to disable caching.",
+        help="cache dir for CTCData if --cache is set",
     )
     parser.add_argument("--resume", type=str2bool, default=True)
     parser.add_argument(
@@ -1101,7 +1192,7 @@ def parse_train_args():
     parser.add_argument(
         "--distributed",
         type=str2bool,
-        default=True,
+        default=False,
         help="use distributed DDP training",
     )
     parser.add_argument(
@@ -1117,11 +1208,11 @@ def parse_train_args():
         default="tensorboard",
         choices=["tensorboard", "wandb", "none"],
     )
-    parser.add_argument("--wandb_project", type=str, default="trackastra")
+    parser.add_argument("--wandb_project", type=str, default="trackastra-new")
     parser.add_argument(
         "--crop_size",
         type=int,
-        # required=True,
+        required=True,
         nargs="+",
         default=None,
         help="random crop size for augmentation",
@@ -1159,9 +1250,10 @@ def parse_train_args():
     # elif args.attn_positional_bias == "False":
     #     args.attn_positional_bias = False
 
-    if args.train_samples == 0:
-        raise NotImplementedError(
-            "--train_samples must be > 0, full dataset pass not supported."
+    if args.distributed and hasattr(sys, "ps1"):
+        raise ValueError(
+            "Distributed training does not work in interactive mode. Run as `python"
+            " train.py`."
         )
 
     return args

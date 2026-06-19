@@ -41,7 +41,13 @@ No new params (checkpoints still load), only the compute graph changes.
 - Commit: `Fix pre-norm residual path in encoder/decoder layers`
 - Gate: `--name impro_prenorm`
 
-## Step 2 - rope canonical, fully remove bias path  `[ ]`  (improv #3)
+## Step 2 - rope canonical, fully remove bias path  `[x]`  (improv #3)  -> gated: val_loss 0.248
+
+rope cross-check vs muvit: `_rotate_half` (adjacent-pair) + `repeat_interleave(2)` cos/sin
+matches muvit's `rotate_half`/`apply_rotary_pos_emb` exactly. Differences are only frequency
+parameterization and a uniform `1/sqrt(L)` scale that preserves RoPE's relative-position
+property -> no functional rope fix needed. Removed `RelativePositionalBias` + all `"bias"` mode
+branches; kept now-unused n_spatial/n_temporal kwargs for checkpoint-config compat.
 
 - Make `"rope"` the default in `EncoderLayer`/`DecoderLayer` (already default on
   `TrackingTransformer`). Keep `"none"` to disable positional info.
