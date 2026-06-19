@@ -61,13 +61,13 @@ class EncoderLayer(nn.Module):
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
     ):
-        x = self.norm1(x)
-
+        # pre-norm: the residual stream carries the raw input, norm only feeds attn/mlp
+        h = self.norm1(x)
         # setting coords to None disables positional bias
         a = self.attn(
-            x,
-            x,
-            x,
+            h,
+            h,
+            h,
             coords=coords if self.positional_bias else None,
             padding_mask=padding_mask,
             attn_mask=attn_mask,
@@ -120,12 +120,13 @@ class DecoderLayer(nn.Module):
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
     ):
-        x = self.norm1(x)
+        # pre-norm: the residual stream (x) carries the raw input
+        h = self.norm1(x)
         y = self.norm2(y)
         # cross attention
         # setting coords to None disables positional bias
         a = self.attn(
-            x,
+            h,
             y,
             y,
             coords=coords if self.positional_bias else None,
