@@ -433,9 +433,12 @@ class TrackingTransformer(torch.nn.Module):
             coords = coords.clone()
             coords[padding_mask] = coords.max()
 
-        # remove temporal offset
+        # remove temporal offset from the time column only. Subtracting min_time
+        # from the whole vector (it broadcasts over the last dim) would also shift
+        # the spatial coords, leaking the absolute temporal origin into spatial
+        # position: the same cells at frames 0-5 vs 100-105 would embed differently.
         min_time = coords[:, :, :1].min(dim=1, keepdims=True).values
-        coords = coords - min_time
+        coords = torch.cat([coords[:, :, :1] - min_time, coords[:, :, 1:]], dim=-1)
 
         pos = self.pos_embed(coords)
 
