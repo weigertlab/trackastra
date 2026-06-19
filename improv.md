@@ -128,6 +128,15 @@ is now purely the additive validity mask (0 real / -1e3 sentinel). Sparse no lon
 dense numerically, so the parity tests were replaced by mechanism tests (`_sparse_attend` ==
 full attention at K=N) + sentinel checks. Sparse K=64 gate: val_loss 0.240 @ 32.3 GB.
 
+## Step 7 - dense `attn_dist_mode="none"` (boolean mask)  `[x]`  -> gated: val_loss 0.237
+
+New dense option: drop the soft distance bias and build a **boolean** attn mask (True=attend,
+hard spatial-cutoff + padded-keys only). A bool mask is n_bytes smaller than the float additive
+mask and dispatches SDPA to the memory-efficient kernel (not flash - flash needs no mask).
+Self-attention is forced on the diagonal so no query row is fully masked (a fully-masked bool
+row softmaxes to NaN; the `-1e3` float mask was finite/NaN-safe). The float `forward` dtype cast
+is now guarded to skip bool masks. Gate (`--attn_dist_mode none`): val_loss 0.237 @ 23.5 GB.
+
 ## Backlog / ideas (not yet done)
 
 - Decoder self-attention (currently cross-attn only) - lets candidate associations coordinate.
@@ -135,8 +144,9 @@ full attention at K=N) + sentinel checks. Sparse K=64 gate: val_loss 0.240 @ 32.
   in crowded frames.
 - Spatial translation invariance: center spatial coords per window (only the absolute Fourier
   `pos_embed` breaks it; the distance terms are relative). 
-- Optional `attn_mask_mode="none"` to run raw (maskless) flash attention in dense mode for
-  benchmarking - does NOT currently exist.
+- Raw (maskless) flash attention in dense mode: needs `build_attn_mask` to return None AND
+  padding handled off the additive mask (loss-level mask or sequence packing). The bool mask
+  (Step 7) gets the mem-efficient kernel but not flash.
 
 ## Known break (accepted)
 

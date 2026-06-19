@@ -169,27 +169,36 @@ class RelativePositionalAttention(nn.Module):
         layers and precomputed once and shared (see TrackingTransformer.forward).
         The rope rotation of q/k is layer-local and handled in forward, not here.
         """
-        attn_mask = torch.zeros((B, 1, N, N), device=device, dtype=dtype)
+        yx = coords[..., 1:]
+        spatial_dist = torch.cdist(yx, yx)  # (B, N, N)
+        too_far = spatial_dist > self.cutoff_spatial
 
+        if self.attn_dist_mode == "none":
+            # Boolean mask (True = attend): only the hard exclusions (spatial
+            # cutoff + padded keys), no soft distance bias. A bool mask is
+            # n_bytes smaller than the float additive mask and lets SDPA use the
+            # memory-efficient kernel. Always allow self-attention so no query
+            # row is fully masked (a fully-masked row would softmax to NaN).
+            allowed = ~too_far
+            if padding_mask is not None:
+                allowed = allowed & ~padding_mask.unsqueeze(1)  # padded keys
+            eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
+            allowed = allowed | eye
+            return allowed.unsqueeze(1)  # (B, 1, N, N) bool
+
+        # Float additive mask: spatial cutoff + soft distance bias + padding.
+        attn_mask = torch.zeros((B, 1, N, N), device=device, dtype=dtype)
         # add negative value but not too large to keep mixed precision loss from becoming nan
         attn_ignore_val = -1e3
+        attn_mask.masked_fill_(too_far.unsqueeze(1), attn_ignore_val)
 
-        # spatial cutoff
-        yx = coords[..., 1:]
-        spatial_dist = torch.cdist(yx, yx)
-        spatial_mask = (spatial_dist > self.cutoff_spatial).unsqueeze(1)
-        attn_mask.masked_fill_(spatial_mask, attn_ignore_val)
-
-        if coords is not None:
-            if self.attn_dist_mode == "v0":
-                dist = torch.cdist(coords, coords, p=2)
-                attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))
-            elif self.attn_dist_mode == "v1":
-                attn_mask += torch.exp(
-                    -5 * spatial_dist.unsqueeze(1) / self.cutoff_spatial
-                )
-            else:
-                raise ValueError(f"Unknown attn_dist_mode {self.attn_dist_mode}")
+        if self.attn_dist_mode == "v0":
+            dist = torch.cdist(coords, coords, p=2)
+            attn_mask += torch.exp(-0.1 * dist.unsqueeze(1))
+        elif self.attn_dist_mode == "v1":
+            attn_mask += torch.exp(-5 * spatial_dist.unsqueeze(1) / self.cutoff_spatial)
+        else:
+            raise ValueError(f"Unknown attn_dist_mode {self.attn_dist_mode}")
 
         # if given key_padding_mask = (B,N) then ignore those tokens (e.g. padding tokens)
         if padding_mask is not None:
@@ -218,11 +227,13 @@ class RelativePositionalAttention(nn.Module):
         q = q.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
         v = v.view(B, N, self.n_head, D // self.n_head).transpose(1, 2)
 
-        # Build the additive mask unless a precomputed one is passed in (shared
-        # across layers when it is layer-independent, i.e. not 'bias' mode).
+        # Build the mask unless a precomputed one is passed in (shared across
+        # layers since it is layer-independent). Only float (additive) masks are
+        # cast to q's dtype; a boolean mask (attn_dist_mode="none") is passed
+        # through unchanged for SDPA.
         if attn_mask is None:
             attn_mask = self.build_attn_mask(coords, padding_mask, B, N, q.dtype, query.device)
-        elif attn_mask.dtype != q.dtype:
+        elif attn_mask.dtype.is_floating_point and attn_mask.dtype != q.dtype:
             attn_mask = attn_mask.to(q.dtype)
 
         # rope rotation is layer-local (applied to this layer's q/k)
