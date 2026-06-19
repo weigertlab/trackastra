@@ -361,16 +361,23 @@ class WRBaseAugmentation:
 class WRRandomFlip(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
         ndim = features.ndim
-        flip = self._rng.randint(0, 2, features.ndim)
-        points = features.coords.copy()
+        flip = self._rng.randint(0, 2, ndim)
+        # a flip is a reflection M = diag(+-1); apply it to coords *and* features
+        # (the inertia tensor's off-diagonals flip sign) for a consistent sample.
+        signs = np.ones(ndim)
         for i, f in enumerate(flip):
             if f == 1:
-                points[:, ndim - i - 1] *= -1
+                signs[ndim - i - 1] = -1
+        M = np.diag(signs)
+        points = features.coords @ M.T
+        feats = OrderedDict(
+            (k, _transform_affine(k, v, M)) for k, v in features.features.items()
+        )
         return WRFeatures(
             coords=points,
             labels=features.labels,
             timepoints=features.timepoints,
-            features=features.features,
+            features=feats,
         )
 
 
@@ -396,19 +403,26 @@ def _rotation_matrix(theta: float):
 
 def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     ndim = len(M)
+    # use |det|: area/diameter are positive magnitudes, and a reflection (det<0,
+    # e.g. from WRRandomFlip) must not flip their sign (or make diameter complex).
+    absdet = abs(np.linalg.det(M))
     if k == "area":
-        v = np.linalg.det(M) * v
+        v = absdet * v
     elif k == "equivalent_diameter_area":
-        v = np.linalg.det(M) ** (1 / len(M)) * v
+        v = absdet ** (1 / ndim) * v
 
     elif k == "inertia_tensor":
-        # v' = M * v  * M^T
+        # skimage's inertia_tensor is the moment of inertia I = tr(S)*Id - S, with
+        # S the covariance. Only S transforms as M S M^T; I does so only for
+        # orthogonal M (rotations/reflections), and is wrong under scale/shear. So
+        # convert I -> S, transform S, convert back. tr(I) = (ndim-1)*tr(S).
         v = v.reshape(-1, ndim, ndim)
-        # v * M^T
-        v = np.einsum("ijk, mk -> ijm", v, M)
-        # M * v
-        v = np.einsum("ij, kjm -> kim", M, v)
-        v = v.reshape(-1, ndim * ndim)
+        eye = np.eye(ndim)
+        tr_s = np.trace(v, axis1=1, axis2=2) / (ndim - 1)
+        s = tr_s[:, None, None] * eye - v
+        s = np.einsum("ij, rjk, lk -> ril", M, s, M)  # M S M^T
+        tr_sp = np.trace(s, axis1=1, axis2=2)
+        v = (tr_sp[:, None, None] * eye - s).reshape(-1, ndim * ndim)
     elif k in (
         "intensity_mean",
         "intensity_std",
