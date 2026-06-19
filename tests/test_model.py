@@ -37,3 +37,18 @@ def test_model():
     A[M] = 0
 
     print(A.sum())
+
+
+def test_model_multichannel_head():
+    torch.manual_seed(0)
+    coords = torch.randint(0, 400, (2, 60, 3)).float()
+    padding_mask = torch.zeros(2, 60).bool()
+    padding_mask[:, -10:] = True
+    coords[padding_mask] += 100
+
+    model = TrackingTransformer(
+        coord_dim=2, assoc_head="multichannel", assoc_channels=8
+    )
+    A = model(coords, padding_mask=padding_mask)
+    assert A.shape == (2, 60, 60)
+    assert torch.isfinite(A).all()

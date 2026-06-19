@@ -34,6 +34,49 @@ class FeedForward(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 
+class MultiChannelPairHead(nn.Module):
+    """Learned association readout as an alternative to the single bilinear dot product.
+
+    Projects source/destination tokens into `channels` independent low-rank
+    similarity subspaces, computes a per-channel dot product, then mixes the
+    channels with a small MLP into a single logit. This lets the model express
+    associations that a single inner product cannot (e.g. agreement on some
+    feature subspaces but not others).
+
+    Note: the intermediate tensor is (B, N, M, channels), so memory scales as
+    channels x the cost of the plain (B, N, M) logits. Keep `channels` small.
+
+    The per-channel q/k are L2-normalized and the cosine similarities scaled by a
+    clamped learned temperature (CLIP-style), so the pre-MLP values stay bounded.
+    Without this the raw dot products are unbounded and overflow fp16 under AMP
+    once the head's weights grow, producing NaNs that crash the BCE loss.
+    """
+
+    def __init__(self, dim: int, channels: int = 8, hidden: int = 32):
+        super().__init__()
+        self.channels = channels
+        self.q = nn.Linear(dim, channels * dim)
+        self.k = nn.Linear(dim, channels * dim)
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, h_src, h_dst):
+        # (B, N, D), (B, M, D) -> (B, N, M). Note the intermediate (B, N, M,
+        # channels) einsum and (B, N, M, hidden) MLP activations scale with N^2,
+        # so this head is intrinsically heavier than the bilinear dot product.
+        B, N, D = h_src.shape
+        M = h_dst.shape[1]
+        q = F.normalize(self.q(h_src).view(B, N, self.channels, D), dim=-1)
+        k = F.normalize(self.k(h_dst).view(B, M, self.channels, D), dim=-1)
+        scale = self.logit_scale.exp().clamp(max=100.0)  # see TrackingTransformer head
+        z = scale * torch.einsum("bnkd,bmkd->bnmk", q, k)  # (B, N, M, channels)
+        return self.mlp(z).squeeze(-1)
+
+
 class PositionalEncoding(nn.Module):
     def __init__(
         self,

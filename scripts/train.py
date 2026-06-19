@@ -332,7 +332,7 @@ class WrappedLightningModule(pl.LightningModule):
                 _batch = batch.copy()
                 _batch['loss'] = loss.item()
                 torch.save(_batch, _out)
-            
+
         # grad_norm sweeps every parameter's gradient (many small ops + a sync),
         # so only compute/log it on the first batch of every Nth epoch.
         if (
@@ -800,6 +800,8 @@ def train(args):
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
             logit_norm=args.logit_norm,
+            assoc_head=args.assoc_head,
+            assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
         )
 
@@ -979,6 +981,8 @@ def train(args):
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
             logit_norm=args.logit_norm,
+            assoc_head=args.assoc_head,
+            assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
         )
 
@@ -1146,6 +1150,10 @@ def parse_train_args():
     )
     parser.add_argument("--max_neighbors", type=int, default=64)
     parser.add_argument("--logit_norm", type=str2bool, default=True)
+    parser.add_argument(
+        "--assoc_head", choices=["bilinear", "multichannel"], default="bilinear"
+    )
+    parser.add_argument("--assoc_channels", type=int, default=8)
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")
