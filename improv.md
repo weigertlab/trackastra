@@ -112,6 +112,32 @@ Re-scoped (the two originally-listed items did not hold up):
 
 ---
 
+## Step 5 - normalized association readout (logit_norm)  `[x]`  -> gated: val_loss 0.231
+
+The association logits were a raw unscaled dot product `A = x.y` (logit variance grows with
+d_model; the fp16 `clamp_` in train.py is a symptom). Now L2-normalize the head embeddings
+and scale the cosine-similarity logits by a learned CLIP-style temperature
+(`logit_scale = exp(param).clamp(max=100)`), default on via `logit_norm: bool = True`.
+Dense gate: val_loss 0.231 @ 22.5 GB.
+
+## Step 6 - drop soft distance bias from sparse path  `[x]`  -> gated: val_loss 0.240
+
+`build_knn_index` no longer adds the `exp(-dist)` soft bias (a redundant dense-path crutch:
+the kNN neighbourhood already encodes locality and rope encodes relative position). `nbr_bias`
+is now purely the additive validity mask (0 real / -1e3 sentinel). Sparse no longer matches
+dense numerically, so the parity tests were replaced by mechanism tests (`_sparse_attend` ==
+full attention at K=N) + sentinel checks. Sparse K=64 gate: val_loss 0.240 @ 32.3 GB.
+
+## Backlog / ideas (not yet done)
+
+- Decoder self-attention (currently cross-attn only) - lets candidate associations coordinate.
+- Time-aware kNN (top-K per relative frame) - spatial-only top-K can miss the true successor
+  in crowded frames.
+- Spatial translation invariance: center spatial coords per window (only the absolute Fourier
+  `pos_embed` breaks it; the distance terms are relative). 
+- Optional `attn_mask_mode="none"` to run raw (maskless) flash attention in dense mode for
+  benchmarking - does NOT currently exist.
+
 ## Known break (accepted)
 
 The shipped pretrained models (`ctc`, `general_2d`) are **no longer compatible** with this

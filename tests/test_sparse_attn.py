@@ -1,23 +1,73 @@
-"""Sparse kNN attention parity with the dense path."""
+"""Sparse kNN attention: mechanism correctness and sentinel handling.
+
+The sparse path intentionally drops the dense soft distance bias, so it no longer
+matches the dense model numerically. These tests instead validate the gather +
+masked-softmax mechanism directly, and that the model runs end to end in sparse mode.
+"""
+
+import math
 
 import torch
 
 from trackastra.model.model import TrackingTransformer
+from trackastra.model.sparse_attn import _sparse_attend, build_knn_index
 
 
-def _make_inputs(B=2, N=24, coord_dim=2, seed=0):
-    g = torch.Generator().manual_seed(seed)
-    # time in [0, window), spatial coords spread so some pairs exceed the cutoff
-    t = torch.randint(0, 4, (B, N, 1), generator=g).float()
-    yx = 50 * torch.rand((B, N, coord_dim), generator=g)
+def test_sparse_attend_matches_full_attention():
+    # With K = N and an all-keys neighbour list, sparse attention must reduce to
+    # plain scaled-dot-product attention over all keys.
+    torch.manual_seed(0)
+    B, H, N, hd = 2, 4, 16, 8
+    q = torch.randn(B, H, N, hd)
+    k = torch.randn(B, H, N, hd)
+    v = torch.randn(B, H, N, hd)
+
+    nbr_idx = torch.arange(N).view(1, 1, N).expand(B, N, N).contiguous()
+    nbr_bias = torch.zeros(B, N, N)
+    out_sparse = _sparse_attend(q, k, v, nbr_idx, nbr_bias, dropout=0.0, training=False)
+
+    scores = (q @ k.transpose(-1, -2)) / math.sqrt(hd)
+    out_full = torch.softmax(scores, dim=-1) @ v
+
+    assert torch.allclose(out_sparse, out_full, atol=1e-5), (
+        (out_sparse - out_full).abs().max().item()
+    )
+
+
+def test_build_knn_index_sentinels():
+    # node 2 is far from 0/1 (beyond the cutoff); node 3 is padded.
+    coords = torch.tensor([[
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 100.0, 0.0],
+        [0.0, 2.0, 0.0],
+    ]])
+    padding_mask = torch.tensor([[False, False, False, True]])
+    nbr_idx, nbr_bias = build_knn_index(
+        coords, padding_mask, cutoff_spatial=10.0, max_neighbors=4
+    )
+
+    # node 0 must reach nodes {0, 1, 3-is-padded->excluded, 2-too-far->excluded}
+    row = nbr_idx[0, 0]
+    valid = row >= 0
+    assert set(row[valid].tolist()) <= {0, 1}
+    assert 2 not in row[valid].tolist()  # beyond cutoff
+    assert 3 not in row[valid].tolist()  # padded key
+    # bias is 0 on valid slots, large-negative on sentinels
+    assert torch.all(nbr_bias[0, 0][valid] == 0)
+    assert torch.all(nbr_bias[0, 0][~valid] <= -1e3 + 1)
+
+
+def test_sparse_model_runs_finite():
+    torch.manual_seed(0)
+    B, N, coord_dim = 2, 40, 2
+    t = torch.randint(0, 4, (B, N, 1)).float()
+    yx = 50 * torch.rand((B, N, coord_dim))
     coords = torch.cat([t, yx], dim=-1)
     padding_mask = torch.zeros(B, N, dtype=torch.bool)
-    padding_mask[:, -3:] = True  # a few padded tokens
-    return coords, padding_mask
+    padding_mask[:, -3:] = True
 
-
-def _build_pair(coord_dim=2, max_neighbors=128, **kw):
-    cfg = dict(
+    model = TrackingTransformer(
         coord_dim=coord_dim,
         d_model=64,
         nhead=4,
@@ -26,53 +76,9 @@ def _build_pair(coord_dim=2, max_neighbors=128, **kw):
         dropout=0.0,
         window=6,
         spatial_pos_cutoff=40,
-        attn_positional_bias="rope",
-        **kw,
-    )
-    dense = TrackingTransformer(attn_mode="dense", **cfg).eval()
-    sparse = TrackingTransformer(
-        attn_mode="sparse", max_neighbors=max_neighbors, **cfg
+        attn_mode="sparse",
+        max_neighbors=8,
     ).eval()
-    # sparse adds no parameters: it must accept the dense state dict verbatim
-    sparse.load_state_dict(dense.state_dict())
-    return dense, sparse
-
-
-def _valid_mask(padding_mask):
-    # (B, N, N) entries where both query and key are real tokens; padded
-    # rows/cols are masked downstream in the loss and need not match.
-    valid = ~padding_mask
-    return valid.unsqueeze(2) & valid.unsqueeze(1)
-
-
-def test_sparse_equals_dense_when_k_ge_n():
-    coords, padding_mask = _make_inputs(N=24)
-    dense, sparse = _build_pair(max_neighbors=128)  # K >= N
     with torch.no_grad():
-        a = dense(coords, padding_mask=padding_mask)
-        b = sparse(coords, padding_mask=padding_mask)
-    vv = _valid_mask(padding_mask)
-    assert torch.allclose(a[vv], b[vv], atol=1e-4), (a - b).abs()[vv].max().item()
-
-
-def test_sparse_distance_modes_parity():
-    for mode in ("v0", "v1"):
-        coords, padding_mask = _make_inputs(N=20, seed=1)
-        dense, sparse = _build_pair(max_neighbors=64, attn_dist_mode=mode)
-        with torch.no_grad():
-            a = dense(coords, padding_mask=padding_mask)
-            b = sparse(coords, padding_mask=padding_mask)
-        vv = _valid_mask(padding_mask)
-        assert torch.allclose(a[vv], b[vv], atol=1e-4), (
-            mode,
-            (a - b).abs()[vv].max().item(),
-        )
-
-
-def test_sparse_runs_with_small_k():
-    # K < N: should run and produce finite output (no parity expected)
-    coords, padding_mask = _make_inputs(N=40)
-    _, sparse = _build_pair(max_neighbors=8)
-    with torch.no_grad():
-        b = sparse(coords, padding_mask=padding_mask)
-    assert torch.isfinite(b).all()
+        a = model(coords, padding_mask=padding_mask)
+    assert torch.isfinite(a).all()

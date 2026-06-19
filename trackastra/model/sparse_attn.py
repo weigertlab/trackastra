@@ -54,22 +54,25 @@ def build_knn_index(
     padding_mask: torch.Tensor | None,
     cutoff_spatial: float,
     max_neighbors: int,
-    attn_dist_mode: str = "v0",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build the fixed kNN neighbour list and its additive distance bias.
+    """Build the fixed kNN neighbour list and its additive validity mask.
+
+    Unlike the dense path, no soft distance bias is applied: the kNN neighbourhood
+    already encodes spatial locality and rope encodes relative position, so the
+    hand-tuned ``exp(-dist)`` weighting is a redundant crutch that would just bias
+    attention toward the spatially-closest neighbour (not necessarily the match).
 
     Args:
         coords: (B, N, 1 + coord_dim), column 0 is time, the rest are spatial.
         padding_mask: (B, N) bool, True for padded tokens (ignored as keys).
         cutoff_spatial: maximum spatial distance for a valid neighbour (= max_dist).
         max_neighbors: K, the number of neighbour slots per node.
-        attn_dist_mode: "v0" or "v1", matching RelativePositionalAttention.
 
     Returns:
         nbr_idx: (B, N, K) int64 neighbour indices; slots beyond ``cutoff_spatial``
             or pointing at padded/absent keys are set to -1 (sentinel).
-        nbr_bias: (B, N, K) additive distance bias for each slot; sentinel slots
-            are set to a large negative value so softmax ignores them.
+        nbr_bias: (B, N, K) additive attention mask: 0 for real neighbours and a
+            large negative value for sentinel/padded slots so softmax ignores them.
     """
     B, N, _ = coords.shape
     K = min(max_neighbors, N)
@@ -89,16 +92,8 @@ def build_knn_index(
     # set sentinel index -1 wherever the slot exceeds the cutoff / is padded
     nbr_idx = idx.masked_fill(~valid, -1)
 
-    # additive distance bias, identical to the dense path for the kept entries
-    if attn_dist_mode == "v0":
-        full_dist = torch.cdist(coords, coords)  # (B, N, N), includes time
-        bias = torch.exp(-0.1 * torch.gather(full_dist, 2, idx))
-    elif attn_dist_mode == "v1":
-        bias = torch.exp(-5 * vals / cutoff_spatial)
-    else:
-        raise ValueError(f"Unknown attn_dist_mode {attn_dist_mode}")
-
-    nbr_bias = bias.masked_fill(~valid, _NEG)
+    # additive mask only: 0 for real neighbours, -1e3 for sentinel/padded slots
+    nbr_bias = torch.zeros_like(vals).masked_fill(~valid, _NEG)
     return nbr_idx, nbr_bias
 
 

@@ -449,7 +449,6 @@ class TrackingTransformer(torch.nn.Module):
                 padding_mask,
                 self.spatial_pos_cutoff,
                 self.max_neighbors,
-                self.attn_dist_mode,
             )
         elif self.encoder:
             a0 = self.encoder[0].attn
