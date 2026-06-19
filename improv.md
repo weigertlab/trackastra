@@ -137,6 +137,26 @@ Self-attention is forced on the diagonal so no query row is fully masked (a full
 row softmaxes to NaN; the `-1e3` float mask was finite/NaN-safe). The float `forward` dtype cast
 is now guarded to skip bool masks. Gate (`--attn_dist_mode none`): val_loss 0.237 @ 23.5 GB.
 
+## Step 8 - fix dropped cutoffs_start in PositionalEncoding  `[x]`  -> gated: val_loss 0.224
+
+Bug: `PositionalEncoding.__init__` bound `cutoff_start` in the zip but never passed it to
+`_pos_embed_fourier1d_init`, so `feat_embed` (built with `cutoffs_start=0.01`, intending max
+frequency 100) silently used the default 1 -> 100x too-low high-frequency resolution for the
+shape/intensity features (esp. `intensity_mean`, `border_dist` in [0,1]). One-line fix +
+regression test (`test_positional_encoding_cutoffs_start`). Only `feat_embed` was affected
+(pos_embed doesn't pass cutoffs_start; rope has its own init). Gate: val_loss 0.224 @ 24.0 GB.
+
+## Feature-extraction findings (not yet acted on)
+
+- No per-feature standardization (`data.py:1231`): raw features span [0,1]..~1000s; the Fourier
+  feat_embed absorbs scale (now that Step 8 restored its frequency range). log-scaling
+  inertia_tensor/area could still help. Lower priority.
+- `inertia_tensor` stored redundantly (symmetric: off-diagonals duplicated). 2D 4->3 unique,
+  3D 9->6 unique. Wasted feature/embedding dims, not corrupting.
+- `get_features` branch order (`wrfeat.py:561` vs `576`): `n_workers>0` checked before
+  `pretrained_feats`, so parallel + pretrained silently uses shallow features. Pretrained-only.
+- Backend parity (fast_regionprops vs skimage) verified clean in 2D+3D incl. key order. Not a bug.
+
 ## Backlog / ideas (not yet done)
 
 - Decoder self-attention (currently cross-attn only) - lets candidate associations coordinate.

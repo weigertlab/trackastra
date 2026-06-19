@@ -1,9 +1,26 @@
 import pytest
 import torch
 from trackastra.model import TrackingTransformer
+from trackastra.model.model_parts import PositionalEncoding
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
+
+
+def test_positional_encoding_cutoffs_start():
+    """cutoffs_start must control the highest init frequency (= 1/cutoff_start)."""
+    cutoff = 1000.0
+    default = PositionalEncoding(cutoffs=(cutoff,), n_pos=(8,))
+    small = PositionalEncoding(cutoffs=(cutoff,), n_pos=(8,), cutoffs_start=(0.01,))
+
+    f_default = default.freqs[0].flatten()
+    f_small = small.freqs[0].flatten()
+
+    # highest frequency = 1 / cutoff_start
+    assert torch.isclose(f_default.max(), torch.tensor(1.0), atol=1e-4)
+    assert torch.isclose(f_small.max(), torch.tensor(100.0), rtol=1e-3)
+    # cutoffs_start must actually change the init (regression for the dropped arg)
+    assert not torch.allclose(f_default, f_small)
 
 
 def test_model():

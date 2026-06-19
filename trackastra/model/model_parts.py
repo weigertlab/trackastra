@@ -50,7 +50,7 @@ class PositionalEncoding(nn.Module):
 
         assert len(cutoffs) == len(n_pos)
         self.freqs = nn.ParameterList([
-            nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2))
+            nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2, cutoff_start))
             for cutoff, n, cutoff_start in zip(cutoffs, n_pos, cutoffs_start)
         ])
 
