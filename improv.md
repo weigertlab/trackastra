@@ -78,7 +78,7 @@ O(N*K) instead of O(N^2) (~125x fewer entries at N=2000, K=16).
 
 - Precompute once per forward (mirrors the shared-mask precompute in `model.py:403-409`):
   from `coords`+`padding_mask`, take the top-K nearest neighbors -> `nbr_idx (B,N,K)`.
-  `K = max_neighbors` (new config, **default 16**). Any slot whose neighbor distance exceeds
+  `K = max_neighbors` (new config, **default 64**). Any slot whose neighbor distance exceeds
   `max_dist` (= `cutoff_spatial`) gets `nbr_idx = -1` (sentinel), as do padded slots; nodes can
   thus have fewer than K real neighbors. Mask is `nbr_valid = nbr_idx >= 0`; gather uses
   `nbr_idx.clamp(min=0)` and softmax sets invalid slots to -inf.

@@ -311,7 +311,7 @@ class TrackingTransformer(torch.nn.Module):
         ] = "quiet_softmax",
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
-        max_neighbors: int = 16,
+        max_neighbors: int = 64,
     ):
         super().__init__()
 
