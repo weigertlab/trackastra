@@ -1495,6 +1495,11 @@ def collate_sequence_padding(batch):
         assoc = a0.new_zeros((len(batch), n_max_len, n_max_len))
         for i, x in enumerate(batch):
             n = x["assoc_matrix"].shape[0]
+            if n > n_max_len:
+                raise ValueError(
+                    f"assoc_matrix size {n} exceeds batch max token count"
+                    f" {n_max_len} (must match len(coords))"
+                )
             assoc[i, :n, :n] = x["assoc_matrix"]
         batch_new["assoc_matrix"] = assoc
 
