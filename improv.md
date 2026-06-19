@@ -174,6 +174,19 @@ bit-identical (`torch.equal`). collate Nmax=2048: 57 -> 44 ms/batch; 1-worker tr
 10 -> 13.6 it/s. Remaining collate cost is the unavoidable 537 MB copy + per-item lz4 decompress
 (could shrink by keeping the GT assoc sparse / building dense on-GPU - larger change, not done).
 
+## Step 11 - throttle grad_norm + batch validation  `[x]`
+
+From the latest run's wandb GPU metrics: training util is 84-99% (GPU-bound, healthy);
+the 33-55% dips are the validation loop at batch_size=1. So the loader/loss path is fine.
+Two worker-independent wins:
+- grad_norm: was computed (full-model per-parameter sweep + sync) and logged EVERY step.
+  Now only on the first batch of every Nth epoch (`--grad_log_every_n_epochs`, default 10).
+- validation batch size: was hard-coded to 1 (GPU-starved val epochs). Now uses
+  `args.batch_size`. Also fixed `find_val_batch` which asserted bs==1. Note: batched val
+  changes the val_loss reduction slightly (prefactor-weighted within batch vs equal per-sample
+  mean at bs=1); val_loss stayed ~0.217, consistent.
+Gate: train 16.3 it/s, val_loss 0.217.
+
 ## Feature-extraction findings (not yet acted on)
 
 - No per-feature standardization (`data.py:1231`): raw features span [0,1]..~1000s; the Fourier

@@ -190,8 +190,10 @@ class WrappedLightningModule(pl.LightningModule):
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
         debug_dir:str=None,
+        grad_log_every_n_epochs: int = 10,
     ):
         super().__init__()
+        self.grad_log_every_n_epochs = grad_log_every_n_epochs
 
         self.model = model
         self.causal_norm = causal_norm
@@ -331,8 +333,15 @@ class WrappedLightningModule(pl.LightningModule):
                 _batch['loss'] = loss.item()
                 torch.save(_batch, _out)
             
-        _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
-        self.log("grad_norm", _norm, on_step=True, prog_bar=False, sync_dist=True)
+        # grad_norm sweeps every parameter's gradient (many small ops + a sync),
+        # so only compute/log it on the first batch of every Nth epoch.
+        if (
+            self.grad_log_every_n_epochs > 0
+            and batch_idx == 0
+            and self.current_epoch % self.grad_log_every_n_epochs == 0
+        ):
+            _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
+            self.log("grad_norm", _norm, on_step=True, prog_bar=False, sync_dist=True)
 
         self.log(
             "train_loss",
@@ -672,20 +681,12 @@ def find_val_batch(loader_val, n_gpus):
     n_divs = []
     n_dets = 0
     for batch in batches_val[: len(batches_val) // n_gpus]:
-
-        _n_divs = (
-            (
-                blockwise_sum(batch["assoc_matrix"][0], batch["timepoints"][0]).max(
-                    dim=0
-                )[0]
-                == 2
-            )
-            .sum()
-            .item()
-        )
+        # works for any val batch size: sum divisions over every sample in the batch
+        _n_divs = 0
+        for am, tp in zip(batch["assoc_matrix"], batch["timepoints"]):
+            _n_divs += int((blockwise_sum(am, tp).max(dim=0)[0] == 2).sum())
         n_divs.append(_n_divs)
-        assert len(batch["timepoints"]) == 1
-        _n_dets = len(batch["timepoints"][0])
+        _n_dets = int((batch["timepoints"] >= 0).sum())
         n_dets += _n_dets
         logger.debug(f"{_n_divs=}, {_n_dets=}")
 
@@ -812,6 +813,7 @@ def train(args):
             tracking_frequency=args.tracking_frequency,
             batch_val_tb_idx=0,
             div_upweight=args.div_upweight,
+                grad_log_every_n_epochs=args.grad_log_every_n_epochs,
         )
         dummy_model_lightning.to(device)
         preallocate_memory(
@@ -922,7 +924,7 @@ def train(args):
 
     loader_val = DataLoader(
         datasets["val"],
-        batch_size=1,
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=0 if args.num_workers == 0 else max(1, args.num_workers // 2),
         **common_loader_args,
@@ -990,6 +992,7 @@ def train(args):
         tracking_frequency=args.tracking_frequency,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
+                grad_log_every_n_epochs=args.grad_log_every_n_epochs,
         debug_dir=args.debug_dir,
     )
 
@@ -1009,6 +1012,7 @@ def train(args):
                 tracking_frequency=args.tracking_frequency,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
+                grad_log_every_n_epochs=args.grad_log_every_n_epochs,
             )
         else:
             logging.warning(f"No checkpoint found in {logdir}")
@@ -1165,6 +1169,12 @@ def parse_train_args():
         default="quiet_softmax",
     )
     parser.add_argument("--div_upweight", type=float, default=2)
+    parser.add_argument(
+        "--grad_log_every_n_epochs",
+        type=int,
+        default=10,
+        help="compute/log the (expensive) full-model grad norm only every N epochs",
+    )
 
     parser.add_argument("--augment", type=int, default=3)
     parser.add_argument("--tracking_frequency", type=int, default=-1)
