@@ -112,6 +112,14 @@ Re-scoped (the two originally-listed items did not hold up):
 
 ---
 
+## Known break (accepted)
+
+The shipped pretrained models (`ctc`, `general_2d`) are **no longer compatible** with this
+branch: Step 1's pre-norm residual fix changes the forward pass, so their weights (trained under
+the old residual) produce degraded tracking. `tests/test_pretrained.py` integration tests fail
+as a result. Accepted - models will be retrained later. (`test_train.py` error is an unrelated
+network download failure.)
+
 ## Done (already on `improvements`)
 
 - improv #2 (precompute masks): the additive attn mask is built once and shared across layers
