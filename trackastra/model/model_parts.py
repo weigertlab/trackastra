@@ -72,7 +72,7 @@ class MultiChannelPairHead(nn.Module):
         M = h_dst.shape[1]
         q = F.normalize(self.q(h_src).view(B, N, self.channels, D), dim=-1)
         k = F.normalize(self.k(h_dst).view(B, M, self.channels, D), dim=-1)
-        scale = self.logit_scale.exp().clamp(max=100.0)  # see TrackingTransformer head
+        scale = self.logit_scale.exp().clamp(max=15.0)  # see TrackingTransformer head
         z = scale * torch.einsum("bnkd,bmkd->bnmk", q, k)  # (B, N, M, channels)
         return self.mlp(z).squeeze(-1)
 

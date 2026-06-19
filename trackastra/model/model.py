@@ -495,7 +495,13 @@ class TrackingTransformer(torch.nn.Module):
             if self.logit_norm:
                 x = F.normalize(x, dim=-1)
                 y = F.normalize(y, dim=-1)
-                scale = self.logit_scale.exp().clamp(max=100.0)
+                # clamp the learned temperature just above its init (1/0.07 =
+                # 14.3): BCE always rewards more sharpening, so if left free this
+                # climbs until the softmax becomes a cliff and training diverges
+                # (loss creeps up over epochs, then NaNs). T~14 already saturates
+                # both BCE and the blockwise softmax, so 15 gives a hair of room
+                # without the runaway.
+                scale = self.logit_scale.exp().clamp(max=15.0)
                 A = scale * torch.einsum("bnd,bmd->bnm", x, y)
             else:
                 A = torch.einsum("bnd,bmd->bnm", x, y)

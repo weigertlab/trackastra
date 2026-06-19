@@ -306,8 +306,28 @@ class WrappedLightningModule(pl.LightningModule):
         else:
             return None
 
+    def on_before_optimizer_step(self, optimizer):
+        # Log the (pre-clip) gradient norm here, where gradients actually exist:
+        # the backward pass has run by this hook. Computing it in training_step
+        # ran before backward, so .grad was None and grad_norm logged 0. The
+        # per-parameter sweep is a sync, so throttle to every Nth epoch.
+        if (
+            self.grad_log_every_n_epochs > 0
+            and self.current_epoch % self.grad_log_every_n_epochs == 0
+        ):
+            _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
+            self.log(
+                "grad_norm", _norm, on_step=True, on_epoch=False,
+                prog_bar=False, sync_dist=True,
+            )
+
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-5)
+        # eps=1e-6 (vs the 1e-8 default) damps AdamW's adaptive step lr/(sqrt(v)+eps)
+        # only once gradients collapse near convergence, taming the late-training
+        # kicks without the 1e-4 floor that throttled normal-regime learning.
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=1e-5, eps=1e-6
+        )
         return dict(
             optimizer=optimizer,
             lr_scheduler=WarmupCosineLRScheduler(
@@ -332,16 +352,6 @@ class WrappedLightningModule(pl.LightningModule):
                 _batch = batch.copy()
                 _batch['loss'] = loss.item()
                 torch.save(_batch, _out)
-
-        # grad_norm sweeps every parameter's gradient (many small ops + a sync),
-        # so only compute/log it on the first batch of every Nth epoch.
-        if (
-            self.grad_log_every_n_epochs > 0
-            and batch_idx == 0
-            and self.current_epoch % self.grad_log_every_n_epochs == 0
-        ):
-            _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
-            self.log("grad_norm", _norm, on_step=True, prog_bar=False, sync_dist=True)
 
         self.log(
             "train_loss",
@@ -1042,7 +1052,7 @@ def train(args):
         strategy=strategy,
         devices=n_gpus,
         gradient_clip_val=1.0,
-        precision="16-mixed" if args.mixedp else 32,
+        precision="bf16-mixed" if args.mixedp else 32,
         logger=train_logger,
         default_root_dir=logdir if not args.dry else None,
         num_nodes=1,
