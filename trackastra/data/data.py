@@ -1487,15 +1487,16 @@ def collate_sequence_padding(batch):
     ):  # keys that are None or not present in the input dicts are set to None
         batch_new[k] = None
     if "assoc_matrix" in batch[0]:
-        batch_new["assoc_matrix"] = torch.stack(
-            [
-                pad_tensor(
-                    pad_tensor(x["assoc_matrix"], n_max_len, dim=0), n_max_len, dim=1
-                )
-                for x in batch
-            ],
-            dim=0,
-        )
+        # Preallocate the padded (B, Nmax, Nmax) buffer once and block-copy each
+        # sample in, instead of pad_tensor(pad_tensor(...)) + stack (which makes
+        # ~3x transient copies per sample). The dense assoc matrix dominates
+        # collate cost at large windows (O(B*Nmax^2)).
+        a0 = batch[0]["assoc_matrix"]
+        assoc = a0.new_zeros((len(batch), n_max_len, n_max_len))
+        for i, x in enumerate(batch):
+            n = x["assoc_matrix"].shape[0]
+            assoc[i, :n, :n] = x["assoc_matrix"]
+        batch_new["assoc_matrix"] = assoc
 
     # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
     pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)

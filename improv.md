@@ -163,6 +163,17 @@ Result: 10 -> 16.5 it/s (+65%), step 0.35 -> 0.26 min, val_loss 0.213. GPU mem 2
 (batched masks/scatter buffers); still fits batch 32. Per-sample functions kept for the inference
 path (model.normalize_output, data.py).
 
+## Step 10 - preallocate collate assoc buffer  `[x]`  -> 1-worker 10 -> 13.6 it/s
+
+Per-batch collate (not per-item) dominates the loader at large windows: it builds a dense
+(B, Nmax, Nmax) association tensor (537 MB at Nmax=2048), so 1 worker can't overlap it behind
+the GPU step (=> 1 worker 10 it/s vs 4 workers 16 it/s). Easiest fix: preallocate one
+(B, Nmax, Nmax) zero buffer and block-copy each sample's [:n,:n] in, instead of
+`pad_tensor(pad_tensor(...)) + torch.stack` (~3x transient copies/sample). Verified
+bit-identical (`torch.equal`). collate Nmax=2048: 57 -> 44 ms/batch; 1-worker training
+10 -> 13.6 it/s. Remaining collate cost is the unavoidable 537 MB copy + per-item lz4 decompress
+(could shrink by keeping the GT assoc sparse / building dense on-GPU - larger change, not done).
+
 ## Feature-extraction findings (not yet acted on)
 
 - No per-feature standardization (`data.py:1231`): raw features span [0,1]..~1000s; the Fourier
