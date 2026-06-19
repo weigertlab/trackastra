@@ -803,6 +803,7 @@ def train(args):
             attn_dist_mode=args.attn_dist_mode,
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
+            logit_norm=args.logit_norm,
             causal_norm=args.causal_norm,
         )
 
@@ -980,6 +981,7 @@ def train(args):
             attn_dist_mode=args.attn_dist_mode,
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
+            logit_norm=args.logit_norm,
             causal_norm=args.causal_norm,
         )
 
@@ -1144,6 +1146,7 @@ def parse_train_args():
         "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
     )
     parser.add_argument("--max_neighbors", type=int, default=64)
+    parser.add_argument("--logit_norm", type=str2bool, default=True)
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")

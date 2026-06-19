@@ -1,11 +1,13 @@
 """Transformer class."""
 
 import logging
+import math
 from collections import OrderedDict
 from pathlib import Path
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 
 # from torch_geometric.nn import GATv2Conv
 import yaml
@@ -312,6 +314,7 @@ class TrackingTransformer(torch.nn.Module):
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
         max_neighbors: int = 64,
+        logit_norm: bool = True,
     ):
         super().__init__()
 
@@ -333,6 +336,7 @@ class TrackingTransformer(torch.nn.Module):
             attn_dist_mode=attn_dist_mode,
             attn_mode=attn_mode,
             max_neighbors=max_neighbors,
+            logit_norm=logit_norm,
         )
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
@@ -382,6 +386,14 @@ class TrackingTransformer(torch.nn.Module):
 
         self.head_x = FeedForward(d_model)
         self.head_y = FeedForward(d_model)
+
+        # association readout: L2-normalize the head embeddings and scale the
+        # cosine-similarity logits by a learned temperature (CLIP-style). This
+        # decouples logit magnitude from d_model, giving better-calibrated and
+        # more stable associations than a raw, unscaled dot product.
+        self.logit_norm = logit_norm
+        if logit_norm:
+            self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
 
         if feat_embed_per_dim > 1:
             self.feat_embed = PositionalEncoding(
@@ -466,7 +478,13 @@ class TrackingTransformer(torch.nn.Module):
         y = self.head_y(y)
 
         # outer product is the association matrix (logits)
-        A = torch.einsum("bnd,bmd->bnm", x, y)
+        if self.logit_norm:
+            x = F.normalize(x, dim=-1)
+            y = F.normalize(y, dim=-1)
+            scale = self.logit_scale.exp().clamp(max=100.0)
+            A = scale * torch.einsum("bnd,bmd->bnm", x, y)
+        else:
+            A = torch.einsum("bnd,bmd->bnm", x, y)
 
         return A
 
