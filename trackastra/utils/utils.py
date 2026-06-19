@@ -298,6 +298,112 @@ def blockwise_causal_norm(
     return res
 
 
+def blockwise_sum_batched(
+    A: torch.Tensor,
+    timepoints: torch.Tensor,
+    dim: int = -2,
+    reduce: str = "sum",
+):
+    """Batched, loop-free equivalent of ``blockwise_sum`` over a batch dimension.
+
+    Args:
+        A: (B, N, N) tensor.
+        timepoints: (B, N) tensor; -1 marks padded/invalid tokens.
+        dim: -2/0 reduces over rows (within each row's timepoint block), -1/1 over
+            columns. Matches the per-sample ``blockwise_sum`` convention.
+        reduce: "sum" or "amax".
+
+    Returns a (B, N, N) tensor; entry (b, i, j) holds the per-block reduction so the
+    result is broadcast back to the original shape. Numerically identical to looping
+    ``blockwise_sum`` over the batch (incl. the zeros-initialised amax, where the
+    reduction is ``max(0, block_max)``), but without per-sample Python overhead or
+    data-dependent CPU<->GPU syncs.
+    """
+    B, N, _ = A.shape
+    rows = dim in (0, -2)
+
+    if reduce == "sum":
+        # same-timepoint membership mask M[b,i,j] = (t_i == t_j); padded tokens
+        # (t=-1) group together exactly as the original block 0.
+        M = (timepoints.unsqueeze(2) == timepoints.unsqueeze(1)).to(A.dtype)
+        # rows: M @ A ; cols: A @ M (M is symmetric)
+        return torch.bmm(M, A) if rows else torch.bmm(A, M)
+
+    if reduce != "amax":
+        raise ValueError(f"Unknown reduce {reduce}")
+
+    # amax: replicate the original zeros-initialised scatter_reduce (=> max(0, .)).
+    # Remap timepoints to dense block ids: valid -> 1.., padding -> 0 (own block),
+    # matching ts = clamp(t - min_valid_t + 1, min=0). K = N + 1 bounds the ids
+    # (<= #distinct timepoints + 1) without a data-dependent sync.
+    t_valid = timepoints.masked_fill(timepoints < 0, torch.iinfo(torch.int64).max)
+    min_t = t_valid.min(dim=1, keepdim=True).values
+    ts = torch.clamp(timepoints - min_t + 1, min=0).long()
+    K = N + 1
+
+    if rows:
+        index = ts.unsqueeze(-1).expand(B, N, N)  # block id along the row dim
+        out = A.new_zeros((B, K, N))
+        out.scatter_reduce_(1, index, A, reduce="amax", include_self=True)
+        return out.gather(1, index)
+    else:
+        index = ts.unsqueeze(1).expand(B, N, N)  # block id along the col dim
+        out = A.new_zeros((B, N, K))
+        out.scatter_reduce_(2, index, A, reduce="amax", include_self=True)
+        return out.gather(2, index)
+
+
+def blockwise_causal_norm_batched(
+    A: torch.Tensor,
+    timepoints: torch.Tensor,
+    mode: str = "quiet_softmax",
+    mask_invalid: torch.BoolTensor = None,
+    eps: float = 1e-6,
+):
+    """Batched, loop-free equivalent of ``blockwise_causal_norm``.
+
+    Args:
+        A: (B, N, N) logits.
+        timepoints: (B, N); -1 marks padded tokens.
+        mode: "linear", "softmax" or "quiet_softmax".
+        mask_invalid: (B, N, N) bool, entries excluded from the normalization.
+
+    Numerically matches looping ``blockwise_causal_norm`` over the batch.
+    """
+    A = A.clone()
+
+    if mode in ("softmax", "quiet_softmax"):
+        if mask_invalid is not None:
+            A[mask_invalid] = -torch.inf
+        with torch.no_grad():
+            ma0 = blockwise_sum_batched(A, timepoints, dim=0, reduce="amax")
+            ma1 = blockwise_sum_batched(A, timepoints, dim=1, reduce="amax")
+        u0 = torch.exp(A - ma0)
+        u1 = torch.exp(A - ma1)
+    elif mode == "linear":
+        A = torch.sigmoid(A)
+        if mask_invalid is not None:
+            A[mask_invalid] = 0
+        u0, u1 = A, A
+        ma0 = ma1 = 0
+    else:
+        raise NotImplementedError(f"Mode {mode} not implemented")
+
+    u0_sum = blockwise_sum_batched(u0, timepoints, dim=0, reduce="sum") + eps
+    u1_sum = blockwise_sum_batched(u1, timepoints, dim=1, reduce="sum") + eps
+
+    if mode == "quiet_softmax":
+        u0_sum = u0_sum + torch.exp(-ma0)
+        u1_sum = u1_sum + torch.exp(-ma1)
+
+    # mask0[b,i,j] = t_j > t_i (causal: child later than parent)
+    mask0 = timepoints.unsqueeze(1) > timepoints.unsqueeze(2)
+    mask1 = ~mask0
+
+    res = mask0 * u0 / u0_sum + mask1 * u1 / u1_sum
+    return torch.clamp(res, 0, 1)
+
+
 def normalize_tensor(x: torch.Tensor, dim: int | None = None, eps: float = 1e-8):
     if dim is None:
         dim = tuple(range(x.ndim))

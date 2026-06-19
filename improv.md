@@ -146,6 +146,23 @@ shape/intensity features (esp. `intensity_mean`, `border_dist` in [0,1]). One-li
 regression test (`test_positional_encoding_cutoffs_start`). Only `feat_embed` was affected
 (pos_embed doesn't pass cutoffs_start; rope has its own init). Gate: val_loss 0.224 @ 24.0 GB.
 
+## Step 9 - batch the blockwise loss ops (GPU util fix)  `[x]`  -> gated: 10 -> 16.5 it/s
+
+Diagnosis: at batch 32 the loader is NOT the bottleneck (291 batches/s with 10 workers, 110/s
+single-thread, 0.11 ms/item, 3.3 ms collate - ~29x the ~10 batches/s training needs). The 50%
+GPU util came from the per-sample Python loops in `_common_step` (`blockwise_causal_norm` x B,
+`blockwise_sum` x 2B), each firing many tiny kernels + data-dependent CPU<->GPU syncs
+(`timepoints[timepoints>=0]`, `blocks`-as-shape) -> GPU stalls between launches.
+
+Fix: added `blockwise_sum_batched` / `blockwise_causal_norm_batched` (utils.py) operating on the
+whole (B,N,N) batch. Sum = bmm with a same-timepoint mask (exact integers for the 0/1 GT matrix,
+so `block_sum==2` track-type tests stay exact); amax = batched `scatter_reduce` replicating the
+original zeros-init (`max(0, .)`, padded -inf -> 0, no NaN). Validated bit-for-bit against the
+per-sample loop (`tests/test_blockwise_batched.py`, all modes + amax + integer exactness, equal_nan).
+Result: 10 -> 16.5 it/s (+65%), step 0.35 -> 0.26 min, val_loss 0.213. GPU mem 24 -> 28.8 GB
+(batched masks/scatter buffers); still fits batch 32. Per-sample functions kept for the inference
+path (model.normalize_output, data.py).
+
 ## Feature-extraction findings (not yet acted on)
 
 - No per-feature standardization (`data.py:1231`): raw features span [0,1]..~1000s; the Fourier

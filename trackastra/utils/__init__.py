@@ -2,7 +2,9 @@
 
 from .utils import (
     blockwise_causal_norm,
+    blockwise_causal_norm_batched,
     blockwise_sum,
+    blockwise_sum_batched,
     none_or_path,
     none_or_str,
     normalize,

@@ -45,7 +45,9 @@ from trackastra.data.distributed import BalancedBatchSampler, BalancedDataModule
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,
+    blockwise_causal_norm_batched,
     blockwise_sum,
+    blockwise_sum_batched,
     normalize,
     preallocate_memory,
     random_label_cmap,
@@ -234,14 +236,11 @@ class WrappedLightningModule(pl.LightningModule):
         loss = self.criterion(A_pred, A)
 
         if self.causal_norm != "none":
-            # TODO speedup: I could softmax only the part of the matrix (upper triangular) that is not masked out
-            A_pred_soft = torch.stack(
-                [
-                    blockwise_causal_norm(
-                        _A, _t, mode=self.causal_norm, mask_invalid=_m
-                    )
-                    for _A, _t, _m in zip(A_pred, timepoints, mask_invalid)
-                ]
+            # Batched (loop-free) blockwise causal softmax over the whole batch:
+            # avoids the per-sample Python loop and its data-dependent CPU<->GPU
+            # syncs that were starving the GPU.
+            A_pred_soft = blockwise_causal_norm_batched(
+                A_pred, timepoints, mode=self.causal_norm, mask_invalid=mask_invalid
             )
             with torch.cuda.amp.autocast(enabled=False):
                 if len(A) > 0:
@@ -254,12 +253,8 @@ class WrappedLightningModule(pl.LightningModule):
 
         # Reweighting does not need gradients
         with torch.no_grad():
-            block_sum1 = torch.stack(
-                [blockwise_sum(A, t, dim=-1) for A, t in zip(A, timepoints)], 0
-            )
-            block_sum2 = torch.stack(
-                [blockwise_sum(A, t, dim=-2) for A, t in zip(A, timepoints)], 0
-            )
+            block_sum1 = blockwise_sum_batched(A, timepoints, dim=-1, reduce="sum")
+            block_sum2 = blockwise_sum_batched(A, timepoints, dim=-2, reduce="sum")
             block_sum = A * (block_sum1 + block_sum2)
 
             normal_tracks = block_sum == 2
