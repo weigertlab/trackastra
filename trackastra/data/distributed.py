@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import math
 import pickle
 from collections.abc import Iterable
 from copy import deepcopy
@@ -131,14 +132,14 @@ class BalancedBatchSampler(BatchSampler):
 
     def sample_batches(self, idx: Iterable[int]):
         # we will split the indices into pools of size n_pool
+        idx = np.asarray(tuple(idx), dtype=int)
         num_samples = self.num_samples if self.num_samples is not None else len(idx)
+        if num_samples <= 0 or len(idx) == 0:
+            return []
         # sample from the indices with replacement and given probabilites
         idx = np.random.choice(idx, num_samples, replace=True, p=self.get_probs(idx))
 
-        n_pool = min(
-            self.n_pool * self.batch_size,
-            (len(idx) // self.batch_size) * self.batch_size,
-        )
+        n_pool = max(self.batch_size, self.n_pool * self.batch_size)
 
         batches = []
         for i in range(0, len(idx), n_pool):
@@ -151,10 +152,9 @@ class BalancedBatchSampler(BatchSampler):
             np.random.shuffle(jj)
 
             for j in jj:
-                # dont drop_last, as this leads to a lot of lightning problems....
-                # if j + self.batch_size > len(idx_pool):  # assume drop_last=True
-                #     continue
                 batch = idx_pool[j : j + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
                 batches.append(batch)
         return batches
 
@@ -164,10 +164,10 @@ class BalancedBatchSampler(BatchSampler):
         return iter(batches)
 
     def __len__(self):
-        if self.num_samples is not None:
-            return self.num_samples // self.batch_size
-        else:
-            return len(self.n_objects) // self.batch_size
+        n = self.num_samples if self.num_samples is not None else len(self.n_objects)
+        if self.drop_last:
+            return n // self.batch_size
+        return math.ceil(n / self.batch_size)
 
 
 class BalancedDistributedSampler(DistributedSampler):
@@ -176,18 +176,24 @@ class BalancedDistributedSampler(DistributedSampler):
         dataset: Dataset,
         batch_size: int,
         n_pool: int,
-        num_samples: int,
+        num_samples: int | None,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         *args,
         **kwargs,
     ) -> None:
+        requested_num_samples = num_samples
         super().__init__(dataset=dataset, *args, drop_last=True, **kwargs)
+        per_rank_samples = (
+            self.num_samples
+            if requested_num_samples is None
+            else max(1, math.ceil(requested_num_samples / self.num_replicas))
+        )
         self._balanced_batch_sampler = BalancedBatchSampler(
             dataset,
             batch_size=batch_size,
             n_pool=n_pool,
-            num_samples=max(1, num_samples // self.num_replicas),
+            num_samples=per_rank_samples,
             weight_by_ndivs=weight_by_ndivs,
             weight_by_dataset=weight_by_dataset,
         )
@@ -216,6 +222,8 @@ class BalancedDataModule(LightningDataModule):
         dataset_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
+        train_dataset_kwargs: dict | None = None,
+        val_dataset_kwargs: dict | None = None,
     ):
         super().__init__()
         self.input_train = input_train
@@ -224,14 +232,26 @@ class BalancedDataModule(LightningDataModule):
         self.augment = augment
         self.distributed = distributed
         self.dataset_kwargs = dataset_kwargs
+        self.train_dataset_kwargs = train_dataset_kwargs or {}
+        self.val_dataset_kwargs = val_dataset_kwargs or {}
         self.sampler_kwargs = sampler_kwargs
         self.loader_kwargs = loader_kwargs
+
+    def _kwargs_for_split(self, split: str) -> dict:
+        kwargs = self.dataset_kwargs.copy()
+        kwargs.update(
+            self.train_dataset_kwargs if split == "train" else self.val_dataset_kwargs
+        )
+        kwargs["augment"] = self.augment if split == "train" else 0
+        return kwargs
 
     def prepare_data(self):
         """Loads and caches the datasets if not already done.
 
         Running on the main CPU process.
         """
+        if self.cachedir is None:
+            return
         CTCData = cache_class(self.cachedir)
         datasets = dict()
         for split, inps in zip(
@@ -243,8 +263,7 @@ class BalancedDataModule(LightningDataModule):
             datasets[split] = torch.utils.data.ConcatDataset(
                 CTCData(
                     root=Path(inp),
-                    augment=self.augment if split == "train" else 0,
-                    **self.dataset_kwargs,
+                    **self._kwargs_for_split(split),
                 )
                 for inp in inps
             )
@@ -267,8 +286,7 @@ class BalancedDataModule(LightningDataModule):
             self.datasets[split] = torch.utils.data.ConcatDataset(
                 CTCData(
                     root=Path(inp),
-                    augment=self.augment if split == "train" else 0,
-                    **self.dataset_kwargs,
+                    **self._kwargs_for_split(split),
                 )
                 for inp in inps
             )
@@ -308,7 +326,10 @@ class BalancedDataModule(LightningDataModule):
     def val_dataloader(self):
         val_loader_kwargs = deepcopy(self.loader_kwargs)
         val_loader_kwargs["persistent_workers"] = False
-        val_loader_kwargs["num_workers"] = 1
+        num_workers = val_loader_kwargs["num_workers"]
+        val_loader_kwargs["num_workers"] = (
+            0 if num_workers == 0 else max(1, num_workers // 2)
+        )
         return DataLoader(
             self.datasets["val"],
             shuffle=False,

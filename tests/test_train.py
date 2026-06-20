@@ -4,11 +4,146 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import torch
+from scripts.train import _reduce_decision_loss, _reduce_matrix_loss
+from torch.utils.data import ConcatDataset, Dataset
+from trackastra.data import distributed
+from trackastra.data.distributed import (
+    BalancedBatchSampler,
+    BalancedDataModule,
+    BalancedDistributedSampler,
+)
 
 # Mark all tests in this module as requiring training dependencies
 pytestmark = pytest.mark.train
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+class _SamplerDataset(Dataset):
+    def __init__(self, n=7):
+        self.n = n
+        self.n_objects = tuple(range(1, n + 1))
+        self.n_divs = tuple(i % 3 for i in range(n))
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, index):
+        return index
+
+
+def _decision_mask(timepoints):
+    dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+    valid = timepoints >= 0
+    mask = (dt == 1) & valid.unsqueeze(1) & valid.unsqueeze(2)
+    return dt, mask
+
+
+def test_decision_loss_does_not_dilute_positive_with_more_candidates():
+    timepoints = torch.tensor([[0, 1, -1, -1], [0, 0, 0, 1]])
+    dt, mask = _decision_mask(timepoints)
+    pair_loss = torch.zeros((2, 4, 4))
+    pair_loss[0, 0, 1] = 4
+    pair_loss[1, 0, 3] = 4
+
+    loss = _reduce_decision_loss(pair_loss, mask, dt, delta_cutoff=1)
+
+    assert loss.item() == pytest.approx(4)
+
+
+def test_decision_loss_averages_samples_equally():
+    timepoints = torch.tensor([[0, 1, -1], [0, 1, 1]])
+    dt, mask = _decision_mask(timepoints)
+    pair_loss = torch.zeros((2, 3, 3))
+    pair_loss[0, 0, 1] = 2
+    pair_loss[1, 0, 1:] = 4
+
+    loss = _reduce_decision_loss(pair_loss, mask, dt, delta_cutoff=1)
+
+    assert loss.item() == pytest.approx(3)
+
+
+def test_matrix_loss_preserves_original_reduction():
+    timepoints = torch.tensor([[0, 1, -1], [0, 1, 1]])
+    _, mask = _decision_mask(timepoints)
+    pair_loss = torch.zeros((2, 3, 3))
+    pair_loss[0, 0, 1] = 2
+    pair_loss[1, 0, 1:] = 4
+    eps = torch.finfo(torch.float16).eps
+    counts = mask.sum(dim=(1, 2))
+    per_sample = pair_loss.sum(dim=(1, 2)) / (counts + eps)
+    weights = counts.pow(0.2)
+    expected = (per_sample * weights / (weights.sum() + eps)).sum()
+
+    loss = _reduce_matrix_loss(pair_loss, mask)
+
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_balanced_batch_sampler_partial_batch():
+    dataset = ConcatDataset([_SamplerDataset(7), _SamplerDataset(6)])
+    sampler = BalancedBatchSampler(dataset, batch_size=4, n_pool=2, num_samples=10)
+
+    batches = list(sampler)
+
+    assert len(sampler) == len(batches) == 3
+    assert sorted(len(batch) for batch in batches) == [2, 4, 4]
+
+
+def test_balanced_distributed_sampler_supports_all_samples():
+    dataset = ConcatDataset([_SamplerDataset(7), _SamplerDataset(6)])
+    sampler = BalancedDistributedSampler(
+        dataset,
+        batch_size=4,
+        n_pool=2,
+        num_samples=None,
+        num_replicas=2,
+        rank=0,
+    )
+
+    assert len(list(sampler)) == len(sampler)
+
+
+def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
+    calls = []
+
+    class RecordingDataset(_SamplerDataset):
+        def __init__(self, root, **kwargs):
+            super().__init__()
+            calls.append((Path(root), kwargs))
+
+    monkeypatch.setattr(distributed, "CTCData", RecordingDataset)
+    module = BalancedDataModule(
+        input_train=["train"],
+        input_val=["val"],
+        cachedir=None,
+        augment=3,
+        distributed=False,
+        dataset_kwargs={"features": "wrfeat"},
+        train_dataset_kwargs={"slice_pct": (0.0, 0.8), "crop_size": (64, 64)},
+        val_dataset_kwargs={"slice_pct": (0.8, 1.0), "crop_size": None},
+        sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
+        loader_kwargs={"batch_size": 2, "num_workers": 0},
+    )
+
+    module.prepare_data()
+    assert calls == []
+
+    module.setup("fit")
+
+    assert calls[0][1] == {
+        "features": "wrfeat",
+        "slice_pct": (0.0, 0.8),
+        "crop_size": (64, 64),
+        "augment": 3,
+    }
+    assert calls[1][1] == {
+        "features": "wrfeat",
+        "slice_pct": (0.8, 1.0),
+        "crop_size": None,
+        "augment": 0,
+    }
 
 
 def download_gt_data(url: str, data_dir: str | Path):

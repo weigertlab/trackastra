@@ -1,7 +1,6 @@
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import pickle
 from types import SimpleNamespace
 
 import torch
@@ -10,8 +9,6 @@ import torch.multiprocessing
 # torch.multiprocessing.set_sharing_strategy("file_system")
 torch.set_float32_matmul_precision("medium")
 
-import hashlib
-import json
 import logging
 import sys
 import warnings
@@ -30,18 +27,17 @@ import wandb
 import yaml
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.profilers import PyTorchProfiler
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.utilities import grad_norm
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from skimage.morphology import binary_dilation, disk
 from torch.optim.lr_scheduler import LRScheduler
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
     CTCData,
     collate_sequence_padding,
 )
-from trackastra.data.distributed import BalancedBatchSampler, BalancedDataModule
+from trackastra.data.distributed import BalancedDataModule
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_norm,
@@ -61,7 +57,13 @@ logger = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+device = torch.device(
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
 np.seterr(all="ignore")
 
 
@@ -69,6 +71,46 @@ def _process_memory():
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     return mem_info.rss
+
+
+def _reduce_decision_loss(
+    loss: torch.Tensor,
+    mask: torch.Tensor,
+    dt: torch.Tensor,
+    delta_cutoff: int,
+) -> torch.Tensor:
+    """Average candidate losses per association decision, then per sample."""
+    if delta_cutoff < 1:
+        return loss.sum() * 0
+
+    decision_losses = []
+    decision_valid = []
+    mask = mask.bool()
+    for delta in range(1, delta_cutoff + 1):
+        candidate_mask = mask & (dt == delta)
+        # For a fixed child and delta, rows are the candidate parents in one frame.
+        decision_losses.append((loss * candidate_mask).sum(dim=1))
+        decision_valid.append(candidate_mask.any(dim=1))
+
+    decision_losses = torch.stack(decision_losses, dim=1)
+    decision_valid = torch.stack(decision_valid, dim=1)
+    decisions_per_sample = decision_valid.sum(dim=(1, 2))
+    loss_per_sample = decision_losses.sum(dim=(1, 2)) / decisions_per_sample.clamp_min(1)
+
+    sample_valid = decisions_per_sample > 0
+    return (loss_per_sample * sample_valid).sum() / sample_valid.sum().clamp_min(1)
+
+
+def _reduce_matrix_loss(
+    loss: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = torch.finfo(torch.float16).eps,
+) -> torch.Tensor:
+    """Original reduction over all valid association-matrix entries."""
+    entries_per_sample = mask.sum(dim=(1, 2))
+    loss_per_sample = loss.sum(dim=(1, 2)) / (entries_per_sample + eps)
+    prefactor = torch.pow(entries_per_sample, 0.2)
+    return (loss_per_sample * prefactor / (prefactor.sum() + eps)).sum()
 
 
 def _git_commit():
@@ -185,6 +227,7 @@ class WrappedLightningModule(pl.LightningModule):
         max_epochs: int = 100,
         learning_rate: float = 1e-5,
         causal_norm: str = "none",
+        loss_norm: str = "matrix",
         delta_cutoff: int = 2,
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
@@ -197,6 +240,9 @@ class WrappedLightningModule(pl.LightningModule):
 
         self.model = model
         self.causal_norm = causal_norm
+        if loss_norm not in ("matrix", "decision"):
+            raise ValueError(f"Unknown loss_norm {loss_norm!r}")
+        self.loss_norm = loss_norm
         self.delta_cutoff = delta_cutoff
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
         self.criterion_softmax = torch.nn.BCELoss(reduction="none")
@@ -217,7 +263,7 @@ class WrappedLightningModule(pl.LightningModule):
         else:
             self.debug = None
 
-    def _common_step(self, batch, eps=torch.finfo(torch.float16).eps):
+    def _common_step(self, batch):
         feats = batch["features"]
         coords = batch["coords"]
         A = batch["assoc_matrix"]
@@ -275,18 +321,15 @@ class WrappedLightningModule(pl.LightningModule):
         mask = mask.float()
 
         loss_before_reduce = loss * mask
-        # Normalized by number of valid entry for each sample
-        # Here I get a loss that is normalized by the number of connections to predict
-        loss_normalized = loss_before_reduce / (
-            mask.sum(dim=(1, 2), keepdim=True) + eps
-        )
-        loss_per_sample = loss_normalized.sum(dim=(1, 2))
-
-        # Hack: weight larger samples a little more...
-        prefactor = torch.pow(mask.sum(dim=(1, 2)), 0.2)
-
-        loss = loss_per_sample * prefactor / (prefactor.sum() + eps)
-        loss = loss.sum()
+        if self.loss_norm == "decision":
+            loss = _reduce_decision_loss(
+                loss_before_reduce,
+                mask,
+                dt,
+                delta_cutoff=self.delta_cutoff,
+            )
+        else:
+            loss = _reduce_matrix_loss(loss_before_reduce, mask)
 
         # print(padding_mask.float().mean())
         return dict(
@@ -644,48 +687,28 @@ def create_run_name(args):
     return name
 
 
-def cache_class(cachedir=None):
-    """A simple file cache for CTCData."""
-
-    def make_hashable(obj):
-        if isinstance(obj, (tuple, list)):
-            return tuple(make_hashable(e) for e in obj)
-        elif isinstance(obj, Path):
-            return obj.as_posix()
-        elif isinstance(obj, dict):
-            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-        else:
-            return obj
-
-    def hash_args_kwargs(*args, **kwargs):
-        hashable_args = tuple(make_hashable(arg) for arg in args)
-        hashable_kwargs = make_hashable(kwargs)
-        combined_serialized = json.dumps(
-            [hashable_args, hashable_kwargs], sort_keys=True
-        )
-        hash_obj = hashlib.sha256(combined_serialized.encode())
-        return hash_obj.hexdigest()
-
-    if cachedir is None:
-        return CTCData
-    else:
-        cachedir = Path(cachedir)
-
-        def _wrapped(*args, **kwargs):
-            h = hash_args_kwargs(*args, **kwargs)
-            cachedir.mkdir(exist_ok=True, parents=True)
-            cache_file = cachedir / f"{h}.pkl"
-            if cache_file.exists():
-                logger.info(f"Loading cached dataset from {cache_file}")
-                with open(cache_file, "rb") as f:
-                    return pickle.load(f)
-            else:
-                c = CTCData(*args, **kwargs)
-                logger.info(f"Saving cached dataset to {cache_file}")
-                pickle.dump(c, open(cache_file, "wb"))
-            return c
-
-        return _wrapped
+def _feature_dim(ndim: int, features: str) -> int:
+    """Return the feature width produced by CTCData for a configured mode."""
+    if features == "none":
+        return 0
+    if features == "wrfeat":
+        return 7 if ndim == 2 else 12
+    dims = {
+        2: {
+            "regionprops": 7,
+            "regionprops2": 6,
+            "patch": 256,
+            "patch_regionprops": 261,
+        },
+        3: {
+            "regionprops2": 11,
+            "patch_regionprops": 264,
+        },
+    }
+    try:
+        return dims[ndim][features]
+    except KeyError as e:
+        raise ValueError(f"Unsupported feature mode {features!r} for {ndim}D data") from e
 
 
 def find_val_batch(loader_val, n_gpus):
@@ -774,10 +797,6 @@ def train(args):
             f'Logdir {logdir} exists, set "--resume t"  if you want to overwrite'
         )
 
-    datasets = dict()
-
-    CTCData = cache_class(args.cachedir if args.cache else None)
-
     n_gpus = torch.cuda.device_count() if args.distributed else 1
 
     if args.preallocate:
@@ -827,6 +846,7 @@ def train(args):
             learning_rate=args.lr,
             delta_cutoff=args.delta_cutoff,
             causal_norm=args.causal_norm,
+            loss_norm=args.loss_norm,
             tracking_frequency=args.tracking_frequency,
             batch_val_tb_idx=0,
             div_upweight=args.div_upweight,
@@ -847,113 +867,53 @@ def train(args):
         if not Path(p).exists():
             raise FileNotFoundError(f"Input folder {p} does not exist")
 
-    for split, inps, slice_pct in zip(
-        ("train", "val"),
-        (args.input_train, args.input_val),
-        (args.slice_pct_train, args.slice_pct_val),
-    ):
-        logger.info(f"Loading {split.upper()} data")
-        start = default_timer()
-        datasets[split] = torch.utils.data.ConcatDataset(
-            CTCData(
-                root=Path(inp),
-                ndim=args.ndim,
-                detection_folders=args.detection_folders,
-                window_size=args.window,
-                max_tokens=args.max_tokens,
-                augment=args.augment if split == "train" else 0,
-                features=args.features,
-                slice_pct=slice_pct,
-                downscale_temporal=args.downscale_temporal,
-                downscale_spatial=args.downscale_spatial,
-                sanity_dist=args.sanity_dist,
-                crop_size=args.crop_size if split == "train" else None,
-                compress=args.compress,
-            )
-            for inp in inps
-        )
-        logger.info(
-            f"Loaded {len(datasets[split])} {split.upper()} samples (in"
-            f" {(default_timer() - start):.1f} s)\n\n"
-        )
-
-    common_loader_args = dict(
+    dataset_kwargs = dict(
+        ndim=args.ndim,
+        detection_folders=args.detection_folders,
+        window_size=args.window,
+        max_tokens=args.max_tokens,
+        features=args.features,
+        downscale_temporal=args.downscale_temporal,
+        downscale_spatial=args.downscale_spatial,
+        sanity_dist=args.sanity_dist,
+        compress=args.compress,
+    )
+    sampler_kwargs = dict(
+        batch_size=args.batch_size,
+        n_pool=args.n_pool_sampler,
+        num_samples=args.train_samples if args.train_samples > 0 else None,
+        weight_by_ndivs=args.weight_by_ndivs,
+        weight_by_dataset=args.weight_by_dataset,
+    )
+    loader_kwargs = dict(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
         collate_fn=collate_sequence_padding,
     )
-
-    datamodule = None
-    # Sampler gets wrapped with distributed sampler, which cannot sample with replacement
-    if args.distributed:
-        datamodule = BalancedDataModule(
-            datasets["train"],
-            datasets["val"],
-            num_samples=args.train_samples if args.train_samples > 0 else None,
-            batch_size=args.batch_size,
-            n_pool=args.n_pool_sampler,
-            num_workers=args.num_workers,
-            weight_by_ndivs=args.weight_by_ndivs,
-            weight_by_dataset=args.weight_by_dataset,
-            **common_loader_args,
-        )
-
-    else:
-
-        if args.n_pool_sampler > 0:
-            batch_sampler = BalancedBatchSampler(
-                datasets["train"],
-                batch_size=args.batch_size,
-                n_pool=args.n_pool_sampler,
-                num_samples=args.train_samples if args.train_samples > 0 else None,
-                weight_by_ndivs=args.weight_by_ndivs,
-                weight_by_dataset=args.weight_by_dataset,
-            )
-
-            loader_train = DataLoader(
-                datasets["train"],
-                batch_sampler=batch_sampler,
-                num_workers=args.num_workers,
-                **common_loader_args,
-            )
-        else:
-            if args.weight_by_ndivs:
-                raise NotImplementedError(
-                    "Weighting by ndivs only works with balanced samples (i.e."
-                    " n_pool_sampler > 0)"
-                )
-            sampler = torch.utils.data.RandomSampler(
-                datasets["train"],
-                num_samples=(
-                    args.train_samples
-                    if args.train_samples > 0
-                    else len(datasets["train"])
-                ),
-                replacement=True,
-            )
-            loader_train = DataLoader(
-                datasets["train"],
-                sampler=sampler,
-                batch_size=args.batch_size,
-                num_workers=args.num_workers,
-                **common_loader_args,
-            )
-
-    loader_val = DataLoader(
-        datasets["val"],
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0 if args.num_workers == 0 else max(1, args.num_workers // 2),
-        **common_loader_args,
+    datamodule = BalancedDataModule(
+        input_train=args.input_train,
+        input_val=args.input_val,
+        cachedir=args.cachedir if args.cache else None,
+        augment=args.augment,
+        distributed=args.distributed,
+        dataset_kwargs=dataset_kwargs,
+        train_dataset_kwargs={
+            "slice_pct": args.slice_pct_train,
+            "crop_size": args.crop_size,
+        },
+        val_dataset_kwargs={
+            "slice_pct": args.slice_pct_val,
+            "crop_size": None,
+        },
+        sampler_kwargs=sampler_kwargs,
+        loader_kwargs=loader_kwargs,
     )
+    if args.epochs == 0:
+        datamodule.prepare_data()
 
-    for k, v in datasets.items():
-        print(f"Dataset {k}: {len(v)} samples")
-
-     
-
-    batch_val_tb_idx = find_val_batch(loader_val, n_gpus)
-    # batch_val_tb_idx = 0
+    batch_val_tb_idx = 0
 
     if train_logger:
         callbacks.append(
@@ -980,8 +940,8 @@ def train(args):
             model = TrackingTransformer.from_folder(fpath, args=args)
     else:
         model = TrackingTransformer(
-            coord_dim=datasets["train"].datasets[0].ndim,
-            feat_dim=datasets["train"].datasets[0].feat_dim,
+            coord_dim=args.ndim,
+            feat_dim=_feature_dim(args.ndim, args.features),
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
@@ -1008,6 +968,7 @@ def train(args):
         learning_rate=args.lr,
         delta_cutoff=args.delta_cutoff,
         causal_norm=args.causal_norm,
+        loss_norm=args.loss_norm,
         tracking_frequency=args.tracking_frequency,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
@@ -1028,6 +989,7 @@ def train(args):
                 learning_rate=args.lr,
                 delta_cutoff=args.delta_cutoff,
                 causal_norm=args.causal_norm,
+                loss_norm=args.loss_norm,
                 tracking_frequency=args.tracking_frequency,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
@@ -1036,7 +998,6 @@ def train(args):
         else:
             logging.warning(f"No checkpoint found in {logdir}")
 
-    model_lightning.to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"Model has {num_params / 1e6:.1f}M parameters")
 
@@ -1075,15 +1036,7 @@ def train(args):
         resume_path = None
 
     if args.epochs > 0:
-        if args.distributed and datamodule is not None:
-            trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
-        else:
-            trainer.fit(
-                model_lightning,
-                train_dataloaders=loader_train,
-                val_dataloaders=loader_val,
-                ckpt_path=resume_path,
-            )
+        trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
 
     print(f"Time elapsed:     {(default_timer() - t)/60:.02f} min")
     print(f"CPU Memory used:  {(_process_memory() - memory)/1e9:.2f} GB")
@@ -1190,6 +1143,12 @@ def parse_train_args():
         type=str,
         choices=["none", "linear", "softmax", "quiet_softmax"],
         default="quiet_softmax",
+    )
+    parser.add_argument(
+        "--loss_norm",
+        choices=["matrix", "decision"],
+        default="matrix",
+        help="loss reduction: original matrix-entry mean or per-decision mean",
     )
     parser.add_argument("--div_upweight", type=float, default=2)
     parser.add_argument(
