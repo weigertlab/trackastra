@@ -510,6 +510,11 @@ class WrappedLightningModule(pl.LightningModule):
                     "val_TRA": float(movies["TRA"].mean()),
                     "val_AOGM": float(movies["AOGM"].mean()),
                 }
+                print(
+                    f"[epoch {self.current_epoch}] "
+                    f"val_TRA={values['val_TRA']:.4f} "
+                    f"val_AOGM={values['val_AOGM']:.4f}"
+                )
                 self.log_dict(
                     values,
                     on_step=False,
@@ -1219,7 +1224,7 @@ def parse_train_args():
     parser.add_argument(
         "--tracking_frequency",
         type=int,
-        default=-1,
+        default=5,
         help="run full-movie validation every N epochs; <=0 disables it",
     )
     parser.add_argument(
