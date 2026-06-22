@@ -5,6 +5,8 @@ from trackastra.data import wrfeat
 from trackastra.data.wrfeat import (
     WRAugmentationPipeline,
     WRFeatures,
+    WRRandomAffine,
+    WRRandomCrop,
     WRRandomMovement,
 )
 
@@ -36,6 +38,73 @@ def generate_data(ndim: int = 2, ngrid=10):
 def test_features():
     x, y, _p, _ts = generate_data(ndim=2, ngrid=10)
     WRFeatures.from_mask_img(mask=y, img=x)
+
+
+def test_random_affine_scale_is_isotropic_and_log_symmetric():
+    x, y, _p, _ts = generate_data(ndim=2, ngrid=4)
+    features = WRFeatures.from_mask_img(mask=y, img=x)
+    augmentation = WRRandomAffine(
+        p=1, degrees=0, scale=(0.5, 2), shear=(0, 0)
+    )
+    augmentation._rng = np.random.RandomState(42)
+
+    scales = []
+    for _ in range(2000):
+        augmentation(features)
+        assert augmentation._M[0, 0] == pytest.approx(augmentation._M[1, 1])
+        scales.append(augmentation._M[0, 0])
+
+    assert np.mean(np.log(scales)) == pytest.approx(0, abs=0.03)
+    assert np.mean(np.asarray(scales) < 1) == pytest.approx(0.5, abs=0.03)
+
+
+def test_random_crop_retains_centers_in_dimensions_that_fit():
+    coords = np.array([
+        [y, x] for x in (0.0, 350.0, 700.0) for y in (0.0, 400.0)
+    ])
+    features = WRFeatures(
+        coords=coords,
+        labels=np.arange(len(coords)),
+        timepoints=np.zeros(len(coords), dtype=int),
+        features={},
+    )
+    crop = WRRandomCrop(crop_size=(512, 512), ndim=2)
+
+    for _ in range(100):
+        cropped, idx = crop(features)
+        # The y extent fits and must never be cropped. The x extent does not.
+        assert np.array_equal(cropped.coords, features.coords[idx])
+        for x in np.unique(cropped.coords[:, 1]):
+            assert set(cropped.coords[cropped.coords[:, 1] == x, 0]) == {0.0, 400.0}
+
+
+def test_random_crop_retains_all_centers_when_extent_fits():
+    features = WRFeatures(
+        coords=np.array([[0.0, 0.0], [400.0, 500.0], [200.0, 250.0]]),
+        labels=np.arange(3),
+        timepoints=np.zeros(3, dtype=int),
+        features={},
+    )
+    crop = WRRandomCrop(crop_size=(512, 512), ndim=2)
+
+    for _ in range(100):
+        cropped, idx = crop(features)
+        assert np.array_equal(idx, np.arange(3))
+        assert np.array_equal(cropped.coords, features.coords)
+
+
+def test_random_crop_can_disable_center_retention():
+    features = WRFeatures(
+        coords=np.array([[0.0, 0.0], [400.0, 500.0], [200.0, 250.0]]),
+        labels=np.arange(3),
+        timepoints=np.zeros(3, dtype=int),
+        features={},
+    )
+    crop = WRRandomCrop(
+        crop_size=(512, 512), ndim=2, ensure_all_centers=False
+    )
+
+    assert any(len(crop(features)[1]) < len(features) for _ in range(100))
 
 
 @pytest.mark.parametrize("ndim", [2, 3])

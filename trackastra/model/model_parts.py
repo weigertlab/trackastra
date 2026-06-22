@@ -24,14 +24,17 @@ def _pos_embed_fourier1d_init(
 
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model, expand: float = 2, bias: bool = True):
+    def __init__(
+        self, d_model, expand: float = 2, bias: bool = True, dropout: float = 0.0
+    ):
         super().__init__()
         self.fc1 = nn.Linear(d_model, int(d_model * expand))
         self.fc2 = nn.Linear(int(d_model * expand), d_model, bias=bias)
         self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.fc2(self.act(self.fc1(x)))
+        return self.fc2(self.dropout(self.act(self.fc1(x))))
 
 
 class MultiChannelPairHead(nn.Module):
@@ -52,7 +55,9 @@ class MultiChannelPairHead(nn.Module):
     once the head's weights grow, producing NaNs that crash the BCE loss.
     """
 
-    def __init__(self, dim: int, channels: int = 8, hidden: int = 32):
+    def __init__(
+        self, dim: int, channels: int = 8, hidden: int = 32, dropout: float = 0.0
+    ):
         super().__init__()
         self.channels = channels
         self.q = nn.Linear(dim, channels * dim)
@@ -61,6 +66,7 @@ class MultiChannelPairHead(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(channels, hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, 1),
         )
 

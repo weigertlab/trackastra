@@ -61,7 +61,7 @@ class EncoderLayer(nn.Module):
             mode=positional_bias,
             attn_dist_mode=attn_dist_mode,
         )
-        self.mlp = FeedForward(d_model)
+        self.mlp = FeedForward(d_model, dropout=dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -126,7 +126,7 @@ class DecoderLayer(nn.Module):
             attn_dist_mode=attn_dist_mode,
         )
 
-        self.mlp = FeedForward(d_model)
+        self.mlp = FeedForward(d_model, dropout=dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
@@ -394,8 +394,8 @@ class TrackingTransformer(torch.nn.Module):
         # "multichannel": a learned multi-subspace pairwise head (see below).
         self.assoc_head = assoc_head
         if assoc_head == "bilinear":
-            self.head_x = FeedForward(d_model)
-            self.head_y = FeedForward(d_model)
+            self.head_x = FeedForward(d_model, dropout=dropout)
+            self.head_y = FeedForward(d_model, dropout=dropout)
             # L2-normalize the head embeddings and scale the cosine-similarity
             # logits by a learned temperature (CLIP-style). This decouples logit
             # magnitude from d_model, giving better-calibrated and more stable
@@ -404,7 +404,9 @@ class TrackingTransformer(torch.nn.Module):
             if logit_norm:
                 self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
         elif assoc_head == "multichannel":
-            self.pair_head = MultiChannelPairHead(d_model, channels=assoc_channels)
+            self.pair_head = MultiChannelPairHead(
+                d_model, channels=assoc_channels, dropout=dropout
+            )
         else:
             raise ValueError(f"unknown assoc_head: {assoc_head!r}")
 

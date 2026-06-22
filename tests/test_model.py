@@ -52,3 +52,23 @@ def test_model_multichannel_head():
     A = model(coords, padding_mask=padding_mask)
     assert A.shape == (2, 60, 60)
     assert torch.isfinite(A).all()
+
+
+@pytest.mark.parametrize("assoc_head", ["bilinear", "multichannel"])
+def test_dropout_is_applied_to_attention_and_mlp(assoc_head):
+    model = TrackingTransformer(
+        coord_dim=2,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0.2,
+        assoc_head=assoc_head,
+    )
+
+    assert model.encoder[0].attn.dropout == pytest.approx(0.2)
+    assert model.encoder[0].mlp.dropout.p == pytest.approx(0.2)
+    assert model.decoder[0].mlp.dropout.p == pytest.approx(0.2)
+    if assoc_head == "bilinear":
+        assert model.head_x.dropout.p == pytest.approx(0.2)
+        assert model.head_y.dropout.p == pytest.approx(0.2)
+    else:
+        assert model.pair_head.mlp[2].p == pytest.approx(0.2)

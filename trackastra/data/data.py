@@ -135,6 +135,7 @@ class CTCData(Dataset):
         ] = "wrfeat",
         sanity_dist: bool = False,
         crop_size: tuple | None = None,
+        crop_ensure_all_centers: bool = True,
         return_dense: bool = False,
         compress: bool = False,
         **kwargs,
@@ -162,6 +163,8 @@ class CTCData(Dataset):
                 Use euclidian distance instead of the association matrix as a target.
             crop_size (tuple):
                 Size of the crops to use for augmentation. If None, no cropping is used.
+            crop_ensure_all_centers (bool):
+                Keep every center along dimensions whose occupied extent fits in the crop.
             return_dense (bool):
                 Return dense masks and images in the data samples.
             compress (bool):
@@ -180,6 +183,7 @@ class CTCData(Dataset):
         self.detection_folders = detection_folders
         self.ndim = ndim
         self.features = features
+        self.crop_ensure_all_centers = crop_ensure_all_centers
 
         if features not in ("none", "wrfeat") and features not in _PROPERTIES[ndim]:
             raise ValueError(
@@ -208,7 +212,7 @@ class CTCData(Dataset):
         logger.info(f"IMG (guessed):\t{self.img_folder}")
 
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
-            ndim, features, augment, crop_size
+            ndim, features, augment, crop_size, crop_ensure_all_centers
         )
 
         if window_size <= 1:
@@ -290,7 +294,11 @@ class CTCData(Dataset):
         # logger.info(f"IMG:\t\t{self.img_folder}")
 
         self.feat_dim, self.augmenter, self.cropper = self._setup_features_augs(
-            self.ndim, self.features, self.augment, self.crop_size
+            self.ndim,
+            self.features,
+            self.augment,
+            self.crop_size,
+            self.crop_ensure_all_centers,
         )
 
         start = default_timer()
@@ -334,7 +342,12 @@ class CTCData(Dataset):
         return n_divs
 
     def _setup_features_augs(
-        self, ndim: int, features: str, augment: int, crop_size: tuple[int]
+        self,
+        ndim: int,
+        features: str,
+        augment: int,
+        crop_size: tuple[int],
+        crop_ensure_all_centers: bool,
     ):
         # Lazy import of training-only augmentation dependencies
         from trackastra.data.augmentations import (
@@ -344,7 +357,9 @@ class CTCData(Dataset):
         )
 
         if self.features == "wrfeat":
-            return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
+            return self._setup_features_augs_wrfeat(
+                ndim, features, augment, crop_size, crop_ensure_all_centers
+            )
 
         cropper = (
             RandomCrop(
@@ -991,7 +1006,12 @@ class CTCData(Dataset):
     # TODO: refactor this as a subclass or make everything a class factory. *very* hacky this way
 
     def _setup_features_augs_wrfeat(
-        self, ndim: int, features: str, augment: int, crop_size: tuple[int]
+        self,
+        ndim: int,
+        features: str,
+        augment: int,
+        crop_size: tuple[int],
+        crop_ensure_all_centers: bool,
     ):
         # FIXME: hardcoded
         feat_dim = 7 if ndim == 2 else 12
@@ -999,7 +1019,7 @@ class CTCData(Dataset):
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
                 wrfeat.WRRandomAffine(
-                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)
                 ),
                 # wrfeat.WRRandomBrightness(p=0.8, factor=(0.5, 2.0)),
                 # wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
@@ -1008,7 +1028,7 @@ class CTCData(Dataset):
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
                 wrfeat.WRRandomAffine(
-                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)
                 ),
                 wrfeat.WRRandomBrightness(p=0.8),
                 wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
@@ -1017,7 +1037,7 @@ class CTCData(Dataset):
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
                 wrfeat.WRRandomAffine(
-                    p=0.8, degrees=180, scale=(0.5, 2), shear=(0.1, 0.1)
+                    p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)
                 ),
                 wrfeat.WRRandomBrightness(p=0.8),
                 wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
@@ -1030,6 +1050,7 @@ class CTCData(Dataset):
             wrfeat.WRRandomCrop(
                 crop_size=crop_size,
                 ndim=ndim,
+                ensure_all_centers=crop_ensure_all_centers,
             )
             if crop_size is not None
             else None

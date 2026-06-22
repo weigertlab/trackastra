@@ -286,11 +286,15 @@ class WRRandomCrop:
         self,
         crop_size: int | tuple[int] | None = None,
         ndim: int = 2,
+        ensure_all_centers: bool = True,
     ) -> None:
         """crop_size: tuple of int
         can be tuple of length 1 (all dimensions)
                      of length ndim (y,x,...)
                      of length 2*ndim (y1,y2, x1,x2, ...).
+
+        If ensure_all_centers is true, dimensions whose complete occupied
+        extent fits within the sampled crop retain every detection center.
         """
         if isinstance(crop_size, int):
             crop_size = (crop_size,) * 2 * ndim
@@ -311,6 +315,7 @@ class WRRandomCrop:
         crop_size = np.array(crop_size)
         self._ndim = ndim
         self._crop_bounds = crop_size[::2], crop_size[1::2]
+        self.ensure_all_centers = ensure_all_centers
         self._rng = np.random.RandomState()
 
     def __call__(self, features: WRFeatures):
@@ -318,8 +323,7 @@ class WRRandomCrop:
         points = features.coords
 
         if len(points) == 0:
-            print("No points given, cannot ensure inside points")
-            return features
+            return features, np.empty(0, dtype=int)
 
         # sample point and corner relative to it
 
@@ -330,6 +334,16 @@ class WRRandomCrop:
             + 1
             + self._rng.randint(crop_size // 4, 3 * crop_size // 4)
         )
+
+        # Do not cut detections along dimensions where the complete occupied
+        # extent already fits in the crop. The previous unconstrained origin
+        # could exclude cells even when every center fit inside crop_size.
+        point_min = points.min(axis=0)
+        point_max = points.max(axis=0)
+        fits = self.ensure_all_centers & (point_max - point_min < crop_size)
+        if np.any(fits):
+            lower = point_max - crop_size + 1e-6
+            corner[fits] = np.clip(corner[fits], lower[fits], point_min[fits])
 
         idx = _filter_points(points, shape=crop_size, origin=corner)
 
@@ -437,6 +451,8 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
 
 
 class WRRandomAffine(WRBaseAugmentation):
+    """Apply rotation, shear, and an isotropic log-uniform spatial scale."""
+
     def __init__(
         self,
         degrees: float = 10,
@@ -448,15 +464,22 @@ class WRRandomAffine(WRBaseAugmentation):
         self.degrees = degrees if degrees is not None else 0
         self.scale = scale if scale is not None else (1, 1)
         self.shear = shear if shear is not None else (0, 0)
+        if self.scale[0] <= 0 or self.scale[1] < self.scale[0]:
+            raise ValueError("scale bounds must satisfy 0 < min <= max")
 
     def _augment(self, features: WRFeatures):
         degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
-        scale = self._rng.uniform(*self.scale, 3)
+        # A linear draw from (0.5, 2) is biased toward zooming in (mean 1.25).
+        # A single log-uniform draw makes reciprocal zooms equally likely and
+        # avoids unrealistic independent stretching of each spatial axis.
+        scale = np.exp(self._rng.uniform(np.log(self.scale[0]), np.log(self.scale[1])))
         shy = self._rng.uniform(-self.shear[0], self.shear[0])
         shx = self._rng.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
-            _rotation_matrix(degrees) @ _scale_matrix(*scale) @ _shear_matrix(shy, shx)
+            _rotation_matrix(degrees)
+            @ _scale_matrix(scale, scale, scale)
+            @ _shear_matrix(shy, shx)
         )
 
         # M is by default 3D , we need to remove the last dimension for 2D

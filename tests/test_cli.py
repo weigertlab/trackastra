@@ -1,5 +1,8 @@
+import importlib.util
 import os
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -7,6 +10,30 @@ from test_data import example_dataset
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
+
+
+@pytest.fixture
+def predict_script():
+    pytest.importorskip("configargparse")
+    spec = importlib.util.spec_from_file_location(
+        "predict_script", Path(__file__).parents[1] / "scripts" / "predict.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def train_script():
+    pytest.importorskip("configargparse")
+    spec = importlib.util.spec_from_file_location(
+        "train_script", Path(__file__).parents[1] / "scripts" / "train.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_cli_parser():
@@ -38,3 +65,157 @@ def test_cli_tracking_from_file():
     assert output_ctc.exists()
     assert output_edge_table.exists()
     assert result == 0
+
+
+def test_predict_parser_reads_test_movies_from_config(tmp_path, predict_script):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "input_test:\n- movie_a\n- movie_b\ndetection_folders:\n- SEG\nepochs: 10\n"
+    )
+
+    args = predict_script.parse_args(["-m", "model", "-c", str(config)])
+
+    assert args.input_test == [Path("movie_a"), Path("movie_b")]
+    assert args.detection_folders == ["SEG"]
+    assert args.max_distance == 128
+    assert predict_script.parse_args(
+        ["-m", "model", "-c", str(config), "-f"]
+    ).overwrite
+
+
+def test_tracking_frequency_uses_completed_epoch_numbers(train_script):
+    assert not train_script._is_tracking_epoch(0, 10)
+    assert train_script._is_tracking_epoch(9, 10)
+    assert train_script._is_tracking_epoch(19, 10)
+    assert not train_script._is_tracking_epoch(9, 0)
+
+
+def test_resolve_ctc_paths(tmp_path, predict_script):
+    simple = tmp_path / "simple"
+    (simple / "img").mkdir(parents=True)
+    (simple / "TRA").mkdir()
+    assert predict_script.resolve_ctc_paths(simple, "TRA") == (
+        simple / "img",
+        simple / "TRA",
+        simple / "TRA",
+    )
+
+    sequence = tmp_path / "dataset" / "01"
+    sequence.mkdir(parents=True)
+    (tmp_path / "dataset" / "01_GT" / "TRA").mkdir(parents=True)
+    (tmp_path / "dataset" / "01_ST" / "SEG").mkdir(parents=True)
+    assert predict_script.resolve_ctc_paths(sequence, "SEG") == (
+        sequence,
+        tmp_path / "dataset" / "01_ST" / "SEG",
+        tmp_path / "dataset" / "01_GT" / "TRA",
+    )
+
+
+def test_evaluate_ctc_uses_ctc_metrics(monkeypatch, predict_script):
+    calls = {}
+    traccuracy = ModuleType("traccuracy")
+    loaders = ModuleType("traccuracy.loaders")
+    matchers = ModuleType("traccuracy.matchers")
+    metrics = ModuleType("traccuracy.metrics")
+
+    loaders.load_ctc_data = lambda path, run_checks: (path, run_checks)
+    matchers.CTCMatcher = type("CTCMatcher", (), {})
+    metrics.CTCMetrics = type("CTCMetrics", (), {})
+
+    def fake_run_metrics(**kwargs):
+        calls.update(kwargs)
+        return [
+            {
+                "results": {
+                    "TRA": 0.75,
+                    "AOGM": 12,
+                    "DET": 0.8,
+                    "LNK": 0.7,
+                    "fp_nodes": 1,
+                    "fn_nodes": 2,
+                    "ns_nodes": 3,
+                    "fp_edges": 4,
+                    "fn_edges": 5,
+                    "ws_edges": 6,
+                }
+            }
+        ], None
+
+    traccuracy.run_metrics = fake_run_metrics
+    monkeypatch.setitem(sys.modules, "traccuracy", traccuracy)
+    monkeypatch.setitem(sys.modules, "traccuracy.loaders", loaders)
+    monkeypatch.setitem(sys.modules, "traccuracy.matchers", matchers)
+    monkeypatch.setitem(sys.modules, "traccuracy.metrics", metrics)
+
+    result = predict_script.evaluate_ctc(Path("gt"), Path("prediction"))
+
+    assert result["TRA"] == 0.75
+    assert result["AOGM"] == 12.0
+    assert result["DET"] == 0.8
+    assert result["fp_edges"] == 4.0
+    assert calls["gt_data"] == ("gt", False)
+    assert calls["pred_data"] == ("prediction", False)
+    assert isinstance(calls["matcher"], matchers.CTCMatcher)
+    assert isinstance(calls["metrics"][0], metrics.CTCMetrics)
+
+
+def test_predict_run_writes_and_evaluates_ctc_output(
+    tmp_path, monkeypatch, capsys, predict_script
+):
+    movie = tmp_path / "movie"
+    (movie / "img").mkdir(parents=True)
+    (movie / "TRA").mkdir()
+    calls = {}
+
+    class FakeTrackastra:
+        @classmethod
+        def from_pretrained(cls, name, device):
+            calls["model"] = (name, device)
+            return cls()
+
+        def track_from_disk(self, images, masks, **kwargs):
+            calls["track"] = (images, masks, kwargs)
+            return "graph", "masks"
+
+    def fake_graph_to_ctc(graph, masks, outdir):
+        calls["ctc"] = (graph, masks, outdir)
+        (outdir / "man_track.txt").write_text("1 0 0 0\n")
+
+    monkeypatch.setattr("trackastra.model.Trackastra", FakeTrackastra)
+    monkeypatch.setattr("trackastra.tracking.graph_to_ctc", fake_graph_to_ctc)
+    monkeypatch.setattr(
+        predict_script,
+        "evaluate_ctc",
+        lambda gt, pred: {"TRA": 0.5, "AOGM": 4.0, "DET": 0.6, "LNK": 0.7},
+    )
+    args = SimpleNamespace(
+        model="trained_model",
+        device="cpu",
+        input_test=[movie],
+        detection_folders=["TRA"],
+        outdir=tmp_path / "results",
+        overwrite=False,
+        mode="greedy",
+        max_distance=42,
+    )
+
+    result = predict_script.run(args)
+    assert result["movie"].tolist() == ["movie", "Mean"]
+    assert result["model"].tolist() == ["trained_model", "trained_model"]
+    assert result["mode"].tolist() == ["greedy", "greedy"]
+    assert result["TRA"].tolist() == [0.5, 0.5]
+    assert result["AOGM"].tolist() == [4.0, 4.0]
+    assert calls["model"] == ("trained_model", "cpu")
+    assert calls["track"][0:2] == (movie / "img", movie / "TRA")
+    assert calls["track"][2] == {"mode": "greedy", "max_distance": 42}
+    model_output = tmp_path / "results" / "trained_model"
+    assert calls["ctc"][2] == model_output / "movie"
+    saved = predict_script.pd.read_csv(model_output / "metrics.csv")
+    assert saved[["movie", "model", "mode"]].to_dict("records") == [
+        {"movie": "movie", "model": "trained_model", "mode": "greedy"},
+        {"movie": "Mean", "model": "trained_model", "mode": "greedy"},
+    ]
+    output = capsys.readouterr().out
+    assert "movie" in output
+    assert "Mean" in output
+    assert "0.500000" in output

@@ -41,10 +41,7 @@ def track_greedy(
     logger.info("Running greedy tracker")
 
     solution_graph = nx.DiGraph()
-
-    # TODO bring back
-    # if args.gt_as_dets:
-    # solution_graph.add_nodes_from(candidate_graph.nodes(data=True))
+    solution_graph.add_nodes_from(candidate_graph.nodes(data=True))
 
     edges = candidate_graph.edges(data=True)
     edges = sorted(

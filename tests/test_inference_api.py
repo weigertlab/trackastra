@@ -4,11 +4,17 @@ import tempfile
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra
-from trackastra.tracking import graph_to_ctc, graph_to_napari_tracks, write_to_geff
+from trackastra.tracking import (
+    graph_to_ctc,
+    graph_to_napari_tracks,
+    track_greedy,
+    write_to_geff,
+)
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
@@ -19,6 +25,20 @@ try:
     ILP_TESTS = True
 except ModuleNotFoundError:
     ILP_TESTS = False
+
+
+def test_greedy_retains_isolated_detections():
+    candidate_graph = nx.DiGraph()
+    candidate_graph.add_node(0, time=0, label=1)
+    candidate_graph.add_node(1, time=1, label=1)
+    candidate_graph.add_node(2, time=0, label=2)
+    candidate_graph.add_edge(0, 1, weight=0.9)
+
+    result = track_greedy(candidate_graph)
+
+    assert set(result.nodes) == {0, 1, 2}
+    assert set(result.edges) == {(0, 1)}
+    assert result.nodes[2] == {"time": 0, "label": 2}
 
 
 @pytest.mark.parametrize(

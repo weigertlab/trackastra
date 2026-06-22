@@ -169,52 +169,45 @@ class WarmupCosineLRScheduler(LRScheduler):
         return [factor * base_lr for base_lr in self.base_lrs]
 
 
-def log_tracking_metrics(model, _data, causal_norm: str, delta: int):
-    from types import SimpleNamespace
+def log_tracking_metrics(
+    model,
+    input_paths: list[str],
+    detection_folder: str,
+    features: str,
+    mode: str,
+    max_distance: int,
+):
+    """Run full-movie CTC validation with the current transformer weights."""
+    try:
+        from scripts.predict import predict_and_evaluate
+    except ImportError:
+        from predict import predict_and_evaluate
 
-    from predict import predict_ctc
+    from trackastra.model import Trackastra
 
-    from tracking import tracking
-
-    window = model.window
-    args_pred = SimpleNamespace(
-        t_start=0, t_end=len(_data) + window - 1, gt=False, delta=delta, thresh=0.1
+    device = next(model.parameters()).device.type
+    tracking_model = Trackastra(
+        transformer=model,
+        train_args={"features": features},
+        device=device,
     )
-
     with TemporaryDirectory() as tmpdir:
-        outdir = Path(tmpdir)
-        predict_ctc(_data, model, window, outdir, args_pred, causal_norm=causal_norm)
-        args_track = SimpleNamespace(
-            stop=None,
-            input=outdir / "graph.pkl",
-            dry=False,
-            name=None,
-            napari=False,
-            metrics_every=1,
-            img=_data.img_folder,
-            feat="track",
-            metrics_n_timesteps=50,
-            use_distance=False,
-            outdir=None,
-            metrics=False,
-            last_metrics=True,
-            masks=_data.mask_folder,
-            gt=None,
-            mode="ilp",
-            max_distance=50,
+        return predict_and_evaluate(
+            model=tracking_model,
+            input_paths=input_paths,
+            detection_folder=detection_folder,
+            outdir=Path(tmpdir),
+            model_name="validation",
+            mode=mode,
+            max_distance=max_distance,
+            overwrite=True,
+            print_results=False,
         )
-        (
-            df,
-            df_metric,
-            df_mot,
-            masks,
-            graph,
-            tracks_graph,
-            tracks,
-            masks_original,
-            viewer,
-        ) = tracking(args_track)
-    return df_metric
+
+
+def _is_tracking_epoch(current_epoch: int, frequency: int) -> bool:
+    """Use human-readable epoch numbers: frequency 10 runs at 10, 20, ..."""
+    return frequency > 0 and (current_epoch + 1) % frequency == 0
 
 
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
@@ -230,6 +223,11 @@ class WrappedLightningModule(pl.LightningModule):
         loss_norm: str = "matrix",
         delta_cutoff: int = 2,
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
+        tracking_input_paths: list[str] | None = None,
+        tracking_detection_folder: str = "TRA",
+        tracking_features: str = "wrfeat",
+        tracking_mode: str = "greedy",
+        tracking_max_distance: int = 128,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
         debug_dir:str=None,
@@ -253,6 +251,11 @@ class WrappedLightningModule(pl.LightningModule):
 
         self.lr = learning_rate
         self.tracking_frequency = tracking_frequency
+        self.tracking_input_paths = tracking_input_paths or []
+        self.tracking_detection_folder = tracking_detection_folder
+        self.tracking_features = tracking_features
+        self.tracking_mode = tracking_mode
+        self.tracking_max_distance = tracking_max_distance
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
@@ -470,19 +473,32 @@ class WrappedLightningModule(pl.LightningModule):
         print(" ")
 
         if (
-            self.tracking_frequency > 0
-            and self.current_epoch % self.tracking_frequency == 0
+            _is_tracking_epoch(self.current_epoch, self.tracking_frequency)
+            and self.trainer.is_global_zero
         ):
-            _data = self.trainer.val_dataloaders.dataset.datasets[0].datasets[0]
             try:
                 metrics = log_tracking_metrics(
-                    self.model, _data, self.causal_norm, self.delta_cutoff
+                    model=self.model,
+                    input_paths=self.tracking_input_paths,
+                    detection_folder=self.tracking_detection_folder,
+                    features=self.tracking_features,
+                    mode=self.tracking_mode,
+                    max_distance=self.tracking_max_distance,
                 )
-                self.logger.experiment.add_scalar(
-                    "tra_error", 1 - metrics["TRA"].mean(), self.current_epoch
+                movies = metrics[metrics["movie"] != "Mean"]
+                values = {
+                    "val_TRA": float(movies["TRA"].mean()),
+                    "val_AOGM": float(movies["AOGM"].mean()),
+                }
+                self.log_dict(
+                    values,
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=False,
+                    rank_zero_only=True,
                 )
             except Exception as e:
-                logging.error(f"Error logging tracking metrics: {e}")
+                logging.exception(f"Error logging tracking metrics: {e}")
 
         if self.batch_val_tb is not None:
             batch = self.batch_val_tb["batch"]
@@ -814,6 +830,7 @@ def train(args):
             downscale_spatial=args.downscale_spatial,
             sanity_dist=args.sanity_dist,
             crop_size=args.crop_size,
+            crop_ensure_all_centers=args.crop_ensure_all_centers,
             compress=args.compress,
         )
 
@@ -877,6 +894,7 @@ def train(args):
         downscale_spatial=args.downscale_spatial,
         sanity_dist=args.sanity_dist,
         compress=args.compress,
+        crop_ensure_all_centers=args.crop_ensure_all_centers,
     )
     sampler_kwargs = dict(
         batch_size=args.batch_size,
@@ -970,6 +988,11 @@ def train(args):
         causal_norm=args.causal_norm,
         loss_norm=args.loss_norm,
         tracking_frequency=args.tracking_frequency,
+        tracking_input_paths=args.input_val,
+        tracking_detection_folder=args.detection_folders[0],
+        tracking_features=args.features,
+        tracking_mode=args.tracking_mode,
+        tracking_max_distance=args.tracking_max_distance,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -991,6 +1014,11 @@ def train(args):
                 causal_norm=args.causal_norm,
                 loss_norm=args.loss_norm,
                 tracking_frequency=args.tracking_frequency,
+                tracking_input_paths=args.input_val,
+                tracking_detection_folder=args.detection_folders[0],
+                tracking_features=args.features,
+                tracking_mode=args.tracking_mode,
+                tracking_max_distance=args.tracking_max_distance,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1159,7 +1187,24 @@ def parse_train_args():
     )
 
     parser.add_argument("--augment", type=int, default=3)
-    parser.add_argument("--tracking_frequency", type=int, default=-1)
+    parser.add_argument(
+        "--tracking_frequency",
+        type=int,
+        default=-1,
+        help="run full-movie validation every N epochs; <=0 disables it",
+    )
+    parser.add_argument(
+        "--tracking_mode",
+        choices=("greedy", "greedy_nodiv", "ilp"),
+        default="greedy",
+        help="linking mode used for full-movie validation",
+    )
+    parser.add_argument(
+        "--tracking_max_distance",
+        type=int,
+        default=128,
+        help="maximum candidate-link distance during full-movie validation",
+    )
 
     parser.add_argument("--sanity_dist", action="store_true")
     parser.add_argument("--preallocate", type=str2bool, default=False)
@@ -1214,6 +1259,12 @@ def parse_train_args():
         nargs="+",
         default=None,
         help="random crop size for augmentation",
+    )
+    parser.add_argument(
+        "--crop_ensure_all_centers",
+        type=str2bool,
+        default=True,
+        help="retain all centers along crop dimensions where their extent fits",
     )
     parser.add_argument(
         "--weight_by_ndivs",
