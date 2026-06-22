@@ -316,10 +316,9 @@ class WRRandomCrop:
         self._ndim = ndim
         self._crop_bounds = crop_size[::2], crop_size[1::2]
         self.ensure_all_centers = ensure_all_centers
-        self._rng = np.random.RandomState()
 
     def __call__(self, features: WRFeatures):
-        crop_size = self._rng.randint(self._crop_bounds[0], self._crop_bounds[1] + 1)
+        crop_size = np.random.randint(self._crop_bounds[0], self._crop_bounds[1] + 1)
         points = features.coords
 
         if len(points) == 0:
@@ -332,7 +331,7 @@ class WRRandomCrop:
             points[_idx]
             - crop_size
             + 1
-            + self._rng.randint(crop_size // 4, 3 * crop_size // 4)
+            + np.random.randint(crop_size // 4, 3 * crop_size // 4)
         )
 
         # Do not cut detections along dimensions where the complete occupied
@@ -361,10 +360,12 @@ class WRRandomCrop:
 class WRBaseAugmentation:
     def __init__(self, p: float = 0.5) -> None:
         self._p = p
-        self._rng = np.random.RandomState()
 
     def __call__(self, features: WRFeatures):
-        if self._rng.rand() > self._p or len(features) == 0:
+        # PyTorch seeds NumPy's process-local RNG separately in each DataLoader
+        # worker. Do not keep a RandomState on the dataset: it is cloned with an
+        # identical state into every worker and may also be frozen in cache files.
+        if np.random.rand() > self._p or len(features) == 0:
             return features
         return self._augment(features)
 
@@ -375,7 +376,7 @@ class WRBaseAugmentation:
 class WRRandomFlip(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
         ndim = features.ndim
-        flip = self._rng.randint(0, 2, ndim)
+        flip = np.random.randint(0, 2, ndim)
         # a flip is a reflection M = diag(+-1); apply it to coords *and* features
         # (the inertia tensor's off-diagonals flip sign) for a consistent sample.
         signs = np.ones(ndim)
@@ -468,13 +469,13 @@ class WRRandomAffine(WRBaseAugmentation):
             raise ValueError("scale bounds must satisfy 0 < min <= max")
 
     def _augment(self, features: WRFeatures):
-        degrees = self._rng.uniform(-self.degrees, self.degrees) / 180 * np.pi
+        degrees = np.random.uniform(-self.degrees, self.degrees) / 180 * np.pi
         # A linear draw from (0.5, 2) is biased toward zooming in (mean 1.25).
         # A single log-uniform draw makes reciprocal zooms equally likely and
         # avoids unrealistic independent stretching of each spatial axis.
-        scale = np.exp(self._rng.uniform(np.log(self.scale[0]), np.log(self.scale[1])))
-        shy = self._rng.uniform(-self.shear[0], self.shear[0])
-        shx = self._rng.uniform(-self.shear[1], self.shear[1])
+        scale = np.exp(np.random.uniform(np.log(self.scale[0]), np.log(self.scale[1])))
+        shy = np.random.uniform(-self.shear[0], self.shear[0])
+        shx = np.random.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
             _rotation_matrix(degrees)
@@ -510,8 +511,8 @@ class WRRandomBrightness(WRBaseAugmentation):
         self.shift = shift
 
     def _augment(self, features: WRFeatures):
-        scale = self._rng.uniform(*self.scale)
-        shift = self._rng.uniform(*self.shift)
+        scale = np.random.uniform(*self.scale)
+        shift = np.random.uniform(*self.shift)
 
         key_vals = []
 
@@ -534,7 +535,7 @@ class WRRandomOffset(WRBaseAugmentation):
         self.offset = offset
 
     def _augment(self, features: WRFeatures):
-        offset = self._rng.uniform(*self.offset, features.coords.shape)
+        offset = np.random.uniform(*self.offset, features.coords.shape)
         coords = features.coords + offset
         return WRFeatures(
             coords=coords,
@@ -552,7 +553,7 @@ class WRRandomMovement(WRBaseAugmentation):
         self.offset = offset
 
     def _augment(self, features: WRFeatures):
-        base_offset = self._rng.uniform(*self.offset, features.coords.shape[-1])
+        base_offset = np.random.uniform(*self.offset, features.coords.shape[-1])
         tmin = features.timepoints.min()
         offset = (features.timepoints[:, None] - tmin) * base_offset[None]
         coords = features.coords + offset

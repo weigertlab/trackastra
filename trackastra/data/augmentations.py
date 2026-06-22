@@ -362,7 +362,6 @@ class RandomCrop:
         self._crop_bounds = crop_size[::2], crop_size[1::2]
         self._use_padding = use_padding
         self._ensure_inside_points = ensure_inside_points
-        self._rng = np.random.RandomState()
         self._padding_mode = padding_mode
 
     def crop_img(self, img: np.ndarray, corner: np.ndarray, crop_size: np.ndarray):
@@ -403,7 +402,7 @@ class RandomCrop:
 
         points = points.astype(int)
 
-        crop_size = self._rng.randint(self._crop_bounds[0], self._crop_bounds[1] + 1)
+        crop_size = np.random.randint(self._crop_bounds[0], self._crop_bounds[1] + 1)
         # print(f'{crop_size=}')
 
         if self._ensure_inside_points:
@@ -418,10 +417,10 @@ class RandomCrop:
                 points[_idx]
                 - crop_size
                 + 1
-                + self._rng.randint(crop_size // 4, 3 * crop_size // 4)
+                + np.random.randint(crop_size // 4, 3 * crop_size // 4)
             )
         else:
-            corner = self._rng.randint(
+            corner = np.random.randint(
                 0, np.maximum(1, np.array(img.shape[-self._ndim :]) - crop_size)
             )
 

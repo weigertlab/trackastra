@@ -46,16 +46,42 @@ def test_random_affine_scale_is_isotropic_and_log_symmetric():
     augmentation = WRRandomAffine(
         p=1, degrees=0, scale=(0.5, 2), shear=(0, 0)
     )
-    augmentation._rng = np.random.RandomState(42)
-
-    scales = []
-    for _ in range(2000):
-        augmentation(features)
-        assert augmentation._M[0, 0] == pytest.approx(augmentation._M[1, 1])
-        scales.append(augmentation._M[0, 0])
+    state = np.random.get_state()
+    try:
+        np.random.seed(42)
+        scales = []
+        for _ in range(2000):
+            augmentation(features)
+            assert augmentation._M[0, 0] == pytest.approx(augmentation._M[1, 1])
+            scales.append(augmentation._M[0, 0])
+    finally:
+        np.random.set_state(state)
 
     assert np.mean(np.log(scales)) == pytest.approx(0, abs=0.03)
     assert np.mean(np.asarray(scales) < 1) == pytest.approx(0.5, abs=0.03)
+
+
+def test_wr_augmentation_uses_seeded_process_rng():
+    features = WRFeatures(
+        coords=np.array([[0.0, 0.0], [1.0, 1.0]]),
+        labels=np.array([1, 2]),
+        timepoints=np.array([0, 1]),
+        features={},
+    )
+    augmentation = WRRandomMovement(offset=(-10, 10), p=1)
+    state = np.random.get_state()
+    try:
+        np.random.seed(42)
+        first = augmentation(features).coords
+        np.random.seed(42)
+        repeated = augmentation(features).coords
+        np.random.seed(43)
+        other_worker = augmentation(features).coords
+    finally:
+        np.random.set_state(state)
+
+    assert np.array_equal(first, repeated)
+    assert not np.array_equal(first, other_worker)
 
 
 def test_random_crop_retains_centers_in_dimensions_that_fit():
