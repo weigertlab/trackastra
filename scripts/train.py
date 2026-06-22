@@ -287,20 +287,23 @@ class WrappedLightningModule(pl.LightningModule):
         loss = self.criterion(A_pred, A)
 
         if self.causal_norm != "none":
-            # Batched (loop-free) blockwise causal softmax over the whole batch:
-            # avoids the per-sample Python loop and its data-dependent CPU<->GPU
-            # syncs that were starving the GPU.
-            A_pred_soft = blockwise_causal_norm_batched(
-                A_pred, timepoints, mode=self.causal_norm, mask_invalid=mask_invalid
-            )
-            with torch.cuda.amp.autocast(enabled=False):
+            # BF16 rounds confident probabilities to exactly 0 or 1 before BCE,
+            # which can produce incorrect or non-finite gradients. Normalize and
+            # evaluate the probability-space loss entirely in float32.
+            with torch.autocast(device_type=A_pred.device.type, enabled=False):
+                A_pred_soft = blockwise_causal_norm_batched(
+                    A_pred.float(),
+                    timepoints,
+                    mode=self.causal_norm,
+                    mask_invalid=mask_invalid,
+                )
                 if len(A) > 0:
                     # debug
                     if torch.any(torch.isnan(A_pred_soft)):
                         print(A_pred)
 
                 # Keep the non-softmaxed loss for numerical stability
-                loss = 0.01 * loss + self.criterion_softmax(A_pred_soft, A)
+                loss = 0.01 * loss + self.criterion_softmax(A_pred_soft, A.float())
 
         # Reweighting does not need gradients
         with torch.no_grad():

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from scripts.train import _reduce_decision_loss, _reduce_matrix_loss
+from scripts.train import (
+    WrappedLightningModule,
+    _reduce_decision_loss,
+    _reduce_matrix_loss,
+)
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
 from trackastra.data.distributed import (
@@ -79,6 +83,43 @@ def test_matrix_loss_preserves_original_reduction():
     loss = _reduce_matrix_loss(pair_loss, mask)
 
     assert loss.item() == pytest.approx(expected.item())
+
+
+def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
+    class FixedBF16Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            logits = torch.zeros((3, 3), dtype=torch.bfloat16)
+            logits[0, 2] = 6
+            logits[1, 2] = -6
+            self.logits = torch.nn.Parameter(logits)
+
+        def forward(self, coords, features, padding_mask=None):
+            return self.logits.unsqueeze(0) + 0
+
+    model = FixedBF16Model()
+    module = WrappedLightningModule(
+        model,
+        causal_norm="quiet_softmax",
+        loss_norm="decision",
+        delta_cutoff=1,
+    )
+    batch = {
+        "features": torch.zeros((1, 3, 1)),
+        "coords": torch.zeros((1, 3, 2)),
+        "assoc_matrix": torch.zeros((1, 3, 3)),
+        "timepoints": torch.tensor([[0, 0, 1]]),
+        "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
+    }
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        loss = module._common_step(batch)["loss"]
+    loss.backward()
+
+    assert loss.dtype == torch.float32
+    assert torch.isfinite(loss)
+    assert torch.isfinite(model.logits.grad).all()
+    assert model.logits.grad[0, 2] > 0.1
 
 
 def test_balanced_batch_sampler_partial_batch():
