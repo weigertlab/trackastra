@@ -7,6 +7,7 @@ import pytest
 import torch
 from scripts.train import (
     WrappedLightningModule,
+    _apply_focal_weight,
     _reduce_decision_loss,
     _reduce_matrix_loss,
 )
@@ -83,6 +84,14 @@ def test_matrix_loss_preserves_original_reduction():
     loss = _reduce_matrix_loss(pair_loss, mask)
 
     assert loss.item() == pytest.approx(expected.item())
+
+
+def test_focal_weight_preserves_gamma_zero_and_focuses_hard_examples():
+    bce = torch.tensor([0.1, 2.0])
+
+    assert torch.equal(_apply_focal_weight(bce, gamma=0), bce)
+    focal_ratio = _apply_focal_weight(bce, gamma=2) / bce
+    assert focal_ratio[0] < focal_ratio[1]
 
 
 def test_quiet_softmax_loss_keeps_bf16_gradients_finite():

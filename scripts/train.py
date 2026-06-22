@@ -73,6 +73,13 @@ def _process_memory():
     return mem_info.rss
 
 
+def _apply_focal_weight(loss: torch.Tensor, gamma: float) -> torch.Tensor:
+    """Apply binary focal modulation to an unreduced BCE loss."""
+    if gamma == 0:
+        return loss
+    return (1 - torch.exp(-loss)).pow(gamma) * loss
+
+
 def _reduce_decision_loss(
     loss: torch.Tensor,
     mask: torch.Tensor,
@@ -221,6 +228,7 @@ class WrappedLightningModule(pl.LightningModule):
         learning_rate: float = 1e-5,
         causal_norm: str = "none",
         loss_norm: str = "matrix",
+        focal_loss_gamma: float = 0.0,
         delta_cutoff: int = 2,
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
         tracking_input_paths: list[str] | None = None,
@@ -240,7 +248,10 @@ class WrappedLightningModule(pl.LightningModule):
         self.causal_norm = causal_norm
         if loss_norm not in ("matrix", "decision"):
             raise ValueError(f"Unknown loss_norm {loss_norm!r}")
+        if focal_loss_gamma < 0:
+            raise ValueError("focal_loss_gamma must be non-negative")
         self.loss_norm = loss_norm
+        self.focal_loss_gamma = focal_loss_gamma
         self.delta_cutoff = delta_cutoff
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
         self.criterion_softmax = torch.nn.BCELoss(reduction="none")
@@ -284,7 +295,9 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         A_pred[mask_invalid] = 0
-        loss = self.criterion(A_pred, A)
+        loss = _apply_focal_weight(
+            self.criterion(A_pred, A), self.focal_loss_gamma
+        )
 
         if self.causal_norm != "none":
             # BF16 rounds confident probabilities to exactly 0 or 1 before BCE,
@@ -303,7 +316,11 @@ class WrappedLightningModule(pl.LightningModule):
                         print(A_pred)
 
                 # Keep the non-softmaxed loss for numerical stability
-                loss = 0.01 * loss + self.criterion_softmax(A_pred_soft, A.float())
+                soft_loss = _apply_focal_weight(
+                    self.criterion_softmax(A_pred_soft, A.float()),
+                    self.focal_loss_gamma,
+                )
+                loss = 0.01 * loss + soft_loss
 
         # Reweighting does not need gradients
         with torch.no_grad():
@@ -867,6 +884,7 @@ def train(args):
             delta_cutoff=args.delta_cutoff,
             causal_norm=args.causal_norm,
             loss_norm=args.loss_norm,
+            focal_loss_gamma=args.focal_loss_gamma,
             tracking_frequency=args.tracking_frequency,
             batch_val_tb_idx=0,
             div_upweight=args.div_upweight,
@@ -990,6 +1008,7 @@ def train(args):
         delta_cutoff=args.delta_cutoff,
         causal_norm=args.causal_norm,
         loss_norm=args.loss_norm,
+        focal_loss_gamma=args.focal_loss_gamma,
         tracking_frequency=args.tracking_frequency,
         tracking_input_paths=args.input_val,
         tracking_detection_folder=args.detection_folders[0],
@@ -1016,6 +1035,7 @@ def train(args):
                 delta_cutoff=args.delta_cutoff,
                 causal_norm=args.causal_norm,
                 loss_norm=args.loss_norm,
+                focal_loss_gamma=args.focal_loss_gamma,
                 tracking_frequency=args.tracking_frequency,
                 tracking_input_paths=args.input_val,
                 tracking_detection_folder=args.detection_folders[0],
@@ -1180,6 +1200,12 @@ def parse_train_args():
         choices=["matrix", "decision"],
         default="matrix",
         help="loss reduction: original matrix-entry mean or per-decision mean",
+    )
+    parser.add_argument(
+        "--focal_loss_gamma",
+        type=float,
+        default=0.0,
+        help="binary focal-loss exponent; 0 disables focal weighting",
     )
     parser.add_argument("--div_upweight", type=float, default=2)
     parser.add_argument(
