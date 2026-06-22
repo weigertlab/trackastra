@@ -6,10 +6,57 @@ import pytest
 import torch
 from tifffile import imwrite
 from trackastra.data import CTCData, collate_sequence_padding
+from trackastra.data.data import association_distances, warn_association_distances
 
 # Mark all tests in this module as requiring training dependencies
 # (most tests are skipped as outdated, but they use CTCData which requires training pipeline)
 pytestmark = pytest.mark.train
+
+
+def test_association_distance_warning_deduplicates_overlapping_windows(caplog):
+    windows = [
+        {
+            "t1": 0,
+            "coords": np.array([[0.0, 0.0], [3.0, 0.0], [13.0, 0.0]]),
+            "labels": np.array([10, 11, 12]),
+            "timepoints": np.array([0, 1, 2]),
+            "assoc_matrix": np.array(
+                [[1, 1, 1], [1, 1, 1], [1, 1, 1]], dtype=bool
+            ),
+        },
+        {
+            "t1": 1,
+            "coords": np.array([[3.0, 0.0], [13.0, 0.0]]),
+            "labels": np.array([11, 12]),
+            "timepoints": np.array([1, 2]),
+            "assoc_matrix": np.ones((2, 2), dtype=bool),
+        },
+    ]
+
+    distances = association_distances(windows, delta_cutoff=1)
+    assert sorted(distances.tolist()) == [3.0, 10.0]
+
+    warn_association_distances(
+        distances,
+        max_distance=5,
+        delta_cutoff=1,
+        cutoff_name="spatial_pos_cutoff",
+        dataset_name="test dataset",
+    )
+    assert "1/2 (50.00%)" in caplog.text
+    assert "max=10.00" in caplog.text
+    assert "cannot be recovered" in caplog.text
+
+
+def test_association_distance_warning_ignores_values_at_cutoff(caplog):
+    warn_association_distances(
+        np.array([3.0, 10.0]),
+        max_distance=10,
+        delta_cutoff=1,
+        cutoff_name="spatial_pos_cutoff",
+        dataset_name="test dataset",
+    )
+    assert caplog.text == ""
 
 
 def example_dataset():

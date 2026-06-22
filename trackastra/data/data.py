@@ -99,6 +99,82 @@ class _CompressedArray:
         return data
 
 
+def association_distances(windows, delta_cutoff: int) -> np.ndarray:
+    """Distances of unique positive forward associations in raw windows.
+
+    Window coordinates have not yet been cropped or augmented. Association keys
+    include a sequence index so repeated detection folders remain distinct while
+    edges repeated by overlapping windows are counted once.
+    """
+    if delta_cutoff < 1:
+        raise ValueError("delta_cutoff must be positive")
+
+    distances = {}
+    sequence = 0
+    previous_t1 = None
+    for window in windows:
+        t1 = int(window["t1"])
+        if previous_t1 is not None and t1 <= previous_t1:
+            sequence += 1
+        previous_t1 = t1
+
+        assoc = window["assoc_matrix"]
+        if isinstance(assoc, _CompressedArray):
+            assoc = assoc.decompress()
+        assoc = np.asarray(assoc)
+        timepoints = np.asarray(window["timepoints"])
+        labels = np.asarray(window["labels"])
+        coords = np.asarray(window["coords"])
+
+        positive = assoc if assoc.dtype == np.bool_ else assoc == 1
+        rows, cols = np.nonzero(positive)
+        dt = timepoints[cols] - timepoints[rows]
+        valid = (dt > 0) & (dt <= delta_cutoff)
+        rows = rows[valid]
+        cols = cols[valid]
+        edge_distances = np.linalg.norm(coords[cols] - coords[rows], axis=1)
+        for i, j, distance in zip(rows, cols, edge_distances):
+            key = (
+                sequence,
+                int(timepoints[i]),
+                int(labels[i]),
+                int(timepoints[j]),
+                int(labels[j]),
+            )
+            distances.setdefault(key, float(distance))
+
+    return np.fromiter(distances.values(), dtype=np.float64)
+
+
+def warn_association_distances(
+    distances: np.ndarray,
+    max_distance: float,
+    delta_cutoff: int,
+    cutoff_name: str,
+    dataset_name: str,
+) -> None:
+    """Warn when labeled associations cannot pass an inference distance cutoff."""
+    exceeds = distances > max_distance
+    n_exceeds = int(exceeds.sum())
+    if n_exceeds == 0:
+        return
+
+    logger.warning(
+        "%s: %d/%d (%.2f%%) unique supervised forward associations within "
+        "delta_cutoff=%d exceed %s=%g (p99=%.2f, max=%.2f). These associations "
+        "are labeled positive but cannot be recovered with this inference cutoff.",
+        dataset_name,
+        n_exceeds,
+        len(distances),
+        100 * n_exceeds / len(distances),
+        delta_cutoff,
+        cutoff_name,
+        max_distance,
+        np.quantile(distances, 0.99),
+        distances.max(),
+    )
+
+
 def debug_function(f):
     def wrapper(*args, **kwargs):
         try:

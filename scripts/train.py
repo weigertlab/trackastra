@@ -953,6 +953,11 @@ def train(args):
         },
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
+        association_distance_cutoffs={
+            "spatial_pos_cutoff": args.spatial_pos_cutoff,
+            "tracking_max_distance": args.tracking_max_distance,
+        },
+        association_delta_cutoff=args.delta_cutoff,
     )
     if args.epochs == 0:
         datamodule.prepare_data()

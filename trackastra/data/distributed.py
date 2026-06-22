@@ -13,6 +13,7 @@ from timeit import default_timer
 import numpy as np
 import torch
 from lightning import LightningDataModule
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch.utils.data import (
     BatchSampler,
     ConcatDataset,
@@ -21,7 +22,7 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from .data import CTCData
+from .data import CTCData, association_distances, warn_association_distances
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -224,6 +225,8 @@ class BalancedDataModule(LightningDataModule):
         loader_kwargs: dict,
         train_dataset_kwargs: dict | None = None,
         val_dataset_kwargs: dict | None = None,
+        association_distance_cutoffs: dict[str, float] | None = None,
+        association_delta_cutoff: int = 1,
     ):
         super().__init__()
         self.input_train = input_train
@@ -236,6 +239,26 @@ class BalancedDataModule(LightningDataModule):
         self.val_dataset_kwargs = val_dataset_kwargs or {}
         self.sampler_kwargs = sampler_kwargs
         self.loader_kwargs = loader_kwargs
+        self.association_distance_cutoffs = association_distance_cutoffs or {}
+        self.association_delta_cutoff = association_delta_cutoff
+
+    @rank_zero_only
+    def _warn_association_distances(self, dataset, split: str) -> None:
+        if not self.association_distance_cutoffs:
+            return
+        distances = association_distances(
+            dataset.windows, delta_cutoff=self.association_delta_cutoff
+        )
+        for cutoff_name, max_distance in self.association_distance_cutoffs.items():
+            if max_distance is None:
+                continue
+            warn_association_distances(
+                distances,
+                max_distance=max_distance,
+                delta_cutoff=self.association_delta_cutoff,
+                cutoff_name=cutoff_name,
+                dataset_name=f"{split} dataset {dataset.root}",
+            )
 
     def _kwargs_for_split(self, split: str) -> dict:
         kwargs = self.dataset_kwargs.copy()
@@ -290,6 +313,8 @@ class BalancedDataModule(LightningDataModule):
                 )
                 for inp in inps
             )
+            for dataset in self.datasets[split].datasets:
+                self._warn_association_distances(dataset, split)
             logger.info(
                 f"Loaded {len(self.datasets[split])} {split.upper()} samples (in"
                 f" {(default_timer() - start):.1f} s)\n\n"

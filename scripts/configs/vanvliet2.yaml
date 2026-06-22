@@ -3,7 +3,7 @@ epochs: 500
 warmup_epochs: 5
 augment: 3
 window: 4
-attn_dist_mode: v1
+attn_dist_mode: none
 delta_cutoff: 1
 num_encoder_layers: 6
 num_decoder_layers: 6
