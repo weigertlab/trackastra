@@ -215,6 +215,11 @@ class Trackastra:
             window_size=self.transformer.config["window"],
             progbar_class=progbar_class,
             as_torch=True,
+            feature_mode=(
+                self.train_args["features"]
+                if self.train_args["features"] in ("wrfeat", "wrfeat2")
+                else "wrfeat"
+            ),
         )
 
         batch_size = batch_size or self.batch_size

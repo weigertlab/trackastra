@@ -180,6 +180,71 @@ class WRFeatures:
         )
         return feats
 
+    def features_stacked_for(self, mode: Literal["wrfeat", "wrfeat2"]):
+        """Return the configured shallow feature representation.
+
+        ``wrfeat2`` is derived after geometric augmentation so its normalized
+        inertia components remain consistent with the transformed coordinates.
+        It is intentionally 2D-only until a proper 3D tensor decomposition is
+        defined.
+        """
+        if mode == "wrfeat":
+            return self.features_stacked
+        if mode != "wrfeat2":
+            raise ValueError(f"Unknown WRFeatures mode {mode!r}")
+        if self.ndim != 2:
+            raise ValueError("wrfeat2 currently supports only 2D data")
+
+        required = {
+            "equivalent_diameter_area",
+            "intensity_mean",
+            "inertia_tensor",
+            "border_dist",
+        }
+        missing = required.difference(self.features)
+        if missing:
+            raise ValueError(f"wrfeat2 requires feature properties {sorted(missing)}")
+
+        diameter = self.features["equivalent_diameter_area"][:, 0]
+        intensity = self.features["intensity_mean"][:, 0]
+        inertia = self.features["inertia_tensor"].reshape(-1, 2, 2)
+        border_dist = self.features["border_dist"][:, 0]
+
+        trace = inertia[:, 0, 0] + inertia[:, 1, 1]
+        area = np.pi * np.square(diameter / 2)
+        eps = np.finfo(np.float32).eps
+        compactness = trace / np.maximum(area, eps)
+
+        q1 = np.divide(
+            inertia[:, 0, 0] - inertia[:, 1, 1],
+            trace,
+            out=np.zeros_like(trace),
+            where=trace > eps,
+        )
+        q2 = np.divide(
+            2 * inertia[:, 0, 1],
+            trace,
+            out=np.zeros_like(trace),
+            where=trace > eps,
+        )
+        # A positive-semidefinite tensor gives ||q|| <= 1. Project small
+        # numerical violations (or malformed inputs) back onto the unit disk.
+        q_norm = np.sqrt(np.square(q1) + np.square(q2))
+        q_scale = np.maximum(q_norm, 1)
+        q1, q2 = q1 / q_scale, q2 / q_scale
+
+        return np.stack(
+            (
+                np.log1p(np.maximum(diameter, 0)),
+                intensity,
+                np.log1p(np.maximum(compactness, 0)),
+                q1,
+                q2,
+                np.log1p(np.maximum(border_dist, 0)),
+            ),
+            axis=-1,
+        ).astype(np.float32, copy=False)
+
     @property
     def pretrained_feats(self):
         # for compatibility with WRPretrainedFeatures
@@ -580,7 +645,7 @@ def get_features(
     detections: np.ndarray,
     imgs: np.ndarray | None = None,
     features: Literal[
-        "none", "wrfeat", "pretrained_feats", "pretrained_feats_aug"
+        "none", "wrfeat", "wrfeat2", "pretrained_feats", "pretrained_feats_aug"
     ] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
@@ -662,6 +727,7 @@ def build_windows(
     window_size: int,
     progbar_class=tqdm,
     as_torch: bool = False,
+    feature_mode: Literal["wrfeat", "wrfeat2"] = "wrfeat",
 ) -> list[dict]:
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")
@@ -687,14 +753,15 @@ def build_windows(
         if len(feat) == 0:
             coords = np.zeros((0, feat.ndim), dtype=int)
 
+        stacked_features = feat.features_stacked_for(feature_mode)
         w = dict(
             coords=torch.from_numpy(coords) if as_torch else coords,
             t1=torch.tensor(t1, dtype=torch.int32) if as_torch else t1,
             labels=torch.from_numpy(labels) if as_torch else labels,
             timepoints=torch.from_numpy(timepoints) if as_torch else timepoints,
-            features=torch.from_numpy(feat.features_stacked)
+            features=torch.from_numpy(stacked_features)
             if as_torch
-            else feat.features_stacked,
+            else stacked_features,
         )
         # Add pre-trained features
         if pt_feats is not None:

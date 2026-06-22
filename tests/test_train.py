@@ -8,6 +8,7 @@ import torch
 from scripts.train import (
     WrappedLightningModule,
     _apply_focal_weight,
+    _feature_dim,
     _reduce_decision_loss,
     _reduce_matrix_loss,
 )
@@ -23,6 +24,12 @@ from trackastra.data.distributed import (
 pytestmark = pytest.mark.train
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+def test_wrfeat2_feature_dim_is_2d_only():
+    assert _feature_dim(2, "wrfeat2") == 6
+    with pytest.raises(ValueError, match="only 2D"):
+        _feature_dim(3, "wrfeat2")
 
 
 class _SamplerDataset(Dataset):

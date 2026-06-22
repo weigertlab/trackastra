@@ -8,6 +8,7 @@ from trackastra.data.wrfeat import (
     WRRandomAffine,
     WRRandomCrop,
     WRRandomMovement,
+    build_windows,
 )
 
 pytestmark = pytest.mark.core
@@ -38,6 +39,79 @@ def generate_data(ndim: int = 2, ngrid=10):
 def test_features():
     x, y, _p, _ts = generate_data(ndim=2, ngrid=10)
     WRFeatures.from_mask_img(mask=y, img=x)
+
+
+def _wrfeat2_example():
+    return WRFeatures(
+        coords=np.zeros((3, 2), dtype=np.float32),
+        labels=np.arange(3),
+        timepoints=np.zeros(3, dtype=int),
+        features={
+            "equivalent_diameter_area": np.full((3, 1), 2, dtype=np.float32),
+            "intensity_mean": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
+            "inertia_tensor": np.array(
+                [
+                    [2, 0, 0, 2],  # isotropic
+                    [3, 0, 0, 1],  # anisotropy along an axis
+                    [2, 1, 1, 2],  # same anisotropy, rotated 45 degrees
+                ],
+                dtype=np.float32,
+            ),
+            "border_dist": np.array([[0], [0.5], [1]], dtype=np.float32),
+        },
+    )
+
+
+def test_wrfeat2_decomposes_inertia_and_bounds_orientation():
+    features = _wrfeat2_example().features_stacked_for("wrfeat2")
+
+    assert features.shape == (3, 6)
+    assert features.dtype == np.float32
+    assert np.allclose(features[:, 0], np.log1p(2))
+    assert np.allclose(features[:, 1], [0.1, 0.2, 0.3])
+    assert np.allclose(features[:, 2], np.log1p(4 / np.pi))
+    assert np.allclose(features[:, 3:5], [[0, 0], [0.5, 0], [0, 0.5]])
+    assert np.allclose(features[:, 5], np.log1p([0, 0.5, 1]))
+    assert np.all(np.linalg.norm(features[:, 3:5], axis=1) <= 1)
+
+
+def test_wrfeat2_is_derived_after_scale_augmentation():
+    raw = _wrfeat2_example()
+    augmentation = WRRandomAffine(
+        p=1, degrees=0, scale=(1.5, 1.5), shear=(0, 0)
+    )
+    augmented = augmentation(raw)
+    before = raw.features_stacked_for("wrfeat2")
+    after = augmented.features_stacked_for("wrfeat2")
+
+    assert not np.allclose(before[:, 0], after[:, 0])
+    assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
+
+
+def test_build_windows_uses_requested_wrfeat_mode():
+    first = _wrfeat2_example()
+    second = _wrfeat2_example()
+    second.timepoints = np.ones(3, dtype=int)
+    windows = build_windows(
+        [first, second],
+        window_size=2,
+        progbar_class=lambda iterable, **_kwargs: iterable,
+        feature_mode="wrfeat2",
+    )
+
+    expected = WRFeatures.concat([first, second]).features_stacked_for("wrfeat2")
+    assert np.array_equal(windows[0]["features"], expected)
+
+
+def test_wrfeat2_rejects_3d_data():
+    features = WRFeatures(
+        coords=np.zeros((1, 3)),
+        labels=np.array([1]),
+        timepoints=np.array([0]),
+        features={},
+    )
+    with pytest.raises(ValueError, match="only 2D"):
+        features.features_stacked_for("wrfeat2")
 
 
 def test_random_affine_scale_is_isotropic_and_log_symmetric():

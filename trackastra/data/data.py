@@ -37,6 +37,8 @@ from trackastra.utils import blockwise_sum, normalize
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+_WRFEAT_MODES = ("wrfeat", "wrfeat2")
+
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
     """Only keep tracklets that are present in the given time interval."""
@@ -208,6 +210,7 @@ class CTCData(Dataset):
             "patch",
             "patch_regionprops",
             "wrfeat",
+            "wrfeat2",
         ] = "wrfeat",
         sanity_dist: bool = False,
         crop_size: tuple | None = None,
@@ -261,7 +264,7 @@ class CTCData(Dataset):
         self.features = features
         self.crop_ensure_all_centers = crop_ensure_all_centers
 
-        if features not in ("none", "wrfeat") and features not in _PROPERTIES[ndim]:
+        if features not in ("none", *_WRFEAT_MODES) and features not in _PROPERTIES[ndim]:
             raise ValueError(
                 f"'{features}' not one of the supported {ndim}D features"
                 f" {tuple(_PROPERTIES[ndim].keys())}"
@@ -305,7 +308,7 @@ class CTCData(Dataset):
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features in _WRFEAT_MODES:
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -379,7 +382,7 @@ class CTCData(Dataset):
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features in _WRFEAT_MODES:
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -432,7 +435,7 @@ class CTCData(Dataset):
             default_augmenter,
         )
 
-        if self.features == "wrfeat":
+        if self.features in _WRFEAT_MODES:
             return self._setup_features_augs_wrfeat(
                 ndim, features, augment, crop_size, crop_ensure_all_centers
             )
@@ -899,7 +902,7 @@ class CTCData(Dataset):
 
     def __getitem__(self, n: int, return_dense=None):
         # if not set, use default
-        if self.features == "wrfeat":
+        if self.features in _WRFEAT_MODES:
             return self._getitem_wrfeat(n, return_dense)
 
         if return_dense is None:
@@ -1089,8 +1092,9 @@ class CTCData(Dataset):
         crop_size: tuple[int],
         crop_ensure_all_centers: bool,
     ):
-        # FIXME: hardcoded
-        feat_dim = 7 if ndim == 2 else 12
+        if features == "wrfeat2" and ndim != 2:
+            raise ValueError("wrfeat2 currently supports only 2D data")
+        feat_dim = 6 if features == "wrfeat2" else (7 if ndim == 2 else 12)
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
@@ -1325,7 +1329,7 @@ class CTCData(Dataset):
         coords0 = np.concatenate((feat.timepoints[:, None], feat.coords), axis=-1)
         coords0 = torch.from_numpy(coords0).float()
         assoc_matrix = torch.from_numpy(assoc_matrix.astype(np.float32))
-        features = torch.from_numpy(feat.features_stacked).float()
+        features = torch.from_numpy(feat.features_stacked_for(self.features)).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()
 

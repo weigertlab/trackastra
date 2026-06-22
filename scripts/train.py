@@ -753,6 +753,10 @@ def _feature_dim(ndim: int, features: str) -> int:
         return 0
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
+    if features == "wrfeat2":
+        if ndim != 2:
+            raise ValueError("wrfeat2 currently supports only 2D data")
+        return 6
     dims = {
         2: {
             "regionprops": 7,
@@ -812,8 +816,8 @@ def train(args):
 
     memory = _process_memory()
 
-    if args.features == "wrfeat" and args.feat_embed_per_dim <= 1:
-        raise ValueError("For wrfeat, feat_embed_per_dim must be > 1 (e.g. 8)")
+    if args.features in ("wrfeat", "wrfeat2") and args.feat_embed_per_dim <= 1:
+        raise ValueError("For wrfeat modes, feat_embed_per_dim must be > 1 (e.g. 8)")
 
     callbacks = []
     if not args.dry:
@@ -1217,6 +1221,7 @@ def parse_train_args():
             "patch",
             "patch_regionprops",
             "wrfeat",
+            "wrfeat2",
         ],
         default="wrfeat",
     )
