@@ -601,6 +601,25 @@ class WrappedLightningModule(pl.LightningModule):
                 raise ValueError(f"Unknown logger {self.logger}")
 
 
+class PreciseProgressBar(pl.pytorch.callbacks.TQDMProgressBar):
+    """Progress bar that shows loss metrics with higher precision.
+
+    Lightning passes float metrics to tqdm, which formats them with ``.3g``.
+    By pre-formatting numeric values as strings here, tqdm leaves them as-is.
+    """
+
+    def __init__(self, precision: int = 8, **kwargs):
+        super().__init__(**kwargs)
+        self._precision = precision
+
+    def get_metrics(self, trainer, pl_module):
+        items = super().get_metrics(trainer, pl_module)
+        for key, value in items.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                items[key] = f"{value:.{self._precision}f}"
+        return items
+
+
 class ExampleImages(pl.pytorch.callbacks.Callback):
     def __init__(self, n_samples=2, mode="overlay"):
         """Log example images to tensorboard.
@@ -970,6 +989,8 @@ def train(args):
         )
 
     callbacks.append(pl.pytorch.callbacks.Timer(interval="epoch"))
+
+    callbacks.append(PreciseProgressBar(precision=8))
 
     if args.example_images:
         callbacks.append(ExampleImages())
