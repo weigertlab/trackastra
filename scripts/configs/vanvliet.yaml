@@ -20,7 +20,7 @@ train_samples: 32000
 tracking_frequency: 10
 tracking_mode: greedy
 tracking_max_distance: 128
-max_tokens: 2048
+max_detections: 2048
 batch_size: 192
 detection_folders:
 - TRA

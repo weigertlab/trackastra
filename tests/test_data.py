@@ -6,11 +6,200 @@ import pytest
 import torch
 from tifffile import imwrite
 from trackastra.data import CTCData, collate_sequence_padding
-from trackastra.data.data import association_distances, warn_association_distances
+from trackastra.data.data import (
+    _sample_detection_keep_indices,
+    _sample_neighborhood_indices,
+    association_distances,
+    warn_association_distances,
+)
+from trackastra.data.wrfeat import WRFeatures
+from trackastra.utils import normalize
 
 # Mark all tests in this module as requiring training dependencies
 # (most tests are skipped as outdated, but they use CTCData which requires training pipeline)
 pytestmark = pytest.mark.train
+
+
+def test_max_detections_rejects_ambiguous_or_impossible_budgets():
+    with pytest.raises(ValueError, match="Specify only max_detections"):
+        CTCData(max_tokens=4, max_detections=4)
+    with pytest.raises(ValueError, match="at least window_size"):
+        CTCData(window_size=4, max_detections=3)
+
+
+def test_load_for_inference_refines_tra_with_st(tmp_path):
+    sequence = tmp_path / "dataset" / "01"
+    gt = tmp_path / "dataset" / "01_GT" / "TRA"
+    st = tmp_path / "dataset" / "01_ST" / "SEG"
+    sequence.mkdir(parents=True)
+    gt.mkdir(parents=True)
+    st.mkdir(parents=True)
+
+    image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+    tra = np.zeros((10, 10), dtype=np.uint16)
+    tra[4, 4] = 1
+    silver = np.zeros_like(tra)
+    silver[3:6, 3:6] = 1
+    imwrite(sequence / "t000.tif", image)
+    imwrite(gt / "man_track000.tif", tra)
+    imwrite(st / "man_seg000.tif", silver)
+
+    imgs, masks, image_path, gt_path = CTCData.load_for_inference(sequence, "TRA")
+
+    np.testing.assert_allclose(imgs[0], normalize(image))
+    np.testing.assert_array_equal(masks[0], np.maximum(tra, silver))
+    assert image_path == sequence
+    assert gt_path == gt
+
+
+def test_detection_dropout_preserves_each_lineage():
+    assoc = np.zeros((6, 6), dtype=bool)
+    assoc[np.ix_([0, 1, 2], [0, 1, 2])] = True
+    assoc[np.ix_([3, 4], [3, 4])] = True
+
+    state = np.random.get_state()
+    try:
+        np.random.seed(42)
+        keep = _sample_detection_keep_indices(assoc, drop_fraction=1.0)
+    finally:
+        np.random.set_state(state)
+
+    assert len(keep) == 3
+    assert np.intersect1d(keep, [0, 1, 2]).size == 1
+    assert np.intersect1d(keep, [3, 4]).size == 1
+    assert 5 in keep
+
+
+def test_detection_dropout_subsets_wrfeat_window_consistently():
+    features = WRFeatures(
+        coords=np.arange(12, dtype=np.float32).reshape(6, 2),
+        labels=np.array([1, 2, 3, 1, 2, 3]),
+        timepoints=np.array([0, 0, 0, 1, 1, 1]),
+        features={"value": np.arange(6, dtype=np.float32)[:, None]},
+    )
+    assoc = features.labels[:, None] == features.labels[None, :]
+    data = CTCData.__new__(CTCData)
+    data.features = "wrfeat"
+    data.return_dense = False
+    data.cropper = None
+    data.augmenter = None
+    data.detect_drop = 1.0
+    data.detect_drop_fraction = 1.0
+    data.max_tokens = None
+    data.ndim = 2
+    data.windows = [{
+        "coords": features.coords,
+        "assoc_matrix": assoc,
+        "labels": features.labels,
+        "img": np.zeros((2, 1, 1), dtype=np.float32),
+        "mask": np.zeros((2, 1, 1), dtype=np.int32),
+        "timepoints": features.timepoints,
+        "t1": 0,
+        "wrfeat": features,
+    }]
+
+    state = np.random.get_state()
+    try:
+        np.random.seed(42)
+        sample = data[0]
+    finally:
+        np.random.set_state(state)
+
+    assert sample["features"].shape == (3, 1)
+    assert sample["assoc_matrix"].shape == (3, 3)
+    assert set(sample["labels"].tolist()) == {1, 2, 3}
+
+
+def test_max_detections_is_applied_inside_wrfeat_getitem(monkeypatch):
+    features = WRFeatures(
+        coords=np.array([[0, 0], [50, 50], [100, 100]] * 2, dtype=np.float32),
+        labels=np.array([1, 2, 3, 1, 2, 3]),
+        timepoints=np.array([0, 0, 0, 1, 1, 1]),
+        features={"value": np.arange(6, dtype=np.float32)[:, None]},
+    )
+    assoc = features.labels[:, None] == features.labels[None, :]
+    data = CTCData.__new__(CTCData)
+    data.features = "wrfeat"
+    data.return_dense = False
+    data.cropper = None
+    data.augmenter = None
+    data.detect_drop = 0.0
+    data.max_detections = 4
+    data.max_tokens = None
+    data.ndim = 2
+    data.windows = [{
+        "coords": features.coords,
+        "assoc_matrix": assoc,
+        "labels": features.labels,
+        "img": np.zeros((2, 1, 1), dtype=np.float32),
+        "mask": np.zeros((2, 1, 1), dtype=np.int32),
+        "timepoints": features.timepoints,
+        "t1": 0,
+        "wrfeat": features,
+    }]
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)
+
+    sample = data[0]
+
+    assert len(sample["coords"]) == 4
+    assert set(sample["timepoints"].tolist()) == {0, 1}
+    assert sample["loss_mask"].shape == (4, 4)
+
+
+def test_neighborhood_sampling_is_bounded_local_and_keeps_every_frame(monkeypatch):
+    timepoints = np.repeat(np.arange(3), 2)
+    coords = np.array([
+        [0, 0], [100, 100],
+        [1, 0], [101, 100],
+        [2, 0], [102, 100],
+    ], dtype=np.float32)
+    labels = np.tile([1, 2], 3)
+    assoc = labels[:, None] == labels[None, :]
+    monkeypatch.setattr(np.random, "randint", lambda _n: 4)
+
+    keep, loss_mask = _sample_neighborhood_indices(
+        coords, timepoints, assoc, max_detections=4
+    )
+
+    assert len(keep) == 4
+    assert set(timepoints[keep]) == {0, 1, 2}
+    assert {0, 2, 4}.issubset(keep)
+    assert np.array_equal(assoc[keep][:, keep], labels[keep, None] == labels[None, keep])
+    partial_lineage = np.flatnonzero(labels[keep] == 2)[0]
+    assert not loss_mask[partial_lineage].all()
+
+
+def test_neighborhood_sampling_leaves_small_windows_unchanged():
+    coords = np.zeros((3, 2), dtype=np.float32)
+    timepoints = np.arange(3)
+    assoc = np.eye(3, dtype=bool)
+
+    keep, loss_mask = _sample_neighborhood_indices(
+        coords, timepoints, assoc, max_detections=3
+    )
+
+    assert np.array_equal(keep, np.arange(3))
+    assert loss_mask.all()
+
+
+def test_collate_pads_optional_neighborhood_loss_masks():
+    def sample(n):
+        return {
+            "coords": torch.zeros((n, 3)),
+            "features": torch.zeros((n, 1)),
+            "labels": torch.arange(n),
+            "timepoints": torch.arange(n),
+            "assoc_matrix": torch.eye(n),
+        }
+
+    first = sample(2)
+    first["loss_mask"] = torch.tensor([[True, False], [True, True]])
+    second = sample(1)
+    batch = collate_sequence_padding([first, second])
+
+    assert torch.equal(batch["loss_mask"][0], first["loss_mask"])
+    assert batch["loss_mask"][1, 0, 0]
+    assert not batch["loss_mask"][1, 1].any()
 
 
 def test_association_distance_warning_deduplicates_overlapping_windows(caplog):

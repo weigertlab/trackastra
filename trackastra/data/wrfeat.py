@@ -180,7 +180,9 @@ class WRFeatures:
         )
         return feats
 
-    def features_stacked_for(self, mode: Literal["wrfeat", "wrfeat2"]):
+    def features_stacked_for(
+        self, mode: Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
+    ):
         """Return the configured shallow feature representation.
 
         ``wrfeat2`` is derived after geometric augmentation so its normalized
@@ -190,7 +192,7 @@ class WRFeatures:
         """
         if mode == "wrfeat":
             return self.features_stacked
-        if mode != "wrfeat2":
+        if mode not in ("wrfeat2", "wrfeat2_no_intensity"):
             raise ValueError(f"Unknown WRFeatures mode {mode!r}")
         if self.ndim != 2:
             raise ValueError("wrfeat2 currently supports only 2D data")
@@ -233,17 +235,17 @@ class WRFeatures:
         q_scale = np.maximum(q_norm, 1)
         q1, q2 = q1 / q_scale, q2 / q_scale
 
-        return np.stack(
-            (
-                np.log1p(np.maximum(diameter, 0)),
-                intensity,
-                np.log1p(np.maximum(compactness, 0)),
-                q1,
-                q2,
-                np.log1p(np.maximum(border_dist, 0)),
-            ),
-            axis=-1,
-        ).astype(np.float32, copy=False)
+        channels = [
+            np.log1p(np.maximum(diameter, 0)),
+            intensity,
+            np.log1p(np.maximum(compactness, 0)),
+            q1,
+            q2,
+            np.log1p(np.maximum(border_dist, 0)),
+        ]
+        if mode == "wrfeat2_no_intensity":
+            del channels[1]
+        return np.stack(channels, axis=-1).astype(np.float32, copy=False)
 
     @property
     def pretrained_feats(self):
@@ -482,10 +484,17 @@ def _rotation_matrix(theta: float):
 
 
 def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
-    ndim = len(M)
+    # M is either a single (ndim, ndim) map shared by all detections (global
+    # geometric augmentations) or a per-detection stack (N, ndim, ndim) for
+    # independent shape jitter. The two cases differ only in how M contracts.
+    M = np.asarray(M)
+    batched = M.ndim == 3
+    ndim = M.shape[-1]
     # use |det|: area/diameter are positive magnitudes, and a reflection (det<0,
     # e.g. from WRRandomFlip) must not flip their sign (or make diameter complex).
-    absdet = abs(np.linalg.det(M))
+    absdet = np.abs(np.linalg.det(M))  # scalar, or (N,) when batched
+    if batched:
+        absdet = absdet[:, None]
     if k == "area":
         v = absdet * v
     elif k == "equivalent_diameter_area":
@@ -500,7 +509,10 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         eye = np.eye(ndim)
         tr_s = np.trace(v, axis1=1, axis2=2) / (ndim - 1)
         s = tr_s[:, None, None] * eye - v
-        s = np.einsum("ij, rjk, lk -> ril", M, s, M)  # M S M^T
+        if batched:
+            s = np.einsum("rij, rjk, rlk -> ril", M, s, M)  # per-detection M S M^T
+        else:
+            s = np.einsum("ij, rjk, lk -> ril", M, s, M)  # M S M^T
         tr_sp = np.trace(s, axis1=1, axis2=2)
         v = (tr_sp[:, None, None] * eye - s).reshape(-1, ndim * ndim)
     elif k in (
@@ -558,6 +570,68 @@ class WRRandomAffine(WRBaseAugmentation):
 
         return WRFeatures(
             coords=points,
+            labels=features.labels,
+            timepoints=features.timepoints,
+            features=feats,
+        )
+
+
+def _random_shape_jitter_matrices(
+    n: int, scale: tuple[float, float], shear: float, ndim: int
+) -> np.ndarray:
+    """Per-detection near-identity linear maps for shape measurement noise.
+
+    Anisotropic log-uniform scale perturbs size (diameter) and aspect ratio
+    (compactness, inertia anisotropy); a small 2D shear perturbs orientation.
+    Returns a stack of (n, ndim, ndim) matrices.
+    """
+    # process-local RNG: see WRBaseAugmentation.__call__ on worker seeding
+    s = np.exp(np.random.uniform(np.log(scale[0]), np.log(scale[1]), size=(n, ndim)))
+    M = s[:, :, None] * np.eye(ndim)[None]  # (n, ndim, ndim) anisotropic scale
+    if shear and ndim == 2:
+        shy = np.random.uniform(-shear, shear, n)
+        shx = np.random.uniform(-shear, shear, n)
+        Sh = np.tile(np.eye(2), (n, 1, 1))
+        Sh[:, 0, 0] = 1 + shx * shy
+        Sh[:, 0, 1] = shy
+        Sh[:, 1, 0] = shx
+        M = M @ Sh
+    return M
+
+
+class WRRandomShapeJitter(WRBaseAugmentation):
+    """Independent per-detection shape measurement noise.
+
+    Applies a small random linear map to each detection's *shape* features
+    (size and second moments) through the same `_transform_affine` used by the
+    global geometric augmentations, so diameter, compactness and the inertia
+    anisotropy stay mutually consistent. Coordinates, intensity and border_dist
+    are left untouched: this perturbs how a cell looks, not where it is, so the
+    model does not treat shape as an exact cross-frame fingerprint (matters most
+    when intensity is unused, e.g. wrfeat2_no_intensity).
+    """
+
+    def __init__(
+        self,
+        scale: tuple[float, float] = (0.9, 1.1),
+        shear: float = 0.05,
+        p: float = 0.8,
+    ):
+        super().__init__(p)
+        if scale[0] <= 0 or scale[1] < scale[0]:
+            raise ValueError("scale bounds must satisfy 0 < min <= max")
+        self.scale = scale
+        self.shear = shear
+
+    def _augment(self, features: WRFeatures):
+        M = _random_shape_jitter_matrices(
+            len(features), self.scale, self.shear, features.ndim
+        )
+        feats = OrderedDict(
+            (k, _transform_affine(k, v, M)) for k, v in features.features.items()
+        )
+        return WRFeatures(
+            coords=features.coords,
             labels=features.labels,
             timepoints=features.timepoints,
             features=feats,
@@ -645,7 +719,12 @@ def get_features(
     detections: np.ndarray,
     imgs: np.ndarray | None = None,
     features: Literal[
-        "none", "wrfeat", "wrfeat2", "pretrained_feats", "pretrained_feats_aug"
+        "none",
+        "wrfeat",
+        "wrfeat2",
+        "wrfeat2_no_intensity",
+        "pretrained_feats",
+        "pretrained_feats_aug",
     ] = "wrfeat",
     ndim: int = 2,
     n_workers=0,
@@ -727,7 +806,7 @@ def build_windows(
     window_size: int,
     progbar_class=tqdm,
     as_torch: bool = False,
-    feature_mode: Literal["wrfeat", "wrfeat2"] = "wrfeat",
+    feature_mode: Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"] = "wrfeat",
 ) -> list[dict]:
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")

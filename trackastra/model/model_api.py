@@ -217,7 +217,8 @@ class Trackastra:
             as_torch=True,
             feature_mode=(
                 self.train_args["features"]
-                if self.train_args["features"] in ("wrfeat", "wrfeat2")
+                if self.train_args["features"]
+                in ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
                 else "wrfeat"
             ),
         )

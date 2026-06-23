@@ -434,13 +434,13 @@ def batched(x, batch_size, device):
     return x.unsqueeze(0).expand(batch_size, *((-1,) * x.ndim)).to(device)
 
 
-def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device):
+def preallocate_memory(dataset, model_lightning, batch_size, max_detections, device):
     """https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#preallocate-memory-in-case-of-variable-input-length."""
     start = default_timer()
 
-    if max_tokens is None:
+    if max_detections is None:
         logger.warning(
-            "Preallocating memory without specifying max_tokens not implemented."
+            "Preallocating memory without max_detections is not implemented."
         )
         return
 
@@ -479,7 +479,7 @@ def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device)
         # )
 
     else:
-        max_len = max_tokens
+        max_len = max_detections
         x = dataset[0]
         batch = dict(
             features=batched(
@@ -498,6 +498,11 @@ def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device)
             ),
             assoc_matrix=batched(
                 torch.zeros((max_len, max_len), dtype=x["assoc_matrix"].dtype),
+                batch_size,
+                device,
+            ),
+            loss_mask=batched(
+                torch.ones((max_len, max_len), dtype=torch.bool),
                 batch_size,
                 device,
             ),

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import networkx as nx
 import pytest
 
 from test_data import example_dataset
@@ -159,6 +160,44 @@ def test_evaluate_ctc_uses_ctc_metrics(monkeypatch, predict_script):
     assert isinstance(calls["metrics"][0], metrics.CTCMetrics)
 
 
+def test_error_viz_renders_wrong_semantic_once():
+    spec = importlib.util.spec_from_file_location(
+        "viz_utils", Path(__file__).parents[1] / "scripts" / "utils.py"
+    )
+    assert spec is not None and spec.loader is not None
+    viz_utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(viz_utils)
+
+    class Graph:
+        def __init__(self, graph):
+            self.graph = graph
+            self.nodes = graph.nodes
+
+    class Flags:
+        CTC_FALSE_NEG = "fn"
+        CTC_FALSE_POS = "fp"
+        WRONG_SEMANTIC = "ws"
+
+    gt = nx.DiGraph()
+    gt.add_node("g0", x=1, y=2, t=0)
+    gt.add_node("g1", x=3, y=4, t=1)
+    gt.add_edge("g0", "g1")
+    pred = nx.DiGraph()
+    pred.add_node("p0", x=1, y=2, t=0)
+    pred.add_node("p1", x=3, y=4, t=1)
+    pred.add_edge("p0", "p1", ws=True)
+
+    edges = viz_utils._collect_edges(
+        Graph(gt),
+        Graph(pred),
+        Flags,
+        {"p0": "g0", "p1": "g1"},
+        scale=1,
+    )
+
+    assert edges == [{"t": 1, "p0": (1, 2), "p1": (3, 4), "cls": "ws"}]
+
+
 def test_predict_run_writes_and_evaluates_ctc_output(
     tmp_path, monkeypatch, capsys, predict_script
 ):
@@ -173,7 +212,7 @@ def test_predict_run_writes_and_evaluates_ctc_output(
             calls["model"] = (name, device)
             return cls()
 
-        def track_from_disk(self, images, masks, **kwargs):
+        def track(self, images, masks, **kwargs):
             calls["track"] = (images, masks, kwargs)
             return "graph", "masks"
 
@@ -182,6 +221,17 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         (outdir / "man_track.txt").write_text("1 0 0 0\n")
 
     monkeypatch.setattr("trackastra.model.Trackastra", FakeTrackastra)
+    monkeypatch.setattr(
+        "trackastra.data.CTCData.load_for_inference",
+        classmethod(
+            lambda cls, root, detection_folder, ndim: (
+                "images",
+                "refined masks",
+                movie / "img",
+                movie / "TRA",
+            )
+        ),
+    )
     monkeypatch.setattr("trackastra.tracking.graph_to_ctc", fake_graph_to_ctc)
     monkeypatch.setattr(
         predict_script,
@@ -197,6 +247,7 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         overwrite=False,
         mode="greedy",
         max_distance=42,
+        errormovie=False,
     )
 
     result = predict_script.run(args)
@@ -206,10 +257,16 @@ def test_predict_run_writes_and_evaluates_ctc_output(
     assert result["TRA"].tolist() == [0.5, 0.5]
     assert result["AOGM"].tolist() == [4.0, 4.0]
     assert calls["model"] == ("trained_model", "cpu")
-    assert calls["track"][0:2] == (movie / "img", movie / "TRA")
-    assert calls["track"][2] == {"mode": "greedy", "max_distance": 42}
+    assert calls["track"][0:2] == ("images", "refined masks")
+    assert calls["track"][2] == {
+        "mode": "greedy",
+        "max_distance": 42,
+        "normalize_imgs": False,
+    }
     model_output = tmp_path / "results" / "trained_model"
     assert calls["ctc"][2] == model_output / "movie"
+    per_movie = predict_script.pd.read_csv(model_output / "movie" / "metrics.csv")
+    assert per_movie["movie"].tolist() == ["movie"]
     saved = predict_script.pd.read_csv(model_output / "metrics.csv")
     assert saved[["movie", "model", "mode"]].to_dict("records") == [
         {"movie": "movie", "model": "trained_model", "mode": "greedy"},

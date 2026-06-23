@@ -5,6 +5,7 @@ from pathlib import Path
 
 import configargparse
 import pandas as pd
+from trackastra.utils import str2bool
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -45,6 +46,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-distance", type=int, default=128)
     parser.add_argument("-f", "--overwrite", action="store_true")
+    parser.add_argument(
+        "--errormovie",
+        type=str2bool,
+        default=True,
+        help="render an error.mp4 (TP/FP/FN tracks) into each output folder",
+    )
     return parser.parse_args(argv)
 
 
@@ -143,33 +150,61 @@ def predict_and_evaluate(
     max_distance: int = 128,
     overwrite: bool = False,
     print_results: bool = True,
+    errormovie: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
+    from trackastra.data import CTCData
     from trackastra.tracking import graph_to_ctc
 
     rows = []
     used_names: set[str] = set()
     for index, root in enumerate(input_paths, start=1):
         root = Path(root)
-        image_path, mask_path, gt_path = resolve_ctc_paths(root, detection_folder)
-        name = root.name.removesuffix("_GT")
-        if name == "TRA":
-            name = root.parent.name.removesuffix("_GT")
+        transformer = getattr(model, "transformer", None)
+        config = getattr(transformer, "config", {})
+        imgs, masks, image_path, gt_path = CTCData.load_for_inference(
+            root,
+            detection_folder=detection_folder,
+            ndim=int(config.get("coord_dim", 2)),
+        )
+        if root.name == "TRA":
+            seq_dir = root.parent
+        else:
+            seq_dir = root
+        seq_name = seq_dir.name.removesuffix("_GT")
+        dataset = seq_dir.parent.name.removesuffix("_GT")
+        # CTC sequences are named "01", "02", ...; prefix the dataset (e.g.
+        # "Fluo-N2DL-HeLa_01") so the output folder is self-describing.
+        name = f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
         if name in used_names:
             name = f"{name}_{index}"
         used_names.add(name)
         output_path = outdir / model_name / name
         _prepare_output(output_path, overwrite)
 
-        graph, masks = model.track_from_disk(
-            image_path,
-            mask_path,
+        graph, masks = model.track(
+            imgs,
+            masks,
             mode=mode,
             max_distance=max_distance,
+            normalize_imgs=False,
         )
         graph_to_ctc(graph, masks, outdir=output_path)
         values = evaluate_ctc(gt_path, output_path)
-        rows.append({"movie": name, "model": model_name, "mode": mode, **values})
+        row = {"movie": name, "model": model_name, "mode": mode, **values}
+        rows.append(row)
+        # store each movie's metrics next to its tiffs and error.mp4
+        pd.DataFrame([row]).to_csv(output_path / "metrics.csv", index=False)
+
+        if errormovie:
+            try:
+                from scripts.utils import viz_error
+            except ImportError:
+                from utils import viz_error
+            try:
+                viz_error(image_path, gt_path, output_path, output_path / "error.mp4")
+            except Exception as error:
+                print(f"Could not render error movie for {name}: {error}")
 
     results = pd.DataFrame(rows)
     mean = {
@@ -210,6 +245,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         mode=args.mode,
         max_distance=args.max_distance,
         overwrite=args.overwrite,
+        errormovie=args.errormovie,
     )
 
 

@@ -3,6 +3,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import torch
 from scripts.train import (
@@ -11,6 +12,8 @@ from scripts.train import (
     _feature_dim,
     _reduce_decision_loss,
     _reduce_matrix_loss,
+    _resolve_feature_embed_mode,
+    _summarize_tracking_metrics,
 )
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
@@ -28,8 +31,35 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 def test_wrfeat2_feature_dim_is_2d_only():
     assert _feature_dim(2, "wrfeat2") == 6
+    assert _feature_dim(2, "wrfeat2_no_intensity") == 5
     with pytest.raises(ValueError, match="only 2D"):
         _feature_dim(3, "wrfeat2")
+    with pytest.raises(ValueError, match="only 2D"):
+        _feature_dim(3, "wrfeat2_no_intensity")
+
+
+def test_wrfeat2_defaults_to_mlp_feature_embedding():
+    assert _resolve_feature_embed_mode("wrfeat2", None) == "mlp"
+    assert _resolve_feature_embed_mode("wrfeat2_no_intensity", None) == "mlp"
+    assert _resolve_feature_embed_mode("wrfeat", None) == "fourier"
+    assert _resolve_feature_embed_mode("wrfeat2", "fourier") == "fourier"
+
+
+def test_summarize_tracking_metrics_includes_linking_and_detection():
+    metrics = pd.DataFrame({
+        "movie": ["01", "02", "Mean"],
+        "TRA": [0.8, 1.0, 0.9],
+        "AOGM": [4.0, 2.0, 3.0],
+        "LNK": [0.7, 0.9, 0.8],
+        "DET": [0.6, 1.0, 0.8],
+    })
+
+    assert _summarize_tracking_metrics(metrics) == {
+        "val_TRA": pytest.approx(0.9),
+        "val_AOGM": pytest.approx(3.0),
+        "val_LNK": pytest.approx(0.8),
+        "val_DET": pytest.approx(0.8),
+    }
 
 
 class _SamplerDataset(Dataset):
@@ -138,6 +168,38 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     assert model.logits.grad[0, 2] > 0.1
 
 
+def test_common_step_excludes_neighborhood_censored_associations():
+    class ZeroModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.tensor(0.0))
+
+        def forward(self, coords, features, padding_mask=None):
+            n = coords.shape[1]
+            return torch.zeros((len(coords), n, n)) + self.bias
+
+    module = WrappedLightningModule(
+        ZeroModel(), causal_norm="none", delta_cutoff=1
+    )
+    batch = {
+        "features": torch.zeros((1, 3, 1)),
+        "coords": torch.zeros((1, 3, 2)),
+        "assoc_matrix": torch.zeros((1, 3, 3)),
+        "timepoints": torch.tensor([[0, 1, 1]]),
+        "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
+        "loss_mask": torch.tensor([[
+            [True, False, True],
+            [True, True, True],
+            [True, True, True],
+        ]]),
+    }
+
+    mask = module._common_step(batch)["mask"].bool()
+
+    assert not mask[0, 0, 1]
+    assert mask[0, 0, 2]
+
+
 def test_balanced_batch_sampler_partial_batch():
     dataset = ConcatDataset([_SamplerDataset(7), _SamplerDataset(6)])
     sampler = BalancedBatchSampler(dataset, batch_size=4, n_pool=2, num_samples=10)
@@ -178,8 +240,16 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         augment=3,
         distributed=False,
         dataset_kwargs={"features": "wrfeat"},
-        train_dataset_kwargs={"slice_pct": (0.0, 0.8), "crop_size": (64, 64)},
-        val_dataset_kwargs={"slice_pct": (0.8, 1.0), "crop_size": None},
+        train_dataset_kwargs={
+            "slice_pct": (0.0, 0.8),
+            "crop_size": (64, 64),
+            "detect_drop": 0.5,
+        },
+        val_dataset_kwargs={
+            "slice_pct": (0.8, 1.0),
+            "crop_size": None,
+            "detect_drop": 0.0,
+        },
         sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
         loader_kwargs={"batch_size": 2, "num_workers": 0},
     )
@@ -193,12 +263,14 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         "features": "wrfeat",
         "slice_pct": (0.0, 0.8),
         "crop_size": (64, 64),
+        "detect_drop": 0.5,
         "augment": 3,
     }
     assert calls[1][1] == {
         "features": "wrfeat",
         "slice_pct": (0.8, 1.0),
         "crop_size": None,
+        "detect_drop": 0.0,
         "augment": 0,
     }
 

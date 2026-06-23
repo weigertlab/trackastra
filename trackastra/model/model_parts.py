@@ -37,6 +37,21 @@ class FeedForward(nn.Module):
         return self.fc2(self.dropout(self.act(self.fc1(x))))
 
 
+class FeatureMLP(nn.Module):
+    """Embed ordered scalar object features without periodic Fourier aliasing."""
+
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("FeatureMLP dimensions must be positive")
+        self.fc1 = nn.Linear(input_dim, output_dim)
+        self.fc2 = nn.Linear(output_dim, output_dim)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        return self.fc2(self.act(self.fc1(x)))
+
+
 class MultiChannelPairHead(nn.Module):
     """Learned association readout as an alternative to the single bilinear dot product.
 

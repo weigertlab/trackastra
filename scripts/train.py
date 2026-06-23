@@ -217,6 +217,14 @@ def _is_tracking_epoch(current_epoch: int, frequency: int) -> bool:
     return frequency > 0 and (current_epoch + 1) % frequency == 0
 
 
+def _summarize_tracking_metrics(metrics) -> dict[str, float]:
+    movies = metrics[metrics["movie"] != "Mean"]
+    return {
+        f"val_{name}": float(movies[name].mean())
+        for name in ("TRA", "AOGM", "LNK", "DET")
+    }
+
+
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
 # this contains all the training/loss logic
 class WrappedLightningModule(pl.LightningModule):
@@ -337,6 +345,8 @@ class WrappedLightningModule(pl.LightningModule):
         loss = loss * loss_weight
 
         mask_valid = ~mask_invalid
+        if "loss_mask" in batch:
+            mask_valid = mask_valid & batch["loss_mask"].bool()
         dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
         mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
 
@@ -505,15 +515,13 @@ class WrappedLightningModule(pl.LightningModule):
                     mode=self.tracking_mode,
                     max_distance=self.tracking_max_distance,
                 )
-                movies = metrics[metrics["movie"] != "Mean"]
-                values = {
-                    "val_TRA": float(movies["TRA"].mean()),
-                    "val_AOGM": float(movies["AOGM"].mean()),
-                }
+                values = _summarize_tracking_metrics(metrics)
                 print(
                     f"[epoch {self.current_epoch}] "
                     f"val_TRA={values['val_TRA']:.4f} "
-                    f"val_AOGM={values['val_AOGM']:.4f}"
+                    f"val_AOGM={values['val_AOGM']:.4f} "
+                    f"val_LNK={values['val_LNK']:.4f} "
+                    f"val_DET={values['val_DET']:.4f}"
                 )
                 self.log_dict(
                     values,
@@ -753,10 +761,10 @@ def _feature_dim(ndim: int, features: str) -> int:
         return 0
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
-    if features == "wrfeat2":
+    if features in ("wrfeat2", "wrfeat2_no_intensity"):
         if ndim != 2:
-            raise ValueError("wrfeat2 currently supports only 2D data")
-        return 6
+            raise ValueError(f"{features} currently supports only 2D data")
+        return 6 if features == "wrfeat2" else 5
     dims = {
         2: {
             "regionprops": 7,
@@ -773,6 +781,14 @@ def _feature_dim(ndim: int, features: str) -> int:
         return dims[ndim][features]
     except KeyError as e:
         raise ValueError(f"Unsupported feature mode {features!r} for {ndim}D data") from e
+
+
+def _resolve_feature_embed_mode(features: str, requested: str | None) -> str:
+    if requested is not None:
+        return requested
+    return (
+        "mlp" if features in ("wrfeat2", "wrfeat2_no_intensity") else "fourier"
+    )
 
 
 def find_val_batch(loader_val, n_gpus):
@@ -806,6 +822,14 @@ def _init_wandb(project, name, config, save_dir):
 
 def train(args):
     args.seed = seed(args.seed)
+    if args.max_detections is not None and args.max_tokens is not None:
+        raise ValueError("Specify only --max_detections; --max_tokens is deprecated")
+    if args.max_detections is None:
+        args.max_detections = args.max_tokens
+    args.max_tokens = None
+    args.feature_embed_mode = _resolve_feature_embed_mode(
+        args.features, getattr(args, "feature_embed_mode", None)
+    )
     if args.model is None:
         logger.warning("Training from scratch, this is slow!\n")
 
@@ -816,7 +840,9 @@ def train(args):
 
     memory = _process_memory()
 
-    if args.features in ("wrfeat", "wrfeat2") and args.feat_embed_per_dim <= 1:
+    if args.features in ("wrfeat", "wrfeat2", "wrfeat2_no_intensity") and (
+        args.feat_embed_per_dim <= 1
+    ):
         raise ValueError("For wrfeat modes, feat_embed_per_dim must be > 1 (e.g. 8)")
 
     callbacks = []
@@ -870,8 +896,10 @@ def train(args):
             ndim=args.ndim,
             detection_folders=args.detection_folders,
             window_size=args.window,
-            max_tokens=args.max_tokens,
+            max_detections=args.max_detections,
             augment=args.augment,
+            detect_drop=args.detect_drop,
+            detect_drop_fraction=args.detect_drop_fraction,
             features=args.features,
             slice_pct=args.slice_pct_train,
             downscale_temporal=args.downscale_temporal,
@@ -888,6 +916,7 @@ def train(args):
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
+            feature_embed_mode=args.feature_embed_mode,
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
             dropout=args.dropout,
@@ -923,7 +952,7 @@ def train(args):
             dummy_data,
             dummy_model_lightning,
             args.batch_size // n_gpus,
-            args.max_tokens,
+            args.max_detections,
             device,
         )
         del dummy_model_lightning
@@ -937,13 +966,14 @@ def train(args):
         ndim=args.ndim,
         detection_folders=args.detection_folders,
         window_size=args.window,
-        max_tokens=args.max_tokens,
+        max_detections=args.max_detections,
         features=args.features,
         downscale_temporal=args.downscale_temporal,
         downscale_spatial=args.downscale_spatial,
         sanity_dist=args.sanity_dist,
         compress=args.compress,
         crop_ensure_all_centers=args.crop_ensure_all_centers,
+        detect_drop_fraction=args.detect_drop_fraction,
     )
     sampler_kwargs = dict(
         batch_size=args.batch_size,
@@ -969,10 +999,12 @@ def train(args):
         train_dataset_kwargs={
             "slice_pct": args.slice_pct_train,
             "crop_size": args.crop_size,
+            "detect_drop": args.detect_drop,
         },
         val_dataset_kwargs={
             "slice_pct": args.slice_pct_val,
             "crop_size": None,
+            "detect_drop": 0.0,
         },
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
@@ -1019,6 +1051,7 @@ def train(args):
             d_model=args.d_model,
             pos_embed_per_dim=args.pos_embed_per_dim,
             feat_embed_per_dim=args.feat_embed_per_dim,
+            feature_embed_mode=args.feature_embed_mode,
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
             dropout=args.dropout,
@@ -1184,10 +1217,22 @@ def parse_train_args():
     parser.add_argument("--num_decoder_layers", type=int, default=6)
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
     parser.add_argument("--feat_embed_per_dim", type=int, default=8)
+    parser.add_argument(
+        "--feature_embed_mode",
+        choices=("fourier", "mlp"),
+        default=None,
+        help="feature encoder; defaults to mlp for wrfeat2 modes and fourier otherwise",
+    )
     parser.add_argument("--dropout", type=float, default=0.00)
     parser.add_argument("--num_workers", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--max_tokens", type=int, default=None)
+    parser.add_argument("--max_detections", type=int, default=None)
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=None,
+        help="deprecated alias for --max_detections",
+    )
     parser.add_argument("--delta_cutoff", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
@@ -1222,6 +1267,7 @@ def parse_train_args():
             "patch_regionprops",
             "wrfeat",
             "wrfeat2",
+            "wrfeat2_no_intensity",
         ],
         default="wrfeat",
     )
@@ -1252,6 +1298,18 @@ def parse_train_args():
     )
 
     parser.add_argument("--augment", type=int, default=3)
+    parser.add_argument(
+        "--detect_drop",
+        type=float,
+        default=0.0,
+        help="probability of applying detection dropout to a training window",
+    )
+    parser.add_argument(
+        "--detect_drop_fraction",
+        type=float,
+        default=0.1,
+        help="fraction of detections dropped when detection dropout is applied",
+    )
     parser.add_argument(
         "--tracking_frequency",
         type=int,

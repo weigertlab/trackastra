@@ -17,6 +17,7 @@ from torch import nn
 from trackastra.utils import blockwise_causal_norm
 
 from .model_parts import (
+    FeatureMLP,
     FeedForward,
     MultiChannelPairHead,
     PositionalEncoding,
@@ -318,6 +319,7 @@ class TrackingTransformer(torch.nn.Module):
         logit_norm: bool = True,
         assoc_head: Literal["bilinear", "multichannel"] = "bilinear",
         assoc_channels: int = 8,
+        feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
     ):
         super().__init__()
 
@@ -335,6 +337,7 @@ class TrackingTransformer(torch.nn.Module):
             attn_positional_bias_n_spatial=attn_positional_bias_n_spatial,
             spatial_pos_cutoff=spatial_pos_cutoff,
             feat_embed_per_dim=feat_embed_per_dim,
+            feature_embed_mode=feature_embed_mode,
             causal_norm=causal_norm,
             attn_dist_mode=attn_dist_mode,
             attn_mode=attn_mode,
@@ -410,14 +413,22 @@ class TrackingTransformer(torch.nn.Module):
         else:
             raise ValueError(f"unknown assoc_head: {assoc_head!r}")
 
-        if feat_embed_per_dim > 1:
-            self.feat_embed = PositionalEncoding(
-                cutoffs=(1000,) * feat_dim,
-                n_pos=(feat_embed_per_dim,) * feat_dim,
-                cutoffs_start=(0.01,) * feat_dim,
+        if feature_embed_mode == "fourier":
+            if feat_embed_per_dim > 1:
+                self.feat_embed = PositionalEncoding(
+                    cutoffs=(1000,) * feat_dim,
+                    n_pos=(feat_embed_per_dim,) * feat_dim,
+                    cutoffs_start=(0.01,) * feat_dim,
+                )
+            else:
+                self.feat_embed = nn.Identity()
+        elif feature_embed_mode == "mlp":
+            self.feat_embed = FeatureMLP(
+                input_dim=feat_dim,
+                output_dim=feat_dim * feat_embed_per_dim,
             )
         else:
-            self.feat_embed = nn.Identity()
+            raise ValueError(f"Unknown feature_embed_mode {feature_embed_mode!r}")
 
         self.pos_embed = PositionalEncoding(
             cutoffs=(window,) + (spatial_pos_cutoff,) * coord_dim,

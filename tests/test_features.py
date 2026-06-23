@@ -75,6 +75,15 @@ def test_wrfeat2_decomposes_inertia_and_bounds_orientation():
     assert np.all(np.linalg.norm(features[:, 3:5], axis=1) <= 1)
 
 
+def test_wrfeat2_no_intensity_removes_only_intensity_channel():
+    raw = _wrfeat2_example()
+    full = raw.features_stacked_for("wrfeat2")
+    without_intensity = raw.features_stacked_for("wrfeat2_no_intensity")
+
+    assert without_intensity.shape == (3, 5)
+    assert np.array_equal(without_intensity, full[:, [0, 2, 3, 4, 5]])
+
+
 def test_wrfeat2_is_derived_after_scale_augmentation():
     raw = _wrfeat2_example()
     augmentation = WRRandomAffine(

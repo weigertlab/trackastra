@@ -10,7 +10,7 @@ input_train:
 - data/ctc/Fluo-N2DL-HeLa/02
 input_val:
 - data/ctc/Fluo-N2DL-HeLa/01
-max_tokens: 2048
+max_detections: 2048
 name: example
 ndim: 2
 num_decoder_layers: 5

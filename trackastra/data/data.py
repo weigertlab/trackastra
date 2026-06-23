@@ -1,4 +1,5 @@
 import logging
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
@@ -13,6 +14,8 @@ import tifffile
 import torch
 from numba import njit
 from scipy import ndimage as ndi
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial.distance import cdist
 from skimage.measure import regionprops
 from skimage.segmentation import relabel_sequential
@@ -37,7 +40,151 @@ from trackastra.utils import blockwise_sum, normalize
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_WRFEAT_MODES = ("wrfeat", "wrfeat2")
+_WRFEAT_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
+
+
+def _sample_detection_keep_indices(
+    assoc_matrix: np.ndarray, drop_fraction: float
+) -> np.ndarray:
+    """Sample detections to keep without removing an entire lineage component."""
+    n = len(assoc_matrix)
+    target = min(int(np.floor(drop_fraction * n)), n)
+    if target == 0:
+        return np.arange(n)
+
+    adjacency = np.logical_or(assoc_matrix, assoc_matrix.T)
+    _, component = connected_components(
+        csr_matrix(adjacency), directed=False, return_labels=True
+    )
+    remaining = np.bincount(component)
+    keep = np.ones(n, dtype=bool)
+    dropped = 0
+    for i in np.random.permutation(n):
+        c = component[i]
+        if remaining[c] > 1:
+            keep[i] = False
+            remaining[c] -= 1
+            dropped += 1
+            if dropped == target:
+                break
+    return np.flatnonzero(keep)
+
+
+def _remove_detections_from_masks(
+    masks: np.ndarray,
+    labels: np.ndarray,
+    timepoints: np.ndarray,
+    dropped: np.ndarray,
+    t_start: int,
+) -> np.ndarray:
+    masks = masks.copy()
+    for label, t in zip(labels[dropped], timepoints[dropped]):
+        frame = masks[t - t_start]
+        frame[frame == label] = 0
+    return masks
+
+
+def _association_subset_loss_mask(
+    assoc_matrix: np.ndarray, timepoints: np.ndarray, keep: np.ndarray
+) -> np.ndarray:
+    """Mask decisions whose positive association was censored by subsetting."""
+    keep = np.asarray(keep)
+    selected = np.zeros(len(timepoints), dtype=bool)
+    selected[keep] = True
+    omitted = ~selected
+    loss_mask = np.ones((len(keep), len(keep)), dtype=bool)
+    if not omitted.any():
+        return loss_mask
+
+    kept_times = timepoints[keep]
+    for source_time in np.unique(kept_times):
+        source_local = np.flatnonzero(kept_times == source_time)
+        source_full = keep[source_local]
+        source_out = np.flatnonzero(omitted & (timepoints == source_time))
+        for target_time in np.unique(kept_times):
+            if source_time == target_time:
+                continue
+            target_local = np.flatnonzero(kept_times == target_time)
+            target_full = keep[target_local]
+            target_out = np.flatnonzero(omitted & (timepoints == target_time))
+            row_valid = (
+                ~assoc_matrix[np.ix_(source_full, target_out)].any(axis=1)
+                if len(target_out)
+                else np.ones(len(source_full), dtype=bool)
+            )
+            col_valid = (
+                ~assoc_matrix[np.ix_(source_out, target_full)].any(axis=0)
+                if len(source_out)
+                else np.ones(len(target_full), dtype=bool)
+            )
+            loss_mask[np.ix_(source_local, target_local)] = (
+                row_valid[:, None] & col_valid[None, :]
+            )
+    return loss_mask
+
+
+def _direct_lineage_neighbors(
+    index: int, assoc_matrix: np.ndarray, timepoints: np.ndarray
+) -> np.ndarray:
+    associated = np.flatnonzero(assoc_matrix[index])
+    t = timepoints[index]
+    neighbors = []
+    before = associated[timepoints[associated] < t]
+    after = associated[timepoints[associated] > t]
+    if len(before):
+        neighbors.extend(before[timepoints[before] == timepoints[before].max()])
+    if len(after):
+        neighbors.extend(after[timepoints[after] == timepoints[after].min()])
+    return np.asarray(neighbors, dtype=int)
+
+
+def _sample_neighborhood_indices(
+    coords: np.ndarray,
+    timepoints: np.ndarray,
+    assoc_matrix: np.ndarray,
+    max_detections: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select a spatially coherent, lineage-aware detection neighborhood."""
+    n = len(coords)
+    if n <= max_detections:
+        keep = np.arange(n)
+        return keep, np.ones((n, n), dtype=bool)
+
+    unique_times = np.unique(timepoints)
+    if len(unique_times) > max_detections:
+        raise ValueError(
+            f"max_detections={max_detections} cannot retain all "
+            f"{len(unique_times)} represented frames"
+        )
+
+    anchor = np.random.randint(n)
+    distances = np.linalg.norm(coords - coords[anchor], axis=1)
+    order = np.argsort(distances, kind="stable")
+    selected = {
+        int(indices[np.argmin(distances[indices])])
+        for t in unique_times
+        if len(indices := np.flatnonzero(timepoints == t))
+    }
+    selected.add(anchor)
+
+    for i in order:
+        closure = {int(i), *map(int, _direct_lineage_neighbors(i, assoc_matrix, timepoints))}
+        if len(selected | closure) <= max_detections:
+            selected.update(closure)
+        if len(selected) == max_detections:
+            break
+    if len(selected) < max_detections:
+        selected.update(map(int, order[: max_detections - len(selected)]))
+    if len(selected) < max_detections:
+        for i in order:
+            selected.add(int(i))
+            if len(selected) == max_detections:
+                break
+
+    keep = np.asarray(sorted(selected), dtype=int)
+    if len(keep) > max_detections:
+        raise RuntimeError("Neighborhood selection exceeded max_detections")
+    return keep, _association_subset_loss_mask(assoc_matrix, timepoints, keep)
 
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
@@ -191,6 +338,53 @@ def debug_function(f):
 
 
 class CTCData(Dataset):
+    @classmethod
+    def load_for_inference(
+        cls,
+        root: str | Path,
+        detection_folder: str = "TRA",
+        ndim: int = 2,
+    ) -> tuple[np.ndarray, np.ndarray, Path, Path]:
+        """Load CTC images and detections using the training preprocessing.
+
+        This intentionally avoids constructing supervised windows, but shares
+        CTCData's path discovery, TRA-to-ST mask refinement, dimensional
+        handling, and per-frame image normalization.
+
+        Returns:
+            Normalized images, refined detection masks, image path, GT TRA path.
+        """
+        self = cls.__new__(cls)
+        self.root = Path(root).expanduser()
+        self.root, self.gt_tra_folder = self._guess_root_and_gt_tra_folder(
+            self.root
+        )
+        self.img_folder = self._guess_img_folder(self.root)
+        self.downscale_spatial = 1
+        self.downscale_temporal = 1
+        self.start_frame = 0
+        self.end_frame = None
+        self.ndim = ndim
+
+        det_folder = self._guess_det_folder(self.root, detection_folder)
+        if det_folder is None:
+            raise FileNotFoundError(
+                f"Could not find detection folder {detection_folder!r} for {self.root}"
+            )
+
+        masks = self._load_tiffs(det_folder, dtype=np.int32)
+        masks = self._correct_gt_with_st(det_folder, masks, dtype=np.int32)
+        masks = self._check_dimensions(masks)
+
+        imgs = self._load_tiffs(self.img_folder, dtype=np.float32)
+        imgs = np.stack([normalize(frame) for frame in imgs])
+        imgs = self._check_dimensions(imgs)
+        if len(imgs) != len(masks):
+            raise ValueError(
+                f"Image/mask length mismatch: {len(imgs)} images, {len(masks)} masks"
+            )
+        return imgs, masks, self.img_folder, self.gt_tra_folder
+
     def __init__(
         self,
         root: str = "",
@@ -199,10 +393,13 @@ class CTCData(Dataset):
         detection_folders: list[str] = ["TRA"],
         window_size: int = 10,
         max_tokens: int | None = None,
+        max_detections: int | None = None,
         slice_pct: tuple = (0.0, 1.0),
         downscale_spatial: int = 1,
         downscale_temporal: int = 1,
         augment: int = 0,
+        detect_drop: float = 0.0,
+        detect_drop_fraction: float = 0.1,
         features: Literal[
             "none",
             "regionprops",
@@ -211,6 +408,7 @@ class CTCData(Dataset):
             "patch_regionprops",
             "wrfeat",
             "wrfeat2",
+            "wrfeat2_no_intensity",
         ] = "wrfeat",
         sanity_dist: bool = False,
         crop_size: tuple | None = None,
@@ -232,10 +430,16 @@ class CTCData(Dataset):
                 Defaults to ["TRA"], which uses the ground truth detections.
             window_size (int):
                 Window size for transformer.
+            max_detections (int):
+                Maximum number of detections sampled from a temporal window.
             slice_pct (tuple):
                 Slice the dataset by percentages (from, to).
             augment (int):
                 if 0, no data augmentation. if > 0, defines level of data augmentation.
+            detect_drop (float):
+                Probability of applying detection dropout to a training window.
+            detect_drop_fraction (float):
+                Fraction of detections to drop when detection dropout is applied.
             features (str):
                 Types of features to use.
             sanity_dist (bool):
@@ -263,6 +467,24 @@ class CTCData(Dataset):
         self.ndim = ndim
         self.features = features
         self.crop_ensure_all_centers = crop_ensure_all_centers
+        if not 0 <= detect_drop <= 1:
+            raise ValueError("detect_drop must be in [0, 1]")
+        if not 0 <= detect_drop_fraction <= 1:
+            raise ValueError("detect_drop_fraction must be in [0, 1]")
+        self.detect_drop = detect_drop
+        self.detect_drop_fraction = detect_drop_fraction
+        if max_tokens is not None and max_detections is not None:
+            raise ValueError("Specify only max_detections; max_tokens is deprecated")
+        if max_detections is None and max_tokens is not None:
+            warnings.warn(
+                "max_tokens is deprecated; use max_detections",
+                FutureWarning,
+                stacklevel=2,
+            )
+            max_detections = max_tokens
+        if max_detections is not None and max_detections < window_size:
+            raise ValueError("max_detections must be at least window_size")
+        self.max_detections = max_detections
 
         if features not in ("none", *_WRFEAT_MODES) and features not in _PROPERTIES[ndim]:
             raise ValueError(
@@ -297,7 +519,6 @@ class CTCData(Dataset):
         if window_size <= 1:
             raise ValueError("window must be >1")
         self.window_size = window_size
-        self.max_tokens = max_tokens
 
         self.slice_pct = slice_pct
         self.sanity_dist = sanity_dist
@@ -317,7 +538,12 @@ class CTCData(Dataset):
 
         if len(self.windows) > 0:
             self.ndim = self.windows[0]["coords"].shape[1]
-            self.n_objects = tuple(len(t["coords"]) for t in self.windows)
+            self.n_objects = tuple(
+                min(len(t["coords"]), self.max_detections)
+                if self.max_detections is not None
+                else len(t["coords"])
+                for t in self.windows
+            )
             logger.info(
                 f"Found {np.sum(self.n_objects)} objects in {len(self.windows)} track"
                 f" windows from {self.root} ({default_timer() - start:.1f}s)\n"
@@ -551,6 +777,19 @@ class CTCData(Dataset):
 
     def __len__(self):
         return len(self.windows)
+
+    def _detection_keep_indices(self, assoc_matrix: np.ndarray) -> np.ndarray:
+        detect_drop = getattr(self, "detect_drop", 0.0)
+        if detect_drop == 0 or np.random.rand() >= detect_drop:
+            return np.arange(len(assoc_matrix))
+        return _sample_detection_keep_indices(
+            assoc_matrix,
+            drop_fraction=getattr(self, "detect_drop_fraction", 0.1),
+        )
+
+    def _get_max_detections(self) -> int | None:
+        """Read the new budget while remaining compatible with cached datasets."""
+        return getattr(self, "max_detections", getattr(self, "max_tokens", None))
 
     def _load_gt(self):
         logger.info("Loading ground truth")
@@ -923,6 +1162,7 @@ class CTCData(Dataset):
             img = img.decompress()
         if isinstance(assoc_matrix, _CompressedArray):
             assoc_matrix = assoc_matrix.decompress()
+        loss_mask = None
 
         # cropping
         if self.cropper is not None:
@@ -933,12 +1173,34 @@ class CTCData(Dataset):
             if len(np.unique(cropped_timepoints)) == self.window_size:
                 # at least two total detections to accept the crop
                 # if len(idx) >= 2:
+                loss_mask = _association_subset_loss_mask(
+                    assoc_matrix, timepoints, idx
+                )
                 img, mask, coords = img2, mask2, coords2
                 labels = labels[idx]
                 timepoints = timepoints[idx]
                 assoc_matrix = assoc_matrix[idx][:, idx]
             else:
                 logger.debug("disable cropping as no trajectories would be left")
+
+        max_detections = self._get_max_detections()
+        if max_detections is not None:
+            keep, neighborhood_loss_mask = _sample_neighborhood_indices(
+                coords, timepoints, assoc_matrix, max_detections
+            )
+            if len(keep) < len(timepoints):
+                if loss_mask is not None:
+                    loss_mask = loss_mask[keep][:, keep] & neighborhood_loss_mask
+                else:
+                    loss_mask = neighborhood_loss_mask
+                dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
+                mask = _remove_detections_from_masks(
+                    mask, labels, timepoints, dropped, track["t1"]
+                )
+                coords = coords[keep]
+                labels = labels[keep]
+                timepoints = timepoints[keep]
+                assoc_matrix = assoc_matrix[keep][:, keep]
 
         if self.features == "none":
             if self.augmenter is not None:
@@ -956,6 +1218,8 @@ class CTCData(Dataset):
                     labels = labels[idx]
                     timepoints = timepoints[idx]
                     assoc_matrix = assoc_matrix[idx][:, idx]
+                    if loss_mask is not None:
+                        loss_mask = loss_mask[idx][:, idx]
                     mask = mask.astype(int)
                 else:
                     logger.debug(
@@ -981,6 +1245,8 @@ class CTCData(Dataset):
                     labels = labels[idx]
                     timepoints = timepoints[idx]
                     assoc_matrix = assoc_matrix[idx][:, idx]
+                    if loss_mask is not None:
+                        loss_mask = loss_mask[idx][:, idx]
                     mask = mask.astype(int)
                 else:
                     print("disable augmentation as no trajectories would be left")
@@ -1005,6 +1271,8 @@ class CTCData(Dataset):
                     labels = labels[idx]
                     timepoints = timepoints[idx]
                     assoc_matrix = assoc_matrix[idx][:, idx]
+                    if loss_mask is not None:
+                        loss_mask = loss_mask[idx][:, idx]
                     mask = mask.astype(int)
                 else:
                     print("disable augmentation as no trajectories would be left")
@@ -1035,21 +1303,24 @@ class CTCData(Dataset):
 
             features = np.concatenate(features, axis=0)
 
+        keep = self._detection_keep_indices(assoc_matrix)
+        if len(keep) < len(timepoints):
+            if return_dense:
+                dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
+                mask = _remove_detections_from_masks(
+                    mask, labels, timepoints, dropped, track["t1"]
+                )
+            coords = coords[keep]
+            features = features[keep]
+            labels = labels[keep]
+            timepoints = timepoints[keep]
+            assoc_matrix = assoc_matrix[keep][:, keep]
+            if loss_mask is not None:
+                loss_mask = loss_mask[keep][:, keep]
+
         # remove temporal offset and add timepoints to coords
         relative_timepoints = timepoints - track["t1"]
         coords = np.concatenate((relative_timepoints[:, None], coords), axis=-1)
-
-        if self.max_tokens and len(timepoints) > self.max_tokens:
-            time_incs = np.where(timepoints - np.roll(timepoints, 1))[0]
-            n_elems = time_incs[np.searchsorted(time_incs, self.max_tokens) - 1]
-            timepoints = timepoints[:n_elems]
-            labels = labels[:n_elems]
-            coords = coords[:n_elems]
-            features = features[:n_elems]
-            assoc_matrix = assoc_matrix[:n_elems, :n_elems]
-            logger.info(
-                f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
-            )
 
         coords0 = torch.from_numpy(coords).float()
         features = torch.from_numpy(features).float()
@@ -1070,6 +1341,8 @@ class CTCData(Dataset):
             timepoints=timepoints,
             labels=labels,
         )
+        if loss_mask is not None:
+            res["loss_mask"] = torch.from_numpy(loss_mask)
 
         if return_dense:
             if all([x is not None for x in img]):
@@ -1092,9 +1365,12 @@ class CTCData(Dataset):
         crop_size: tuple[int],
         crop_ensure_all_centers: bool,
     ):
-        if features == "wrfeat2" and ndim != 2:
-            raise ValueError("wrfeat2 currently supports only 2D data")
-        feat_dim = 6 if features == "wrfeat2" else (7 if ndim == 2 else 12)
+        if features in ("wrfeat2", "wrfeat2_no_intensity") and ndim != 2:
+            raise ValueError(f"{features} currently supports only 2D data")
+        feat_dim = {
+            "wrfeat2": 6,
+            "wrfeat2_no_intensity": 5,
+        }.get(features, 7 if ndim == 2 else 12)
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
@@ -1119,6 +1395,18 @@ class CTCData(Dataset):
                 wrfeat.WRRandomAffine(
                     p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)
                 ),
+                wrfeat.WRRandomBrightness(p=0.8),
+                wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
+                wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            ])
+        elif augment == 4:
+            # augment=3 plus per-detection shape measurement noise
+            augmenter = wrfeat.WRAugmentationPipeline([
+                wrfeat.WRRandomFlip(p=0.5),
+                wrfeat.WRRandomAffine(
+                    p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)
+                ),
+                wrfeat.WRRandomShapeJitter(p=0.8, scale=(0.9, 1.1), shear=0.05),
                 wrfeat.WRRandomBrightness(p=0.8),
                 wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
                 wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
@@ -1308,6 +1596,7 @@ class CTCData(Dataset):
             img = img.decompress()
         if isinstance(assoc_matrix, _CompressedArray):
             assoc_matrix = assoc_matrix.decompress()
+        loss_mask = None
 
         # cropping
         if self.cropper is not None:
@@ -1316,12 +1605,62 @@ class CTCData(Dataset):
             cropped_timepoints = timepoints[cropped_idx]
             if len(np.unique(cropped_timepoints)) == self.window_size:
                 idx = cropped_idx
+                loss_mask = _association_subset_loss_mask(
+                    assoc_matrix, timepoints, idx
+                )
                 feat = cropped_feat
                 labels = labels[idx]
                 timepoints = timepoints[idx]
                 assoc_matrix = assoc_matrix[idx][:, idx]
             else:
                 logger.debug("Skipping cropping")
+
+        max_detections = self._get_max_detections()
+        if max_detections is not None:
+            keep, neighborhood_loss_mask = _sample_neighborhood_indices(
+                feat.coords,
+                timepoints,
+                assoc_matrix,
+                max_detections,
+            )
+            if len(keep) < len(timepoints):
+                if loss_mask is not None:
+                    loss_mask = loss_mask[keep][:, keep] & neighborhood_loss_mask
+                else:
+                    loss_mask = neighborhood_loss_mask
+                if return_dense:
+                    dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
+                    mask = _remove_detections_from_masks(
+                        mask, labels, timepoints, dropped, track["t1"]
+                    )
+                feat = wrfeat.WRFeatures(
+                    coords=feat.coords[keep],
+                    labels=feat.labels[keep],
+                    timepoints=feat.timepoints[keep],
+                    features={k: v[keep] for k, v in feat.features.items()},
+                )
+                labels = labels[keep]
+                timepoints = timepoints[keep]
+                assoc_matrix = assoc_matrix[keep][:, keep]
+
+        keep = self._detection_keep_indices(assoc_matrix)
+        if len(keep) < len(timepoints):
+            if return_dense:
+                dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
+                mask = _remove_detections_from_masks(
+                    mask, labels, timepoints, dropped, track["t1"]
+                )
+            feat = wrfeat.WRFeatures(
+                coords=feat.coords[keep],
+                labels=feat.labels[keep],
+                timepoints=feat.timepoints[keep],
+                features={k: v[keep] for k, v in feat.features.items()},
+            )
+            labels = labels[keep]
+            timepoints = timepoints[keep]
+            assoc_matrix = assoc_matrix[keep][:, keep]
+            if loss_mask is not None:
+                loss_mask = loss_mask[keep][:, keep]
 
         if self.augmenter is not None:
             feat = self.augmenter(feat)
@@ -1332,18 +1671,6 @@ class CTCData(Dataset):
         features = torch.from_numpy(feat.features_stacked_for(self.features)).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()
-
-        if self.max_tokens and len(timepoints) > self.max_tokens:
-            time_incs = np.where(timepoints - np.roll(timepoints, 1))[0]
-            n_elems = time_incs[np.searchsorted(time_incs, self.max_tokens) - 1]
-            timepoints = timepoints[:n_elems]
-            labels = labels[:n_elems]
-            coords0 = coords0[:n_elems]
-            features = features[:n_elems]
-            assoc_matrix = assoc_matrix[:n_elems, :n_elems]
-            logger.debug(
-                f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
-            )
 
         if self.augmenter is not None:
             coords = coords0.clone()
@@ -1358,6 +1685,8 @@ class CTCData(Dataset):
             timepoints=timepoints,
             labels=labels,
         )
+        if loss_mask is not None:
+            res["loss_mask"] = torch.from_numpy(loss_mask)
 
         if return_dense:
             if all([x is not None for x in img]):
@@ -1604,6 +1933,18 @@ def collate_sequence_padding(batch):
             assoc[i, :n, :n] = x["assoc_matrix"]
         batch_new["assoc_matrix"] = assoc
 
+    if any("loss_mask" in x for x in batch):
+        loss_mask = torch.zeros(
+            (len(batch), n_max_len, n_max_len), dtype=torch.bool
+        )
+        for i, x in enumerate(batch):
+            n = len(x["coords"])
+            if "loss_mask" in x:
+                loss_mask[i, :n, :n] = x["loss_mask"]
+            else:
+                loss_mask[i, :n, :n] = True
+        batch_new["loss_mask"] = loss_mask
+
     # add boolean mask that signifies whether tokens are padded or not (such that they can be ignored later)
     pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
     for i, n_pad in enumerate(n_pads):
@@ -1619,7 +1960,7 @@ if __name__ == "__main__":
         ndim=2,
         detection_folders=["TRA"],
         window_size=4,
-        max_tokens=None,
+        max_detections=None,
         augment=3,
         features="none",
         downscale_temporal=1,
