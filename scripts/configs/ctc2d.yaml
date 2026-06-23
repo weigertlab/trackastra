@@ -1,0 +1,57 @@
+name: ctc
+epochs: 500
+warmup_epochs: 5
+augment: 3
+window: 4
+features: wrfeat2
+attn_dist_mode: none
+delta_cutoff: 1
+num_encoder_layers: 6
+num_decoder_layers: 6
+causal_norm: quiet_softmax
+cache: true
+cachedir: runs/.cache
+compress: true
+d_model: 320
+dropout: 0.05
+detect_drop: 0.2
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+train_samples: 32000
+tracking_frequency: 5
+tracking_mode: greedy
+tracking_max_distance: 128
+max_detections: 1024
+batch_size: 192
+weight_by_dataset: true
+detection_folders:
+- TRA
+crop_size:
+- 2048
+- 2048
+input_train:
+- data/ctc_2026/2d/BF-C2DL-HSC/01
+- data/ctc_2026/2d/BF-C2DL-HSC/02
+- data/ctc_2026/2d/BF-C2DL-MuSC/01
+- data/ctc_2026/2d/BF-C2DL-MuSC/02
+- data/ctc_2026/2d/DIC-C2DH-HeLa/01
+# - data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-C2DL-Huh7/01
+- data/ctc_2026/2d/Fluo-C2DL-Huh7/02
+- data/ctc_2026/2d/Fluo-C2DL-MSC/01
+- data/ctc_2026/2d/Fluo-C2DL-MSC/02
+- data/ctc_2026/2d/Fluo-N2DH-GOWT1/01
+- data/ctc_2026/2d/Fluo-N2DH-GOWT1/02
+- data/ctc_2026/2d/Fluo-N2DH-SIM+/01
+- data/ctc_2026/2d/Fluo-N2DH-SIM+/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/01
+# - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DH-U373/01
+- data/ctc_2026/2d/PhC-C2DH-U373/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/01
+# - data/ctc_2026/2d/PhC-C2DL-PSC/02
+input_val:
+- data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/02
