@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from types import MappingProxyType
 from typing import Literal
 
 import joblib
@@ -17,6 +16,8 @@ import numpy as np
 import pandas as pd
 import tifffile
 import torch
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from torch.utils.data import Dataset
 
 from trackastra.data import wrfeat
@@ -28,6 +29,22 @@ logger = logging.getLogger(__name__)
 
 FeatureMode = Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
 _FEATURE_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
+
+
+class FrozenMapping(Mapping[str, np.ndarray]):
+    """Insertion-ordered immutable mapping that remains pickleable."""
+
+    def __init__(self, values: Mapping[str, np.ndarray]) -> None:
+        self._values = OrderedDict(values)
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 def _immutable_array(value: np.ndarray, *, ndim: int | None = None) -> np.ndarray:
@@ -69,10 +86,22 @@ class DetectionFrame:
         object.__setattr__(self, "coords", coords)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "track_indices", track_indices)
-        object.__setattr__(self, "features", MappingProxyType(features))
+        object.__setattr__(self, "features", FrozenMapping(features))
 
     def __len__(self) -> int:
         return len(self.labels)
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.timepoint,
+                self.coords,
+                self.labels,
+                self.features,
+                self.track_indices,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -90,6 +119,9 @@ class DetectionSeries:
 
     def __len__(self) -> int:
         return len(self.frames)
+
+    def __reduce__(self):
+        return (type(self), (self.name, self.frames))
 
 
 @dataclass(frozen=True)
@@ -124,6 +156,18 @@ class TrackingSequence:
         object.__setattr__(self, "detection_series", series)
         object.__setattr__(self, "lineage_relation", relation)
         object.__setattr__(self, "lineage_parents", parents)
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.root,
+                self.ndim,
+                self.detection_series,
+                self.lineage_relation,
+                self.lineage_parents,
+            ),
+        )
 
     @classmethod
     def from_ctc(
@@ -527,6 +571,120 @@ def _association_target(
     return target
 
 
+def _association_subset_loss_mask(
+    association: np.ndarray, timepoints: np.ndarray, keep: np.ndarray
+) -> np.ndarray:
+    selected = np.zeros(len(timepoints), dtype=bool)
+    selected[keep] = True
+    omitted = ~selected
+    loss_mask = np.ones((len(keep), len(keep)), dtype=bool)
+    if not omitted.any():
+        return loss_mask
+    kept_times = timepoints[keep]
+    for source_time in np.unique(kept_times):
+        source_local = np.flatnonzero(kept_times == source_time)
+        source_full = keep[source_local]
+        source_out = np.flatnonzero(omitted & (timepoints == source_time))
+        for target_time in np.unique(kept_times):
+            if source_time == target_time:
+                continue
+            target_local = np.flatnonzero(kept_times == target_time)
+            target_full = keep[target_local]
+            target_out = np.flatnonzero(omitted & (timepoints == target_time))
+            row_valid = (
+                ~association[np.ix_(source_full, target_out)].any(axis=1)
+                if len(target_out)
+                else np.ones(len(source_full), dtype=bool)
+            )
+            col_valid = (
+                ~association[np.ix_(source_out, target_full)].any(axis=0)
+                if len(source_out)
+                else np.ones(len(target_full), dtype=bool)
+            )
+            loss_mask[np.ix_(source_local, target_local)] = (
+                row_valid[:, None] & col_valid[None, :]
+            )
+    return loss_mask
+
+
+def _sample_neighborhood_indices(
+    coords: np.ndarray,
+    timepoints: np.ndarray,
+    association: np.ndarray,
+    max_detections: int,
+) -> np.ndarray:
+    last = np.flatnonzero(timepoints == timepoints.max())
+    if len(last) <= max_detections:
+        return np.arange(len(coords))
+    anchor = last[np.random.randint(len(last))]
+    distances = np.linalg.norm(coords[last] - coords[anchor], axis=1)
+    seeds = last[np.argsort(distances, kind="stable")[:max_detections]]
+    _, component = connected_components(
+        csr_matrix(np.logical_or(association, association.T)), directed=False
+    )
+    return np.flatnonzero(np.isin(component, np.unique(component[seeds])))
+
+
+def _sample_detection_keep_indices(
+    association: np.ndarray, timepoints: np.ndarray, drop_fraction: float
+) -> np.ndarray:
+    if not len(association):
+        return np.arange(0)
+    first = np.flatnonzero(timepoints == timepoints.min())
+    n_drop = int(np.floor(drop_fraction * len(first)))
+    if n_drop == 0:
+        return np.arange(len(association))
+    n_components, component = connected_components(
+        csr_matrix(np.logical_or(association, association.T)), directed=False
+    )
+    drop_seeds = np.random.choice(first, size=n_drop, replace=False)
+    drop_components = np.unique(component[drop_seeds])
+    if len(drop_components) == n_components:
+        retained = np.random.choice(drop_components)
+        drop_components = drop_components[drop_components != retained]
+    return np.flatnonzero(~np.isin(component, drop_components))
+
+
+def _subset_features(feature: wrfeat.WRFeatures, keep: np.ndarray) -> wrfeat.WRFeatures:
+    return wrfeat.WRFeatures(
+        coords=feature.coords[keep],
+        labels=feature.labels[keep],
+        timepoints=feature.timepoints[keep],
+        features=OrderedDict(
+            (name, values[keep]) for name, values in feature.features.items()
+        ),
+    )
+
+
+def _wr_augmenter(level: int):
+    common = [
+        wrfeat.WRRandomFlip(p=0.5),
+        wrfeat.WRRandomAffine(p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)),
+    ]
+    if level == 1:
+        augmentations = common
+    elif level == 2:
+        augmentations = [
+            *common,
+            wrfeat.WRRandomBrightness(p=0.8),
+            wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+        ]
+    elif level in (3, 4):
+        if level == 4:
+            common.append(
+                wrfeat.WRRandomShapeJitter(p=0.8, scale=(0.9, 1.1), shear=0.05)
+            )
+        augmentations = [
+            *common,
+            wrfeat.WRRandomBrightness(p=0.8),
+            wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
+            wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+        ]
+    else:
+        return None
+    return wrfeat.WRAugmentationPipeline(augmentations)
+
+
 def _division_count(association: np.ndarray, timepoints: np.ndarray) -> int:
     if not len(association):
         return 0
@@ -537,22 +695,51 @@ def _division_count(association: np.ndarray, timepoints: np.ndarray) -> int:
 
 
 class TrackingData(Dataset):
-    """Deterministic temporal windows over an immutable tracking sequence."""
+    """Runtime temporal windows over an immutable tracking sequence."""
 
     def __init__(
         self,
         sequence: TrackingSequence,
         window_size: int = 10,
         features: FeatureMode = "wrfeat",
+        augment: int = 0,
+        crop_size: int | tuple[int, ...] | None = None,
+        crop_ensure_all_centers: bool = True,
+        max_detections: int | None = None,
+        detect_drop: float = 0.0,
+        detect_drop_fraction: float = 0.1,
     ) -> None:
         if window_size <= 1:
             raise ValueError("window_size must be greater than one")
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
+        if features != "wrfeat" and sequence.ndim != 2:
+            raise ValueError(f"{features} currently supports only 2D data")
+        if augment not in range(5):
+            raise ValueError("augment must be between 0 and 4")
+        if max_detections is not None and max_detections < window_size:
+            raise ValueError("max_detections must be at least window_size")
+        if not 0 <= detect_drop <= 1 or not 0 <= detect_drop_fraction <= 1:
+            raise ValueError("Detection dropout values must be in [0, 1]")
         self.sequence = sequence
+        self.root = sequence.root
         self.window_size = window_size
         self.features = features
         self.ndim = sequence.ndim
+        self.augment = augment
+        self.max_detections = max_detections
+        self.detect_drop = detect_drop
+        self.detect_drop_fraction = detect_drop_fraction
+        self.augmenter = _wr_augmenter(augment)
+        self.cropper = (
+            wrfeat.WRRandomCrop(
+                crop_size=crop_size,
+                ndim=self.ndim,
+                ensure_all_centers=crop_ensure_all_centers,
+            )
+            if crop_size is not None
+            else None
+        )
         self.windows = tuple(
             (series_index, start)
             for series_index, series in enumerate(sequence.detection_series)
@@ -582,7 +769,8 @@ class TrackingData(Dataset):
         return coords, labels, timepoints, features, association
 
     def _window_object_count(self, index: int) -> int:
-        return sum(len(frame) for frame in self._frames(index))
+        count = sum(len(frame) for frame in self._frames(index))
+        return min(count, self.max_detections) if self.max_detections else count
 
     def _window_division_count(self, index: int) -> int:
         _, _, timepoints, _, association = self._window_arrays(index)
@@ -608,16 +796,80 @@ class TrackingData(Dataset):
             timepoints=timepoints.astype(np.int32, copy=False),
             features=features,
         )
+        loss_mask = None
+        if self.cropper is not None:
+            cropped_feature, keep = self.cropper(feature)
+            cropped_timepoints = timepoints[keep]
+            if len(np.unique(cropped_timepoints)) == self.window_size:
+                loss_mask = _association_subset_loss_mask(association, timepoints, keep)
+                feature = cropped_feature
+                association = association[np.ix_(keep, keep)]
+
+        if self.max_detections is not None:
+            keep = _sample_neighborhood_indices(
+                feature.coords,
+                feature.timepoints,
+                association,
+                self.max_detections,
+            )
+            if len(keep) < len(feature):
+                feature = _subset_features(feature, keep)
+                association = association[np.ix_(keep, keep)]
+                if loss_mask is not None:
+                    loss_mask = loss_mask[np.ix_(keep, keep)]
+
+        if self.detect_drop and np.random.rand() < self.detect_drop:
+            keep = _sample_detection_keep_indices(
+                association, feature.timepoints, self.detect_drop_fraction
+            )
+            if len(keep) < len(feature):
+                feature = _subset_features(feature, keep)
+                association = association[np.ix_(keep, keep)]
+                if loss_mask is not None:
+                    loss_mask = loss_mask[np.ix_(keep, keep)]
+
+        if self.augmenter is not None:
+            feature = self.augmenter(feature)
         coords0 = torch.from_numpy(
-            np.concatenate((timepoints[:, None], coords), axis=1)
+            np.concatenate((feature.timepoints[:, None], feature.coords), axis=1)
         ).float()
-        return {
+        coords = coords0.clone()
+        if self.augmenter is not None:
+            coords[:, 1:] += torch.randint(0, 512, (1, self.ndim))
+        result = {
             "features": torch.from_numpy(
                 feature.features_stacked_for(self.features)
             ).float(),
             "coords0": coords0,
-            "coords": coords0.clone(),
+            "coords": coords,
             "assoc_matrix": torch.from_numpy(association.astype(np.float32)),
-            "timepoints": torch.from_numpy(timepoints).long(),
-            "labels": torch.from_numpy(labels).long(),
+            "timepoints": torch.from_numpy(feature.timepoints).long(),
+            "labels": torch.from_numpy(feature.labels).long(),
         }
+        if loss_mask is not None:
+            result["loss_mask"] = torch.from_numpy(loss_mask)
+        return result
+
+
+def association_distances(dataset: TrackingData, delta_cutoff: int) -> np.ndarray:
+    """Distances of unique positive forward associations in raw windows."""
+    if delta_cutoff < 1:
+        raise ValueError("delta_cutoff must be positive")
+    distances = {}
+    for window, (series_index, _) in enumerate(dataset.windows):
+        coords, labels, timepoints, _, association = dataset._window_arrays(window)
+        rows, cols = np.nonzero(association)
+        delta = timepoints[cols] - timepoints[rows]
+        valid = (delta > 0) & (delta <= delta_cutoff)
+        rows, cols = rows[valid], cols[valid]
+        edge_distances = np.linalg.norm(coords[cols] - coords[rows], axis=1)
+        for source, target, distance in zip(rows, cols, edge_distances):
+            key = (
+                series_index,
+                int(timepoints[source]),
+                int(labels[source]),
+                int(timepoints[target]),
+                int(labels[target]),
+            )
+            distances.setdefault(key, float(distance))
+    return np.fromiter(distances.values(), dtype=np.float64)

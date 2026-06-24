@@ -101,7 +101,9 @@ def _reduce_decision_loss(
     decision_losses = torch.stack(decision_losses, dim=1)
     decision_valid = torch.stack(decision_valid, dim=1)
     decisions_per_sample = decision_valid.sum(dim=(1, 2))
-    loss_per_sample = decision_losses.sum(dim=(1, 2)) / decisions_per_sample.clamp_min(1)
+    loss_per_sample = decision_losses.sum(dim=(1, 2)) / decisions_per_sample.clamp_min(
+        1
+    )
 
     sample_valid = decisions_per_sample > 0
     return (loss_per_sample * sample_valid).sum() / sample_valid.sum().clamp_min(1)
@@ -280,8 +282,7 @@ class WrappedLightningModule(pl.LightningModule):
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
         if debug_dir is not None:
-            self.debug = SimpleNamespace(dir = Path(debug_dir),
-                              values_per_epoch=  dict())                              
+            self.debug = SimpleNamespace(dir=Path(debug_dir), values_per_epoch=dict())
             self.debug.dir.mkdir(parents=True, exist_ok=True)
         else:
             self.debug = None
@@ -307,9 +308,7 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         A_pred[mask_invalid] = 0
-        loss = _apply_focal_weight(
-            self.criterion(A_pred, A), self.focal_loss_gamma
-        )
+        loss = _apply_focal_weight(self.criterion(A_pred, A), self.focal_loss_gamma)
 
         if self.causal_norm != "none":
             # BF16 rounds confident probabilities to exactly 0 or 1 before BCE,
@@ -404,12 +403,21 @@ class WrappedLightningModule(pl.LightningModule):
             # norm is a model-level scalar, not per-sample) and avoid Lightning's
             # ambiguous batch-size inference under variable batch sizes
             self.log(
-                "grad_norm", _norm, on_step=False, on_epoch=True,
-                sync_dist=True, batch_size=1,
+                "grad_norm",
+                _norm,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                batch_size=1,
             )
             self.log(
-                "grad_norm_max", _norm, on_step=False, on_epoch=True,
-                reduce_fx="max", sync_dist=True, batch_size=1,
+                "grad_norm_max",
+                _norm,
+                on_step=False,
+                on_epoch=True,
+                reduce_fx="max",
+                sync_dist=True,
+                batch_size=1,
             )
 
     def configure_optimizers(self):
@@ -433,16 +441,16 @@ class WrappedLightningModule(pl.LightningModule):
             print("NaN loss, skipping")
             return None
 
-        if self.debug is not None and loss.item()>.1 and self.current_epoch > 10: 
+        if self.debug is not None and loss.item() > 0.1 and self.current_epoch > 10:
             ep = self.current_epoch
-            
+
             cur = self.debug.values_per_epoch.get(ep, -1)
             if cur < loss.item():
                 self.debug.values_per_epoch[ep] = loss.item()
                 _out = self.debug.dir / f"bad_batch_{ep:04d}.pt"
                 logger.info(f"Debug saving bad batch to {_out}")
                 _batch = batch.copy()
-                _batch['loss'] = loss.item()
+                _batch["loss"] = loss.item()
                 torch.save(_batch, _out)
 
         self.log(
@@ -799,39 +807,20 @@ def create_run_name(args):
 
 
 def _feature_dim(ndim: int, features: str) -> int:
-    """Return the feature width produced by CTCData for a configured mode."""
-    if features == "none":
-        return 0
+    """Return the feature width produced by TrackingData."""
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
     if features in ("wrfeat2", "wrfeat2_no_intensity"):
         if ndim != 2:
             raise ValueError(f"{features} currently supports only 2D data")
         return 6 if features == "wrfeat2" else 5
-    dims = {
-        2: {
-            "regionprops": 7,
-            "regionprops2": 6,
-            "patch": 256,
-            "patch_regionprops": 261,
-        },
-        3: {
-            "regionprops2": 11,
-            "patch_regionprops": 264,
-        },
-    }
-    try:
-        return dims[ndim][features]
-    except KeyError as e:
-        raise ValueError(f"Unsupported feature mode {features!r} for {ndim}D data") from e
+    raise ValueError(f"Unsupported feature mode {features!r} for {ndim}D data")
 
 
 def _resolve_feature_embed_mode(features: str, requested: str | None) -> str:
     if requested is not None:
         return requested
-    return (
-        "mlp" if features in ("wrfeat2", "wrfeat2_no_intensity") else "fourier"
-    )
+    return "mlp" if features in ("wrfeat2", "wrfeat2_no_intensity") else "fourier"
 
 
 def find_val_batch(loader_val, n_gpus):
@@ -912,12 +901,17 @@ def train(args):
         if args.logger == "tensorboard":
             train_logger = TensorBoardLogger(logdir, name="tb")
         elif args.logger == "wandb":
-            train_logger = WandbLogger(name=run_name, 
-                                       project=args.wandb_project,
-                                       save_dir=logdir)
+            train_logger = WandbLogger(
+                name=run_name, project=args.wandb_project, save_dir=logdir
+            )
 
             # init here to get an alert on job failure even before training
-            _init_wandb(project=args.wandb_project, name=run_name, config=vars(args), save_dir=logdir)
+            _init_wandb(
+                project=args.wandb_project,
+                name=run_name,
+                config=vars(args),
+                save_dir=logdir,
+            )
 
         elif args.logger == "none":
             train_logger = False
@@ -938,15 +932,16 @@ def train(args):
         if not Path(p).exists():
             raise FileNotFoundError(f"Input folder {p} does not exist")
 
-    dataset_kwargs = dict(
+    sequence_kwargs = dict(
         ndim=args.ndim,
         detection_folders=args.detection_folders,
+        downscale_temporal=args.downscale_temporal,
+        downscale_spatial=args.downscale_spatial,
+    )
+    tracking_data_kwargs = dict(
         window_size=args.window,
         max_detections=args.max_detections,
         features=args.features,
-        downscale_temporal=args.downscale_temporal,
-        downscale_spatial=args.downscale_spatial,
-        compress=args.compress,
         crop_ensure_all_centers=args.crop_ensure_all_centers,
         detect_drop_fraction=args.detect_drop_fraction,
     )
@@ -970,18 +965,20 @@ def train(args):
         input_train=args.input_train,
         input_val=args.input_val,
         cachedir=args.cachedir if args.cache else None,
-        augment=args.augment,
         distributed=args.distributed,
-        dataset_kwargs=dataset_kwargs,
-        train_dataset_kwargs={
-            "slice_pct": args.slice_pct_train,
+        sequence_kwargs=sequence_kwargs,
+        tracking_data_kwargs=tracking_data_kwargs,
+        train_sequence_kwargs={"slice_pct": args.slice_pct_train},
+        val_sequence_kwargs={"slice_pct": args.slice_pct_val},
+        train_tracking_data_kwargs={
             "crop_size": args.crop_size,
             "detect_drop": args.detect_drop,
+            "augment": args.augment,
         },
-        val_dataset_kwargs={
-            "slice_pct": args.slice_pct_val,
+        val_tracking_data_kwargs={
             "crop_size": None,
             "detect_drop": 0.0,
+            "augment": 0,
         },
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
@@ -1063,7 +1060,7 @@ def train(args):
         tracking_max_distance=args.tracking_max_distance,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
-                grad_log_every_n_epochs=args.grad_log_every_n_epochs,
+        grad_log_every_n_epochs=args.grad_log_every_n_epochs,
         debug_dir=args.debug_dir,
     )
 
@@ -1111,7 +1108,7 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        accelerator="cuda" if torch.cuda.is_available() else 'cpu',
+        accelerator="cuda" if torch.cuda.is_available() else "cpu",
         strategy=strategy,
         devices=n_gpus,
         gradient_clip_val=1.0,
@@ -1135,8 +1132,8 @@ def train(args):
     if args.epochs > 0:
         trainer.fit(model_lightning, datamodule=datamodule, ckpt_path=resume_path)
 
-    print(f"Time elapsed:     {(default_timer() - t)/60:.02f} min")
-    print(f"CPU Memory used:  {(_process_memory() - memory)/1e9:.2f} GB")
+    print(f"Time elapsed:     {(default_timer() - t) / 60:.02f} min")
+    print(f"CPU Memory used:  {(_process_memory() - memory) / 1e9:.2f} GB")
     print(f"GPU Memory used : {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
     return locals()
@@ -1244,16 +1241,7 @@ def parse_train_args():
     parser.add_argument(
         "--features",
         type=str,
-        choices=[
-            "none",
-            "regionprops",
-            "regionprops2",
-            "patch",
-            "patch_regionprops",
-            "wrfeat",
-            "wrfeat2",
-            "wrfeat2_no_intensity",
-        ],
+        choices=["wrfeat", "wrfeat2", "wrfeat2_no_intensity"],
         default="wrfeat",
     )
     parser.add_argument(

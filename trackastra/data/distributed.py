@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from timeit import default_timer
 
+import joblib
 import numpy as np
 import torch
 from lightning import LightningDataModule
@@ -22,7 +23,8 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from .data import CTCData, association_distances, warn_association_distances
+from .data import CTCData, warn_association_distances
+from .datanew import TrackingData, TrackingSequence, association_distances
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -103,7 +105,7 @@ class BalancedBatchSampler(BatchSampler):
             count ``n_ref``; the per-batch budget is ``batch_size * n_ref``. The
             median (50) anchors a full ``batch_size`` batch at the typical window.
         """
-        if isinstance(dataset, CTCData):
+        if isinstance(dataset, CTCData | TrackingData):
             self.n_objects = dataset.n_objects
             self.n_divs = np.array(dataset.n_divs)
             self.n_sizes = np.ones(len(dataset)) * len(dataset)
@@ -171,7 +173,10 @@ class BalancedBatchSampler(BatchSampler):
             while end < n:
                 new_count = end - start + 1
                 n_max = self.n_objects[idx_pool[end]]
-                if new_count > self.batch_size or new_count * n_max > self.object_budget:
+                if (
+                    new_count > self.batch_size
+                    or new_count * n_max > self.object_budget
+                ):
                     break
                 end += 1
             batches.append(idx_pool[start:end])
@@ -312,13 +317,15 @@ class BalancedDataModule(LightningDataModule):
         input_train: list,
         input_val: list,
         cachedir: str,
-        augment: int,
         distributed: bool,
-        dataset_kwargs: dict,
+        sequence_kwargs: dict,
+        tracking_data_kwargs: dict,
         sampler_kwargs: dict,
         loader_kwargs: dict,
-        train_dataset_kwargs: dict | None = None,
-        val_dataset_kwargs: dict | None = None,
+        train_sequence_kwargs: dict | None = None,
+        val_sequence_kwargs: dict | None = None,
+        train_tracking_data_kwargs: dict | None = None,
+        val_tracking_data_kwargs: dict | None = None,
         association_distance_cutoffs: dict[str, float] | None = None,
         association_delta_cutoff: int = 1,
     ):
@@ -326,11 +333,13 @@ class BalancedDataModule(LightningDataModule):
         self.input_train = input_train
         self.input_val = input_val
         self.cachedir = cachedir
-        self.augment = augment
         self.distributed = distributed
-        self.dataset_kwargs = dataset_kwargs
-        self.train_dataset_kwargs = train_dataset_kwargs or {}
-        self.val_dataset_kwargs = val_dataset_kwargs or {}
+        self.sequence_kwargs = sequence_kwargs
+        self.tracking_data_kwargs = tracking_data_kwargs
+        self.train_sequence_kwargs = train_sequence_kwargs or {}
+        self.val_sequence_kwargs = val_sequence_kwargs or {}
+        self.train_tracking_data_kwargs = train_tracking_data_kwargs or {}
+        self.val_tracking_data_kwargs = val_tracking_data_kwargs or {}
         self.sampler_kwargs = sampler_kwargs
         self.loader_kwargs = loader_kwargs
         self.association_distance_cutoffs = association_distance_cutoffs or {}
@@ -354,13 +363,27 @@ class BalancedDataModule(LightningDataModule):
                 dataset_name=f"{split} dataset {dataset.root}",
             )
 
-    def _kwargs_for_split(self, split: str) -> dict:
-        kwargs = self.dataset_kwargs.copy()
+    def _sequence_kwargs_for_split(self, split: str) -> dict:
+        kwargs = self.sequence_kwargs.copy()
         kwargs.update(
-            self.train_dataset_kwargs if split == "train" else self.val_dataset_kwargs
+            self.train_sequence_kwargs if split == "train" else self.val_sequence_kwargs
         )
-        kwargs["augment"] = self.augment if split == "train" else 0
         return kwargs
+
+    def _tracking_data_kwargs_for_split(self, split: str) -> dict:
+        kwargs = self.tracking_data_kwargs.copy()
+        kwargs.update(
+            self.train_tracking_data_kwargs
+            if split == "train"
+            else self.val_tracking_data_kwargs
+        )
+        return kwargs
+
+    def _sequence_loader(self):
+        if self.cachedir is None:
+            return TrackingSequence.from_ctc
+        memory = joblib.Memory(self.cachedir, verbose=1)
+        return memory.cache(TrackingSequence.from_ctc, ignore=["n_workers"])
 
     def prepare_data(self):
         """Loads and caches the datasets if not already done.
@@ -369,30 +392,27 @@ class BalancedDataModule(LightningDataModule):
         """
         if self.cachedir is None:
             return
-        CTCData = cache_class(self.cachedir)
-        datasets = dict()
+        loader = self._sequence_loader()
         for split, inps in zip(
             ("train", "val"),
             (self.input_train, self.input_val),
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
-            datasets[split] = torch.utils.data.ConcatDataset(
-                CTCData(
+            sequences = tuple(
+                loader(
                     root=Path(inp),
-                    **self._kwargs_for_split(split),
+                    **self._sequence_kwargs_for_split(split),
                 )
                 for inp in inps
             )
             logger.info(
-                f"Loaded {len(datasets[split])} {split.upper()} samples (in"
+                f"Loaded {len(sequences)} {split.upper()} sequences (in"
                 f" {(default_timer() - start):.1f} s)\n\n"
             )
 
-        del datasets
-
     def setup(self, stage: str):
-        CTCData = cache_class(self.cachedir)
+        loader = self._sequence_loader()
         self.datasets = dict()
         for split, inps in zip(
             ("train", "val"),
@@ -401,9 +421,12 @@ class BalancedDataModule(LightningDataModule):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
             self.datasets[split] = torch.utils.data.ConcatDataset(
-                CTCData(
-                    root=Path(inp),
-                    **self._kwargs_for_split(split),
+                TrackingData(
+                    loader(
+                        root=Path(inp),
+                        **self._sequence_kwargs_for_split(split),
+                    ),
+                    **self._tracking_data_kwargs_for_split(split),
                 )
                 for inp in inps
             )

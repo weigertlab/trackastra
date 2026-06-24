@@ -3,6 +3,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -18,11 +19,19 @@ from scripts.train import (
 )
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
+from trackastra.data.data import collate_sequence_padding
+from trackastra.data.datanew import (
+    DetectionFrame,
+    DetectionSeries,
+    TrackingData,
+    TrackingSequence,
+)
 from trackastra.data.distributed import (
     BalancedBatchSampler,
     BalancedDataModule,
     BalancedDistributedSampler,
 )
+from trackastra.model import TrackingTransformer
 
 # Mark all tests in this module as requiring training dependencies
 pytestmark = pytest.mark.train
@@ -44,6 +53,54 @@ def test_wrfeat2_defaults_to_mlp_feature_embedding():
     assert _resolve_feature_embed_mode("wrfeat2_no_intensity", None) == "mlp"
     assert _resolve_feature_embed_mode("wrfeat", None) == "fourier"
     assert _resolve_feature_embed_mode("wrfeat2", "fourier") == "fourier"
+
+
+@pytest.mark.parametrize(
+    ("features", "width"),
+    (("wrfeat", 7), ("wrfeat2", 6), ("wrfeat2_no_intensity", 5)),
+)
+def test_tracking_data_cpu_training_smoke(features, width):
+    raw_features = {
+        "equivalent_diameter_area": np.ones((2, 1), np.float32),
+        "intensity_mean": np.ones((2, 1), np.float32),
+        "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (2, 1)),
+        "border_dist": np.zeros((2, 1), np.float32),
+    }
+    frames = tuple(
+        DetectionFrame(
+            timepoint=t,
+            coords=np.array([[0, 0], [4, 4]], dtype=np.float32),
+            labels=np.array([1, 2]),
+            features=raw_features,
+            track_indices=np.array([0, 1]),
+        )
+        for t in range(2)
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detection_series=(DetectionSeries("TRA", frames),),
+        lineage_relation=np.eye(2, dtype=bool),
+        lineage_parents=np.full(2, -1),
+    )
+    batch = collate_sequence_padding([TrackingData(sequence, 2, features)[0]])
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=width,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=4,
+        feat_embed_per_dim=2,
+        feature_embed_mode=_resolve_feature_embed_mode(features, None),
+        dropout=0,
+    )
+
+    loss = WrappedLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss.backward()
+
+    assert torch.isfinite(loss)
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -86,13 +143,15 @@ def test_parse_max_neighbors_defaults_to_16(monkeypatch):
 
 
 def test_summarize_tracking_metrics_includes_linking_and_detection():
-    metrics = pd.DataFrame({
-        "movie": ["01", "02", "Mean"],
-        "TRA": [0.8, 1.0, 0.9],
-        "AOGM": [4.0, 2.0, 3.0],
-        "LNK": [0.7, 0.9, 0.8],
-        "DET": [0.6, 1.0, 0.8],
-    })
+    metrics = pd.DataFrame(
+        {
+            "movie": ["01", "02", "Mean"],
+            "TRA": [0.8, 1.0, 0.9],
+            "AOGM": [4.0, 2.0, 3.0],
+            "LNK": [0.7, 0.9, 0.8],
+            "DET": [0.6, 1.0, 0.8],
+        }
+    )
 
     assert _summarize_tracking_metrics(metrics) == {
         "val_TRA": pytest.approx(0.9),
@@ -218,20 +277,22 @@ def test_common_step_excludes_neighborhood_censored_associations():
             n = coords.shape[1]
             return torch.zeros((len(coords), n, n)) + self.bias
 
-    module = WrappedLightningModule(
-        ZeroModel(), causal_norm="none", delta_cutoff=1
-    )
+    module = WrappedLightningModule(ZeroModel(), causal_norm="none", delta_cutoff=1)
     batch = {
         "features": torch.zeros((1, 3, 1)),
         "coords": torch.zeros((1, 3, 2)),
         "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
         "timepoints": torch.tensor([[0, 1, 1]]),
         "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
-        "loss_mask": torch.tensor([[
-            [True, False, True],
-            [True, True, True],
-            [True, True, True],
-        ]]),
+        "loss_mask": torch.tensor(
+            [
+                [
+                    [True, False, True],
+                    [True, True, True],
+                    [True, True, True],
+                ]
+            ]
+        ),
     }
 
     mask = module._common_step(batch)["mask"].bool()
@@ -265,54 +326,74 @@ def test_balanced_distributed_sampler_supports_all_samples():
 
 
 def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
-    calls = []
+    sequence_calls = []
+    dataset_calls = []
 
-    class RecordingDataset(_SamplerDataset):
-        def __init__(self, root, **kwargs):
+    class RecordingSequence:
+        @classmethod
+        def from_ctc(cls, root, **kwargs):
+            sequence_calls.append((Path(root), kwargs))
+            return Path(root)
+
+    class RecordingTrackingData(_SamplerDataset):
+        def __init__(self, sequence, **kwargs):
             super().__init__()
-            calls.append((Path(root), kwargs))
+            self.root = sequence
+            dataset_calls.append((sequence, kwargs))
 
-    monkeypatch.setattr(distributed, "CTCData", RecordingDataset)
+    monkeypatch.setattr(distributed, "TrackingSequence", RecordingSequence)
+    monkeypatch.setattr(distributed, "TrackingData", RecordingTrackingData)
     module = BalancedDataModule(
         input_train=["train"],
         input_val=["val"],
         cachedir=None,
-        augment=3,
         distributed=False,
-        dataset_kwargs={"features": "wrfeat"},
-        train_dataset_kwargs={
-            "slice_pct": (0.0, 0.8),
+        sequence_kwargs={"ndim": 2},
+        tracking_data_kwargs={"features": "wrfeat"},
+        train_sequence_kwargs={"slice_pct": (0.0, 0.8)},
+        val_sequence_kwargs={"slice_pct": (0.8, 1.0)},
+        train_tracking_data_kwargs={
             "crop_size": (64, 64),
             "detect_drop": 0.5,
+            "augment": 3,
         },
-        val_dataset_kwargs={
-            "slice_pct": (0.8, 1.0),
+        val_tracking_data_kwargs={
             "crop_size": None,
             "detect_drop": 0.0,
+            "augment": 0,
         },
         sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
         loader_kwargs={"batch_size": 2, "num_workers": 0},
     )
 
     module.prepare_data()
-    assert calls == []
+    assert sequence_calls == []
 
     module.setup("fit")
 
-    assert calls[0][1] == {
-        "features": "wrfeat",
-        "slice_pct": (0.0, 0.8),
-        "crop_size": (64, 64),
-        "detect_drop": 0.5,
-        "augment": 3,
-    }
-    assert calls[1][1] == {
-        "features": "wrfeat",
-        "slice_pct": (0.8, 1.0),
-        "crop_size": None,
-        "detect_drop": 0.0,
-        "augment": 0,
-    }
+    assert sequence_calls == [
+        (Path("train"), {"ndim": 2, "slice_pct": (0.0, 0.8)}),
+        (Path("val"), {"ndim": 2, "slice_pct": (0.8, 1.0)}),
+    ]
+
+    assert dataset_calls[0] == (
+        Path("train"),
+        {
+            "features": "wrfeat",
+            "crop_size": (64, 64),
+            "detect_drop": 0.5,
+            "augment": 3,
+        },
+    )
+    assert dataset_calls[1] == (
+        Path("val"),
+        {
+            "features": "wrfeat",
+            "crop_size": None,
+            "detect_drop": 0.0,
+            "augment": 0,
+        },
+    )
 
 
 def download_gt_data(url: str, data_dir: str | Path):
