@@ -202,6 +202,38 @@ def test_collate_pads_optional_neighborhood_loss_masks():
     assert not batch["loss_mask"][1, 1].any()
 
 
+def test_collate_assoc_coo_densifies_to_dense_padding():
+    from trackastra.data.data import densify_assoc
+
+    torch.manual_seed(0)
+
+    def sample(n):
+        return {
+            "coords": torch.zeros((n, 3)),
+            "features": torch.zeros((n, 1)),
+            "labels": torch.arange(n),
+            "timepoints": torch.zeros(n, dtype=torch.long),
+            "assoc_matrix": (torch.rand(n, n) < 0.25).float(),
+        }
+
+    samples = [sample(3), sample(5), sample(2)]
+    batch = collate_sequence_padding(samples)
+
+    bsz = len(samples)
+    n_max = max(len(s["coords"]) for s in samples)
+    dense = densify_assoc(batch["assoc_coo"], bsz, n_max)
+
+    # densified COO must match the old dense block-padding exactly
+    ref = torch.zeros(bsz, n_max, n_max)
+    for i, s in enumerate(samples):
+        n = s["assoc_matrix"].shape[0]
+        ref[i, :n, :n] = s["assoc_matrix"]
+    assert torch.equal(dense, ref)
+    # the dense (B, N, N) buffer is no longer shipped
+    assert "assoc_matrix" not in batch
+    assert batch["assoc_coo"].shape[1] == 3
+
+
 def test_association_distance_warning_deduplicates_overlapping_windows(caplog):
     windows = [
         {

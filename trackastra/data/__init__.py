@@ -6,6 +6,7 @@ from .data import (
     _ctc_lineages,
     # load_ctc_data_from_subfolders,
     collate_sequence_padding,
+    densify_assoc,
     extract_features_regionprops,
 )
 from .example_data import example_data_bacteria, example_data_fluo_3d, example_data_hela

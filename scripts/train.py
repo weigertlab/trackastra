@@ -36,6 +36,7 @@ from trackastra.data import (
     # load_ctc_data_from_subfolders,
     CTCData,
     collate_sequence_padding,
+    densify_assoc,
 )
 from trackastra.data.distributed import BalancedDataModule
 from trackastra.model import TrackingTransformer
@@ -288,7 +289,10 @@ class WrappedLightningModule(pl.LightningModule):
     def _common_step(self, batch):
         feats = batch["features"]
         coords = batch["coords"]
-        A = batch["assoc_matrix"]
+        # association targets arrive as sparse COO; densify on-device (see collate)
+        A = densify_assoc(
+            batch["assoc_coo"], coords.shape[0], coords.shape[1], device=coords.device
+        )
         timepoints = batch["timepoints"]
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
@@ -539,7 +543,10 @@ class WrappedLightningModule(pl.LightningModule):
 
             # First sample of the batch
             sample = 0
-            A_gt = batch["assoc_matrix"][sample]
+            bsz, n = batch["timepoints"].shape
+            A_gt = densify_assoc(
+                batch["assoc_coo"], bsz, n, device=batch["assoc_coo"].device
+            )[sample]
             timepoints = batch["timepoints"][sample]
             A_pred = out["A_pred"][sample]
             loss_before_reduce = out["loss_before_reduce"][sample]
@@ -801,7 +808,9 @@ def find_val_batch(loader_val, n_gpus):
     for batch in batches_val[: len(batches_val) // n_gpus]:
         # works for any val batch size: sum divisions over every sample in the batch
         _n_divs = 0
-        for am, tp in zip(batch["assoc_matrix"], batch["timepoints"]):
+        bsz, n = batch["timepoints"].shape
+        assoc = densify_assoc(batch["assoc_coo"], bsz, n)
+        for am, tp in zip(assoc, batch["timepoints"]):
             _n_divs += int((blockwise_sum(am, tp).max(dim=0)[0] == 2).sum())
         n_divs.append(_n_divs)
         _n_dets = int((batch["timepoints"] >= 0).sum())

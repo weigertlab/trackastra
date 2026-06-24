@@ -1859,6 +1859,27 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
     return torch.cat((x, pad), dim=dim)
 
 
+def densify_assoc(
+    assoc_coo: torch.Tensor,
+    batch_size: int,
+    n: int,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Rebuild a dense ``(B, N, N)`` association matrix from sparse COO triples.
+
+    Inverse of the COO packing done in :func:`collate_sequence_padding`: ``assoc_coo``
+    is ``(nnz, 3)`` with columns ``(batch, row, col)`` and implicit value 1 (the
+    association targets are binary). Done on the GPU in the training step so the dense
+    matrix never crosses the dataloader IPC boundary.
+    """
+    out = torch.zeros(batch_size, n, n, device=device, dtype=dtype)
+    if assoc_coo.numel():
+        b, r, c = assoc_coo.to(device=out.device).long().unbind(1)
+        out[b, r, c] = 1.0
+    return out
+
+
 def collate_sequence_padding(batch):
     """Collate function that pads all sequences to the same length."""
     lens = tuple(len(x["coords"]) for x in batch)
@@ -1895,21 +1916,23 @@ def collate_sequence_padding(batch):
     ):  # keys that are None or not present in the input dicts are set to None
         batch_new[k] = None
     if "assoc_matrix" in batch[0]:
-        # Preallocate the padded (B, Nmax, Nmax) buffer once and block-copy each
-        # sample in, instead of pad_tensor(pad_tensor(...)) + stack (which makes
-        # ~3x transient copies per sample). The dense assoc matrix dominates
-        # collate cost at large windows (O(B*Nmax^2)).
-        a0 = batch[0]["assoc_matrix"]
-        assoc = a0.new_zeros((len(batch), n_max_len, n_max_len))
+        # Ship the association targets sparsely (COO) rather than as a dense
+        # (B, Nmax, Nmax) float buffer. The matrix is binary and >98% zeros, so a
+        # dense collate + worker->main IPC of O(B*Nmax^2) dominated the dataloader
+        # cost at large windows. ``densify_assoc`` rebuilds the dense matrix on the
+        # GPU in the training step. Rows/cols are < the sample's own length <=
+        # n_max_len, so the (i, row, col) triples index the padded batch directly.
+        coos = []
         for i, x in enumerate(batch):
-            n = x["assoc_matrix"].shape[0]
-            if n > n_max_len:
-                raise ValueError(
-                    f"assoc_matrix size {n} exceeds batch max token count"
-                    f" {n_max_len} (must match len(coords))"
-                )
-            assoc[i, :n, :n] = x["assoc_matrix"]
-        batch_new["assoc_matrix"] = assoc
+            nz = torch.nonzero(x["assoc_matrix"], as_tuple=False)  # (nnz, 2)
+            if nz.numel():
+                bcol = torch.full((nz.shape[0], 1), i, dtype=torch.int32)
+                coos.append(torch.cat([bcol, nz.to(torch.int32)], dim=1))
+        batch_new["assoc_coo"] = (
+            torch.cat(coos, dim=0)
+            if coos
+            else torch.zeros((0, 3), dtype=torch.int32)
+        )
 
     if any("loss_mask" in x for x in batch):
         loss_mask = torch.zeros(
