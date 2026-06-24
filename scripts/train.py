@@ -931,6 +931,7 @@ def train(args):
             assoc_head=args.assoc_head,
             assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
+            architecture_version=args.architecture_version,
         )
 
         dummy_model_lightning = WrappedLightningModule(
@@ -1066,6 +1067,7 @@ def train(args):
             assoc_head=args.assoc_head,
             assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
+            architecture_version=args.architecture_version,
         )
 
     model_lightning = WrappedLightningModule(
@@ -1253,6 +1255,13 @@ def parse_train_args():
         "--assoc_head", choices=["bilinear", "multichannel"], default="bilinear"
     )
     parser.add_argument("--assoc_channels", type=int, default=8)
+    parser.add_argument(
+        "--architecture_version",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="model forward semantics; use 1 only for legacy-compatible training",
+    )
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")

@@ -56,3 +56,7 @@ input_val:
 - data/ctc_2026/2d/DIC-C2DH-HeLa/02
 - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
 - data/ctc_2026/2d/PhC-C2DL-PSC/02
+input_test:
+- data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/02

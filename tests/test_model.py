@@ -1,10 +1,17 @@
 import pytest
 import torch
+import yaml
 from trackastra.model import TrackingTransformer
+from trackastra.model.model import DecoderLayer, EncoderLayer
 from trackastra.model.model_parts import FeatureMLP, PositionalEncoding
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
+
+
+class _ZeroModule(torch.nn.Module):
+    def forward(self, x, *args, **kwargs):
+        return torch.zeros_like(x)
 
 
 def test_positional_encoding_cutoffs_start():
@@ -95,6 +102,92 @@ def test_mlp_feature_embedding_survives_save_load(tmp_path):
     assert restored.config["feature_embed_mode"] == "mlp"
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
+
+
+@pytest.mark.parametrize("layer_cls", [EncoderLayer, DecoderLayer])
+def test_architecture_version_controls_residual_semantics(layer_cls):
+    x = torch.tensor([[[1.0, 2.0, 4.0, 8.0], [3.0, 5.0, 7.0, 9.0]]])
+    y = x + 1
+    coords = torch.zeros(1, 2, 3)
+
+    def run(version):
+        layer = layer_cls(
+            coord_dim=2,
+            d_model=4,
+            num_heads=2,
+            dropout=0,
+            positional_bias="none",
+            architecture_version=version,
+        )
+        layer.attn = _ZeroModule()
+        layer.mlp = _ZeroModule()
+        if layer_cls is DecoderLayer:
+            output = layer(x, y, coords)
+        else:
+            output = layer(x, coords)
+        return layer, output
+
+    legacy_layer, legacy_output = run(1)
+    _, current_output = run(2)
+
+    assert torch.allclose(legacy_output, legacy_layer.norm1(x))
+    assert torch.equal(current_output, x)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_architecture_version_controls_coordinate_normalization(version):
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=8,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        dropout=0,
+        logit_norm=False,
+        architecture_version=version,
+    )
+    coords = torch.tensor([[[10.0, 20.0, 30.0], [11.0, 21.0, 31.0]]])
+    captured = []
+    handle = model.pos_embed.register_forward_pre_hook(
+        lambda _module, inputs: captured.append(inputs[0].detach().clone())
+    )
+
+    model(coords)
+    handle.remove()
+
+    expected = coords - coords[:, :, :1].min(dim=1, keepdim=True).values
+    if version == 2:
+        expected[..., 1:] = coords[..., 1:]
+    assert torch.equal(captured[0], expected)
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_unversioned_config_infers_architecture_version(tmp_path, legacy):
+    version = 1 if legacy else 2
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=8,
+        nhead=2,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=2,
+        logit_norm=not legacy,
+        architecture_version=version,
+    )
+    model.save(tmp_path)
+
+    config_path = tmp_path / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config.pop("architecture_version")
+    if legacy:
+        config.pop("logit_norm")
+    config_path.write_text(yaml.safe_dump(config))
+
+    restored = TrackingTransformer.from_folder(tmp_path)
+
+    assert restored.architecture_version == version
+    assert restored.config["architecture_version"] == version
 
 
 def test_model_multichannel_head():

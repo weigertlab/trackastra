@@ -52,6 +52,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="render an error.mp4 (TP/FP/FN tracks) into each output folder",
     )
+    parser.add_argument(
+        "--error-report",
+        "--error_report",
+        dest="error_report",
+        type=str2bool,
+        default=True,
+        help="write errors.csv with official CTC FN/FP/WS edges and model diagnostics",
+    )
     return parser.parse_args(argv)
 
 
@@ -96,7 +104,9 @@ def resolve_ctc_paths(root: Path, detection_folder: str) -> tuple[Path, Path, Pa
     return image_path, mask_path, gt_path
 
 
-def evaluate_ctc(gt_path: Path, pred_path: Path) -> dict[str, float]:
+def evaluate_ctc(
+    gt_path: Path, pred_path: Path, return_matched: bool = False
+) -> dict[str, float] | tuple[dict[str, float], object]:
     """Compute CTC-weighted TRA and AOGM with traccuracy."""
     from traccuracy import run_metrics
     from traccuracy.loaders import load_ctc_data
@@ -105,7 +115,7 @@ def evaluate_ctc(gt_path: Path, pred_path: Path) -> dict[str, float]:
 
     gt_data = load_ctc_data(str(gt_path), run_checks=False)
     pred_data = load_ctc_data(str(pred_path), run_checks=False)
-    results, _ = run_metrics(
+    results, matched = run_metrics(
         gt_data=gt_data,
         pred_data=pred_data,
         matcher=CTCMatcher(),
@@ -124,7 +134,29 @@ def evaluate_ctc(gt_path: Path, pred_path: Path) -> dict[str, float]:
         "fn_edges",
         "ws_edges",
     )
-    return {name: float(values[name]) for name in metric_names}
+    values = {name: float(values[name]) for name in metric_names}
+    return (values, matched) if return_matched else values
+
+
+def _write_error_report(
+    graph, details, matched, output_path: Path, ndim: int, mode: str
+) -> None:
+    """Write the official CTC edge errors with model diagnostics."""
+    try:
+        from scripts.check_errors import link_error_report
+    except ImportError:
+        from check_errors import link_error_report
+
+    edf = link_error_report(graph, details, matched, ndim=ndim, mode=mode)
+    edf.to_csv(output_path / "errors.csv", index=False)
+    if len(edf):
+        counts = ", ".join(
+            f"{kind.upper()}={count}"
+            for kind, count in edf.error_type.value_counts().items()
+        )
+        print(f"  errors.csv: {len(edf)} official edge errors ({counts})")
+    else:
+        print("  errors.csv: 0 edge errors")
 
 
 def _prepare_output(path: Path, overwrite: bool) -> None:
@@ -151,6 +183,7 @@ def predict_and_evaluate(
     overwrite: bool = False,
     print_results: bool = True,
     errormovie: bool = False,
+    error_report: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
     from trackastra.data import CTCData
@@ -182,15 +215,27 @@ def predict_and_evaluate(
         output_path = outdir / model_name / name
         _prepare_output(output_path, overwrite)
 
-        graph, masks = model.track(
-            imgs,
-            masks,
-            mode=mode,
-            max_distance=max_distance,
-            normalize_imgs=False,
-        )
+        track_kwargs = dict(mode=mode, max_distance=max_distance, normalize_imgs=False)
+        if error_report:
+            track_kwargs["return_details"] = True
+        tracked = model.track(imgs, masks, **track_kwargs)
+        graph, masks, details = tracked if error_report else (*tracked, None)
         graph_to_ctc(graph, masks, outdir=output_path)
-        values = evaluate_ctc(gt_path, output_path)
+        evaluated = evaluate_ctc(gt_path, output_path, return_matched=error_report)
+        values, matched = evaluated if error_report else (evaluated, None)
+
+        if error_report:
+            try:
+                _write_error_report(
+                    graph,
+                    details,
+                    matched,
+                    output_path,
+                    ndim=int(config.get("coord_dim", 2)),
+                    mode=mode,
+                )
+            except Exception as error:
+                print(f"Could not write error report for {name}: {error}")
         row = {"movie": name, "model": model_name, "mode": mode, **values}
         rows.append(row)
         # store each movie's metrics next to its tiffs and error.mp4
@@ -230,12 +275,12 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         )
 
     model_path = Path(args.model).expanduser()
-    model_name = model_path.stem
-    model = (
-        Trackastra.from_folder(model_path, device=args.device)
-        if model_path.exists()
-        else Trackastra.from_pretrained(args.model, device=args.device)
-    )
+    if model_path.is_dir():
+        model_name = model_path.stem
+        model = Trackastra.from_folder(model_path, device=args.device)
+    else:
+        model_name = args.model
+        model = Trackastra.from_pretrained(args.model, device=args.device)
     return predict_and_evaluate(
         model=model,
         input_paths=args.input_test,
@@ -246,6 +291,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         max_distance=args.max_distance,
         overwrite=args.overwrite,
         errormovie=args.errormovie,
+        error_report=getattr(args, "error_report", False),
     )
 
 

@@ -41,10 +41,12 @@ class EncoderLayer(nn.Module):
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
+        architecture_version: Literal[1, 2] = 2,
     ):
         super().__init__()
         self.positional_bias = positional_bias
         self.attn_mode = attn_mode
+        self.architecture_version = architecture_version
         attn_cls = (
             SparseRelativePositionalAttention
             if attn_mode == "sparse"
@@ -75,8 +77,11 @@ class EncoderLayer(nn.Module):
         nbr_idx: torch.Tensor = None,
         nbr_bias: torch.Tensor = None,
     ):
-        # pre-norm: the residual stream carries the raw input, norm only feeds attn/mlp
+        # Version 1 checkpoints were trained with the normalized input replacing
+        # the residual stream. Version 2 uses the standard pre-norm residual.
         h = self.norm1(x)
+        if self.architecture_version == 1:
+            x = h
         # setting coords to None disables positional bias
         coords_in = coords if self.positional_bias else None
         if self.attn_mode == "sparse":
@@ -105,10 +110,12 @@ class DecoderLayer(nn.Module):
         positional_bias_n_spatial: int = 32,
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
+        architecture_version: Literal[1, 2] = 2,
     ):
         super().__init__()
         self.positional_bias = positional_bias
         self.attn_mode = attn_mode
+        self.architecture_version = architecture_version
         attn_cls = (
             SparseRelativePositionalAttention
             if attn_mode == "sparse"
@@ -142,8 +149,10 @@ class DecoderLayer(nn.Module):
         nbr_idx: torch.Tensor = None,
         nbr_bias: torch.Tensor = None,
     ):
-        # pre-norm: the residual stream (x) carries the raw input
+        # Version 1 checkpoints used the normalized query as the residual.
         h = self.norm1(x)
+        if self.architecture_version == 1:
+            x = h
         y = self.norm2(y)
         # cross attention
         # setting coords to None disables positional bias
@@ -320,8 +329,14 @@ class TrackingTransformer(torch.nn.Module):
         assoc_head: Literal["bilinear", "multichannel"] = "bilinear",
         assoc_channels: int = 8,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
+        architecture_version: Literal[1, 2] = 2,
     ):
         super().__init__()
+
+        if architecture_version not in (1, 2):
+            raise ValueError(
+                f"Unsupported architecture_version={architecture_version}; expected 1 or 2"
+            )
 
         self.config = dict(
             coord_dim=coord_dim,
@@ -345,7 +360,9 @@ class TrackingTransformer(torch.nn.Module):
             logit_norm=logit_norm,
             assoc_head=assoc_head,
             assoc_channels=assoc_channels,
+            architecture_version=architecture_version,
         )
+        self.architecture_version = architecture_version
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
         self.spatial_pos_cutoff = spatial_pos_cutoff
@@ -373,6 +390,7 @@ class TrackingTransformer(torch.nn.Module):
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
                 attn_mode=attn_mode,
+                architecture_version=architecture_version,
             )
             for _ in range(num_encoder_layers)
         ])
@@ -388,6 +406,7 @@ class TrackingTransformer(torch.nn.Module):
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
                 attn_mode=attn_mode,
+                architecture_version=architecture_version,
             )
             for _ in range(num_decoder_layers)
         ])
@@ -446,12 +465,15 @@ class TrackingTransformer(torch.nn.Module):
             coords = coords.clone()
             coords[padding_mask] = coords.max()
 
-        # remove temporal offset from the time column only. Subtracting min_time
-        # from the whole vector (it broadcasts over the last dim) would also shift
-        # the spatial coords, leaking the absolute temporal origin into spatial
-        # position: the same cells at frames 0-5 vs 100-105 would embed differently.
         min_time = coords[:, :, :1].min(dim=1, keepdims=True).values
-        coords = torch.cat([coords[:, :, :1] - min_time, coords[:, :, 1:]], dim=-1)
+        if self.architecture_version == 1:
+            # Preserve the broadcast subtraction used to train released models.
+            coords = coords - min_time
+        else:
+            # Version 2 removes the temporal offset from the time column only.
+            coords = torch.cat(
+                [coords[:, :, :1] - min_time, coords[:, :, 1:]], dim=-1
+            )
 
         pos = self.pos_embed(coords)
 
@@ -602,6 +624,17 @@ class TrackingTransformer(torch.nn.Module):
         folder = Path(folder)
 
         config = yaml.load(open(folder / "config.yaml"), Loader=yaml.FullLoader)
+        if "architecture_version" not in config:
+            # Released models predate both fields. Current unversioned models
+            # include logit_norm in their saved constructor configuration.
+            config["architecture_version"] = 1 if "logit_norm" not in config else 2
+        # Back-compat: configs published before a param existed must reconstruct
+        # the original architecture, not inherit a newer __init__ default that
+        # would add/remove parameters and break strict state_dict loading.
+        # logit_norm defaults to True for new trainings but adds a `logit_scale`
+        # parameter absent from legacy checkpoints (e.g. general_2d v0.3.0).
+        if "logit_norm" not in config:
+            config["logit_norm"] = False
         if args:
             args = vars(args)
             for k, v in config.items():

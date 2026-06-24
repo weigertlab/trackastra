@@ -245,8 +245,9 @@ class Trackastra:
         max_distance: int = 256,
         max_neighbors: int = 10,
         delta_t: int = 1,
+        return_candidate: bool = False,
         **kwargs,
-    ) -> nx.DiGraph:
+    ) -> nx.DiGraph | tuple[nx.DiGraph, nx.DiGraph]:
         logger.info("Running greedy tracker")
         nodes = predictions["nodes"]
         weights = predictions["weights"]
@@ -260,15 +261,18 @@ class Trackastra:
             delta_t=delta_t,
         )
         if mode == "greedy":
-            return track_greedy(candidate_graph)
+            solution = track_greedy(candidate_graph)
         elif mode == "greedy_nodiv":
-            return track_greedy(candidate_graph, allow_divisions=False)
+            solution = track_greedy(candidate_graph, allow_divisions=False)
         elif mode == "ilp":
             from trackastra.tracking.ilp import track_ilp
 
-            return track_ilp(candidate_graph, ilp_config="gt", **kwargs)
+            solution = track_ilp(candidate_graph, ilp_config="gt", **kwargs)
         else:
             raise ValueError(f"Tracking mode {mode} does not exist.")
+        if return_candidate:
+            return solution, candidate_graph
+        return solution
 
     def track(
         self,
@@ -279,8 +283,9 @@ class Trackastra:
         progbar_class=tqdm,
         n_workers: int = 0,
         batch_size: int | None = None,
+        return_details: bool = False,
         **kwargs,
-    ) -> tuple[nx.DiGraph, np.ndarray]:
+    ) -> tuple[nx.DiGraph, np.ndarray] | tuple[nx.DiGraph, np.ndarray, dict]:
         """Track objects across time frames.
 
         This method links segmented objects across time frames using the specified
@@ -297,11 +302,17 @@ class Trackastra:
             n_workers: Number of worker processes for feature extraction.
             normalize_imgs: Whether to normalize the images.
             batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
+            return_details: If True, additionally return a diagnostics dict with the
+                pre-solution ``candidate_graph`` (all scored edges with weights) and
+                the raw ``predictions`` (nodes + edge weights). Cheap: reuses the work
+                already done, nothing is recomputed.
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
             nx.DiGraph containing the tracking results.
             np.ndarray of tracked masks of shape (T,(Z),Y,X).
+            (only if ``return_details``) dict with keys ``candidate_graph`` and
+            ``predictions``.
         """
         # Pretrained feature extraction requires the trackastra_pretrained_feats package
         feat_type = self.train_args["features"]
@@ -339,8 +350,19 @@ class Trackastra:
             batch_size=batch_size or self.batch_size,
         )
 
-        track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
+        if return_details:
+            track_graph, candidate_graph = self._track_from_predictions(
+                predictions, mode=mode, return_candidate=True, **kwargs
+            )
+        else:
+            track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
         masks_tracked = apply_solution_graph_to_masks(track_graph, masks)
+        if return_details:
+            details = {
+                "candidate_graph": candidate_graph,
+                "predictions": predictions,
+            }
+            return track_graph, masks_tracked, details
         return track_graph, masks_tracked
 
     def track_from_disk(

@@ -14,6 +14,7 @@ from scripts.train import (
     _reduce_matrix_loss,
     _resolve_feature_embed_mode,
     _summarize_tracking_metrics,
+    parse_train_args,
 )
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
@@ -43,6 +44,27 @@ def test_wrfeat2_defaults_to_mlp_feature_embedding():
     assert _resolve_feature_embed_mode("wrfeat2_no_intensity", None) == "mlp"
     assert _resolve_feature_embed_mode("wrfeat", None) == "fourier"
     assert _resolve_feature_embed_mode("wrfeat2", "fourier") == "fourier"
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_parse_architecture_version(monkeypatch, version):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--crop_size",
+            "128",
+            "128",
+            "--architecture_version",
+            str(version),
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.architecture_version == version
 
 
 def test_summarize_tracking_metrics_includes_linking_and_detection():
