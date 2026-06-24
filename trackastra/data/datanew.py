@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -31,22 +31,6 @@ FeatureMode = Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
 _FEATURE_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
 
 
-class FrozenMapping(Mapping[str, np.ndarray]):
-    """Insertion-ordered immutable mapping that remains pickleable."""
-
-    def __init__(self, values: Mapping[str, np.ndarray]) -> None:
-        self._values = OrderedDict(values)
-
-    def __getitem__(self, key: str) -> np.ndarray:
-        return self._values[key]
-
-    def __iter__(self):
-        return iter(self._values)
-
-    def __len__(self) -> int:
-        return len(self._values)
-
-
 def _immutable_array(value: np.ndarray, *, ndim: int | None = None) -> np.ndarray:
     array = np.asarray(value).copy()
     if ndim is not None and array.ndim != ndim:
@@ -62,7 +46,7 @@ class DetectionFrame:
     timepoint: int
     coords: np.ndarray
     labels: np.ndarray
-    features: Mapping[str, np.ndarray]
+    features: dict[str, np.ndarray]
     track_indices: np.ndarray
 
     def __post_init__(self) -> None:
@@ -76,7 +60,7 @@ class DetectionFrame:
             raise ValueError("Detection coordinates must be 2D or 3D")
         if np.any(track_indices < -1):
             raise ValueError("track_indices may only use -1 for unmatched detections")
-        features = OrderedDict()
+        features = {}
         for name, values in self.features.items():
             values = _immutable_array(values)
             if values.ndim == 0 or len(values) != n:
@@ -86,7 +70,7 @@ class DetectionFrame:
         object.__setattr__(self, "coords", coords)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "track_indices", track_indices)
-        object.__setattr__(self, "features", FrozenMapping(features))
+        object.__setattr__(self, "features", features)
 
     def __len__(self) -> int:
         return len(self.labels)
