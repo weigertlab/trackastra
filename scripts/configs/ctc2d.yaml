@@ -28,9 +28,6 @@ batch_size: 128
 weight_by_dataset: true
 detection_folders:
 - TRA
-crop_size:
-- 2048
-- 2048
 input_train:
 - data/ctc_2026/2d/BF-C2DL-HSC/01
 - data/ctc_2026/2d/BF-C2DL-HSC/02
