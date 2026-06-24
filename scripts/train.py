@@ -400,10 +400,16 @@ class WrappedLightningModule(pl.LightningModule):
             # (pre-clip) norm is very jagged. "grad_norm" is the epoch mean
             # (typical magnitude / trend), "grad_norm_max" the epoch max (spike
             # envelope) - two clean lines instead of a noisy per-step burst.
-            self.log("grad_norm", _norm, on_step=False, on_epoch=True, sync_dist=True)
+            # batch_size=1: weight each step equally in the epoch reduction (grad
+            # norm is a model-level scalar, not per-sample) and avoid Lightning's
+            # ambiguous batch-size inference under variable batch sizes
+            self.log(
+                "grad_norm", _norm, on_step=False, on_epoch=True,
+                sync_dist=True, batch_size=1,
+            )
             self.log(
                 "grad_norm_max", _norm, on_step=False, on_epoch=True,
-                reduce_fx="max", sync_dist=True,
+                reduce_fx="max", sync_dist=True, batch_size=1,
             )
 
     def configure_optimizers(self):
@@ -446,6 +452,7 @@ class WrappedLightningModule(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             sync_dist=True,
+            batch_size=batch["coords"].shape[0],
         )
 
         # self.train_loss.append(loss)
@@ -463,6 +470,7 @@ class WrappedLightningModule(pl.LightningModule):
             },
             on_step=True,
             on_epoch=False,
+            batch_size=batch["coords"].shape[0],
         )
 
         return loss
@@ -508,6 +516,7 @@ class WrappedLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
+            batch_size=batch["coords"].shape[0],
         )
 
         # self.val_loss.append(loss)
@@ -559,6 +568,7 @@ class WrappedLightningModule(pl.LightningModule):
                     on_epoch=True,
                     sync_dist=False,
                     rank_zero_only=True,
+                    batch_size=1,
                 )
             except Exception as e:
                 logging.exception(f"Error logging tracking metrics: {e}")
