@@ -1249,8 +1249,8 @@ def parse_train_args():
     parser.add_argument(
         "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
     )
-    parser.add_argument("--max_neighbors", type=int, default=64)
-    parser.add_argument("--logit_norm", type=str2bool, default=True)
+    parser.add_argument("--max_neighbors", type=int, default=16)
+    parser.add_argument("--logit_norm", type=str2bool, default=False)
     parser.add_argument(
         "--assoc_head", choices=["bilinear", "multichannel"], default="bilinear"
     )

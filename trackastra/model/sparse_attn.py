@@ -1,4 +1,4 @@
-"""Sparse kNN attention.
+"""Sparse kNN attention backed by the ``sparse_attn`` Triton package.
 
 The dense additive attention mask is effectively local: each node only attends
 to keys within ``cutoff_spatial`` (and the temporal window), every other entry is
@@ -8,45 +8,34 @@ into O(N*K).
 
 The neighbour list is built once per forward (it depends only on coords/padding,
 not on the layer features) and shared across all encoder/decoder layers, mirroring
-the shared additive mask in the dense path.
+the shared additive mask in the dense path. The attention itself is delegated to
+the ``sparse_attn`` package: a Triton FlashAttention-style kernel on CUDA and a
+pure-PyTorch gather fallback on CPU/MPS. Both skip ``-1`` padded neighbour slots,
+so no additive bias mask is needed.
 """
 
-import math
-
 import torch
-import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 from .model_parts import RelativePositionalAttention
 
-# large negative additive value for masked-out slots (matches dense build_attn_mask)
-_NEG = -1e3
+_IMPORT_ERROR_MSG = (
+    "attn_mode='sparse' requires the 'sparse_attn' package, which is not installed. "
+    "Install it with `pip install trackastra[sparse]` (or `pip install "
+    "'sparse_attn @ git+https://github.com/maweigert/sparse_attn.git'`)."
+)
 
 
-def _sparse_attend(q, k, v, nbr_idx, nbr_bias, dropout, training):
-    """Core kNN attention: gather neighbours, softmax over K, weight values.
+def _load_sparse_attn():
+    """Lazily import the sparse_attn kernels with an actionable error.
 
-    Kept as a free function so it can be gradient-checkpointed during training
-    (the gathered (B, H, N, K, hd) tensors are then recomputed in backward
-    instead of being stored, which is what keeps sparse competitive on memory).
+    Keeping the import lazy means dense inference stays usable on machines without
+    Triton; only requesting ``attn_mode='sparse'`` pulls the dependency in.
     """
-    B, H, N, hd = q.shape
-    K = nbr_idx.shape[-1]
-
-    # gather the K neighbours of each query along the key dim -> (B, H, N, K, hd)
-    idx_flat = nbr_idx.clamp(min=0).view(B, 1, N * K, 1).expand(B, H, N * K, hd)
-    k_g = torch.gather(k, 2, idx_flat).view(B, H, N, K, hd)
-    v_g = torch.gather(v, 2, idx_flat).view(B, H, N, K, hd)
-
-    # scores (B, H, N, K) + additive distance bias (broadcast over heads)
-    scores = (q.unsqueeze(3) * k_g).sum(-1) / math.sqrt(hd)
-    scores = scores + nbr_bias.unsqueeze(1)
-
-    attn = torch.softmax(scores, dim=-1)
-    if training and dropout > 0:
-        attn = F.dropout(attn, p=dropout)
-
-    return (attn.unsqueeze(-1) * v_g).sum(3)  # (B, H, N, hd)
+    try:
+        from sparse_attn import sparse_attention, sparse_attention_gather
+    except ImportError as e:
+        raise ImportError(_IMPORT_ERROR_MSG) from e
+    return sparse_attention, sparse_attention_gather
 
 
 def build_knn_index(
@@ -54,8 +43,8 @@ def build_knn_index(
     padding_mask: torch.Tensor | None,
     cutoff_spatial: float,
     max_neighbors: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build the fixed kNN neighbour list and its additive validity mask.
+) -> torch.Tensor:
+    """Build the fixed kNN neighbour-index list for sparse attention.
 
     Unlike the dense path, no soft distance bias is applied: the kNN neighbourhood
     already encodes spatial locality and rope encodes relative position, so the
@@ -70,11 +59,10 @@ def build_knn_index(
 
     Returns:
         nbr_idx: (B, N, K) int64 neighbour indices; slots beyond ``cutoff_spatial``
-            or pointing at padded/absent keys are set to -1 (sentinel).
-        nbr_bias: (B, N, K) additive attention mask: 0 for real neighbours and a
-            large negative value for sentinel/padded slots so softmax ignores them.
+            or pointing at padded/absent keys are encoded as -1 (sentinel), which
+            the ``sparse_attn`` kernels skip.
     """
-    B, N, _ = coords.shape
+    N = coords.shape[1]
     K = min(max_neighbors, N)
 
     yx = coords[..., 1:]
@@ -88,13 +76,9 @@ def build_knn_index(
     dist_sel = spatial_dist.masked_fill(invalid, float("inf"))
     vals, idx = torch.topk(dist_sel, K, dim=-1, largest=False)  # (B, N, K)
 
-    valid = ~torch.isinf(vals)
     # set sentinel index -1 wherever the slot exceeds the cutoff / is padded
-    nbr_idx = idx.masked_fill(~valid, -1)
-
-    # additive mask only: 0 for real neighbours, -1e3 for sentinel/padded slots
-    nbr_bias = torch.zeros_like(vals).masked_fill(~valid, _NEG)
-    return nbr_idx, nbr_bias
+    valid = ~torch.isinf(vals)
+    return idx.masked_fill(~valid, -1)
 
 
 class SparseRelativePositionalAttention(RelativePositionalAttention):
@@ -102,7 +86,10 @@ class SparseRelativePositionalAttention(RelativePositionalAttention):
 
     Reuses the same q/k/v projections and rope (no extra parameters - a model
     trained dense can run sparse and vice versa). Instead of a full (N, N) score
-    matrix it gathers the K neighbours of each query and softmaxes over them.
+    matrix it attends only over the K nearest neighbours of each query via the
+    ``sparse_attn`` kernel, which runs an online (FlashAttention-style) softmax
+    and recomputes the attention probabilities in backward, so no (B, H, N, K, hd)
+    gathered tensor is ever stored.
     """
 
     def forward(
@@ -112,7 +99,6 @@ class SparseRelativePositionalAttention(RelativePositionalAttention):
         value: torch.Tensor,
         coords: torch.Tensor,
         nbr_idx: torch.Tensor,
-        nbr_bias: torch.Tensor,
         padding_mask: torch.Tensor = None,
     ):
         B, N, D = query.size()
@@ -127,15 +113,13 @@ class SparseRelativePositionalAttention(RelativePositionalAttention):
         if coords is not None and self._mode == "rope":
             q, k = self.rot_pos_enc(q, k, coords)
 
-        if self.training:
-            # recompute the gathered neighbours in backward instead of storing them
-            out = checkpoint(
-                _sparse_attend,
-                q, k, v, nbr_idx, nbr_bias, self.dropout, True,
-                use_reentrant=False,
-            )
+        sparse_attention, sparse_attention_gather = _load_sparse_attn()
+        if q.is_cuda:
+            # Triton kernel: scale is 1/sqrt(hd), -1 neighbours skipped, no dropout.
+            out = sparse_attention(q, k, v, nbr_idx, bwd="atomics")  # (B, H, N, hd)
         else:
-            out = _sparse_attend(q, k, v, nbr_idx, nbr_bias, self.dropout, False)
+            # portable O(N*K) gather fallback for CPU/MPS
+            out = sparse_attention_gather(q, k, v, nbr_idx)
 
         out = out.transpose(1, 2).contiguous().view(B, N, D)
         return self.proj(out)

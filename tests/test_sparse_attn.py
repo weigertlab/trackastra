@@ -1,37 +1,15 @@
 """Sparse kNN attention: mechanism correctness and sentinel handling.
 
-The sparse path intentionally drops the dense soft distance bias, so it no longer
-matches the dense model numerically. These tests instead validate the gather +
-masked-softmax mechanism directly, and that the model runs end to end in sparse mode.
+The sparse path delegates the attention itself to the ``sparse_attn`` package (a
+Triton kernel on CUDA, a portable gather fallback on CPU; both covered by that
+package's own tests). It intentionally drops the dense soft distance bias, so it no
+longer matches the dense model numerically. These tests validate the trackastra-side
+kNN graph construction and that the model runs end to end in sparse mode.
 """
 
-import math
-
 import torch
-
 from trackastra.model.model import TrackingTransformer
-from trackastra.model.sparse_attn import _sparse_attend, build_knn_index
-
-
-def test_sparse_attend_matches_full_attention():
-    # With K = N and an all-keys neighbour list, sparse attention must reduce to
-    # plain scaled-dot-product attention over all keys.
-    torch.manual_seed(0)
-    B, H, N, hd = 2, 4, 16, 8
-    q = torch.randn(B, H, N, hd)
-    k = torch.randn(B, H, N, hd)
-    v = torch.randn(B, H, N, hd)
-
-    nbr_idx = torch.arange(N).view(1, 1, N).expand(B, N, N).contiguous()
-    nbr_bias = torch.zeros(B, N, N)
-    out_sparse = _sparse_attend(q, k, v, nbr_idx, nbr_bias, dropout=0.0, training=False)
-
-    scores = (q @ k.transpose(-1, -2)) / math.sqrt(hd)
-    out_full = torch.softmax(scores, dim=-1) @ v
-
-    assert torch.allclose(out_sparse, out_full, atol=1e-5), (
-        (out_sparse - out_full).abs().max().item()
-    )
+from trackastra.model.sparse_attn import build_knn_index
 
 
 def test_build_knn_index_sentinels():
@@ -43,19 +21,16 @@ def test_build_knn_index_sentinels():
         [0.0, 2.0, 0.0],
     ]])
     padding_mask = torch.tensor([[False, False, False, True]])
-    nbr_idx, nbr_bias = build_knn_index(
-        coords, padding_mask, cutoff_spatial=10.0, max_neighbors=4
-    )
+    nbr_idx = build_knn_index(coords, padding_mask, cutoff_spatial=10.0, max_neighbors=4)
 
-    # node 0 must reach nodes {0, 1, 3-is-padded->excluded, 2-too-far->excluded}
+    # node 0 must reach nodes {0, 1}; node 2 (too far) and node 3 (padded) excluded.
     row = nbr_idx[0, 0]
     valid = row >= 0
     assert set(row[valid].tolist()) <= {0, 1}
     assert 2 not in row[valid].tolist()  # beyond cutoff
     assert 3 not in row[valid].tolist()  # padded key
-    # bias is 0 on valid slots, large-negative on sentinels
-    assert torch.all(nbr_bias[0, 0][valid] == 0)
-    assert torch.all(nbr_bias[0, 0][~valid] <= -1e3 + 1)
+    # invalid slots are encoded as the -1 sentinel
+    assert torch.all(row[~valid] == -1)
 
 
 def test_sparse_model_runs_finite():

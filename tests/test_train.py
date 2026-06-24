@@ -67,6 +67,24 @@ def test_parse_architecture_version(monkeypatch, version):
     assert args.architecture_version == version
 
 
+def test_parse_max_neighbors_defaults_to_16(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--crop_size",
+            "128",
+            "128",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.max_neighbors == 16
+
+
 def test_summarize_tracking_metrics_includes_linking_and_detection():
     metrics = pd.DataFrame({
         "movie": ["01", "02", "Mean"],

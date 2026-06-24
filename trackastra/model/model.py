@@ -75,7 +75,6 @@ class EncoderLayer(nn.Module):
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
         nbr_idx: torch.Tensor = None,
-        nbr_bias: torch.Tensor = None,
     ):
         # Version 1 checkpoints were trained with the normalized input replacing
         # the residual stream. Version 2 uses the standard pre-norm residual.
@@ -85,7 +84,7 @@ class EncoderLayer(nn.Module):
         # setting coords to None disables positional bias
         coords_in = coords if self.positional_bias else None
         if self.attn_mode == "sparse":
-            a = self.attn(h, h, h, coords=coords_in, nbr_idx=nbr_idx, nbr_bias=nbr_bias)
+            a = self.attn(h, h, h, coords=coords_in, nbr_idx=nbr_idx)
         else:
             a = self.attn(
                 h, h, h, coords=coords_in, padding_mask=padding_mask, attn_mask=attn_mask
@@ -147,7 +146,6 @@ class DecoderLayer(nn.Module):
         padding_mask: torch.Tensor = None,
         attn_mask: torch.Tensor = None,
         nbr_idx: torch.Tensor = None,
-        nbr_bias: torch.Tensor = None,
     ):
         # Version 1 checkpoints used the normalized query as the residual.
         h = self.norm1(x)
@@ -158,7 +156,7 @@ class DecoderLayer(nn.Module):
         # setting coords to None disables positional bias
         coords_in = coords if self.positional_bias else None
         if self.attn_mode == "sparse":
-            a = self.attn(h, y, y, coords=coords_in, nbr_idx=nbr_idx, nbr_bias=nbr_bias)
+            a = self.attn(h, y, y, coords=coords_in, nbr_idx=nbr_idx)
         else:
             a = self.attn(
                 h, y, y, coords=coords_in, padding_mask=padding_mask, attn_mask=attn_mask
@@ -324,7 +322,7 @@ class TrackingTransformer(torch.nn.Module):
         ] = "quiet_softmax",
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
-        max_neighbors: int = 64,
+        max_neighbors: int = 16,
         logit_norm: bool = True,
         assoc_head: Literal["bilinear", "multichannel"] = "bilinear",
         assoc_channels: int = 8,
@@ -491,11 +489,11 @@ class TrackingTransformer(torch.nn.Module):
         # Precompute the layer-independent attention context once and share it
         # across all encoder/decoder layers (depends only on coords/padding).
         # dense: a single additive (B, nH, N, N) mask. sparse: a fixed kNN
-        # neighbour list + its additive distance bias.
+        # neighbour list (-1 padded), shared across all layers.
         attn_mask = None
-        nbr_idx = nbr_bias = None
+        nbr_idx = None
         if self.attn_mode == "sparse":
-            nbr_idx, nbr_bias = build_knn_index(
+            nbr_idx = build_knn_index(
                 coords,
                 padding_mask,
                 self.spatial_pos_cutoff,
@@ -512,7 +510,7 @@ class TrackingTransformer(torch.nn.Module):
         for enc in self.encoder:
             x = enc(
                 x, coords=coords, padding_mask=padding_mask,
-                attn_mask=attn_mask, nbr_idx=nbr_idx, nbr_bias=nbr_bias,
+                attn_mask=attn_mask, nbr_idx=nbr_idx,
             )
 
         y = features
@@ -520,7 +518,7 @@ class TrackingTransformer(torch.nn.Module):
         for dec in self.decoder:
             y = dec(
                 y, x, coords=coords, padding_mask=padding_mask,
-                attn_mask=attn_mask, nbr_idx=nbr_idx, nbr_bias=nbr_bias,
+                attn_mask=attn_mask, nbr_idx=nbr_idx,
             )
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 

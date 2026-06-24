@@ -4,6 +4,7 @@ import yaml
 from trackastra.model import TrackingTransformer
 from trackastra.model.model import DecoderLayer, EncoderLayer
 from trackastra.model.model_parts import FeatureMLP, PositionalEncoding
+from trackastra.model.sparse_attn import build_knn_index
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
@@ -44,6 +45,119 @@ def test_model():
     A[M] = 0
 
     print(A.sum())
+
+
+def test_sparse_attention_defaults_to_16_neighbors():
+    model = TrackingTransformer(coord_dim=2, attn_mode="sparse")
+
+    assert model.max_neighbors == 16
+    assert model.config["max_neighbors"] == 16
+
+
+def test_explicit_max_neighbors_overrides_default():
+    """A saved config with max_neighbors=64 must keep 64, not the new default."""
+    model = TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=64)
+
+    assert model.max_neighbors == 64
+    assert model.config["max_neighbors"] == 64
+
+
+def test_build_knn_index_excludes_cutoff_and_padding_with_minus_one():
+    # 4 points on a line (time, y, x); the last token is a padded key.
+    coords = torch.tensor(
+        [[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 5.0, 0.0], [0.0, 6.0, 0.0]]]
+    )
+    padding_mask = torch.tensor([[False, False, False, True]])
+
+    nbr_idx = build_knn_index(coords, padding_mask, cutoff_spatial=2.0, max_neighbors=4)
+
+    assert nbr_idx.shape == (1, 4, 4)
+    assert nbr_idx.dtype == torch.int64
+    # the padded key (index 3) must never appear as anyone's neighbour
+    assert (nbr_idx != 3).all()
+    # query 0 (y=0): within dist 2 -> {0, 1}; remaining slots are -1 sentinels
+    assert set(nbr_idx[0, 0].tolist()) == {0, 1, -1}
+    # query 2 (y=5): only self within dist 2 (key 3 at y=6 is padded out)
+    assert set(nbr_idx[0, 2].tolist()) == {2, -1}
+
+
+def test_build_knn_index_is_batch_specific():
+    coords = torch.zeros(2, 3, 3)
+    coords[0, :, 1] = torch.tensor([0.0, 1.0, 2.0])  # tightly packed
+    coords[1, :, 1] = torch.tensor([0.0, 10.0, 20.0])  # spread out
+
+    nbr_idx = build_knn_index(coords, None, cutoff_spatial=1.5, max_neighbors=3)
+
+    assert set(nbr_idx[0, 0].tolist()) == {0, 1, -1}
+    assert set(nbr_idx[1, 0].tolist()) == {0, -1}
+    assert not torch.equal(nbr_idx[0], nbr_idx[1])
+
+
+def test_sparse_model_forward_backward_cpu_fallback():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=2,
+        num_decoder_layers=2,
+        attn_mode="sparse",
+        max_neighbors=8,
+        dropout=0,
+    )
+    coords = torch.randint(0, 100, (2, 40, 3)).float()
+
+    A = model(coords)
+    assert A.shape == (2, 40, 40)
+    assert torch.isfinite(A).all()
+
+    A.sum().backward()
+    grads = [p.grad for p in model.parameters() if p.requires_grad]
+    assert all(torch.isfinite(g).all() for g in grads if g is not None)
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+def test_dense_and_sparse_share_state_dict():
+    common = dict(
+        coord_dim=2,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0,
+    )
+    dense = TrackingTransformer(attn_mode="dense", **common)
+    sparse = TrackingTransformer(attn_mode="sparse", max_neighbors=8, **common)
+
+    # identical parameter names/shapes -> a dense checkpoint loads into sparse
+    sparse.load_state_dict(dense.state_dict())
+    for key, value in dense.state_dict().items():
+        assert torch.equal(value, sparse.state_dict()[key])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + Triton")
+def test_sparse_model_forward_backward_cuda():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=2,
+        num_decoder_layers=2,
+        attn_mode="sparse",
+        max_neighbors=16,
+        dropout=0,
+    ).cuda()
+    coords = torch.randint(0, 100, (2, 64, 3)).float().cuda()
+
+    A = model(coords)
+    assert A.shape == (2, 64, 64)
+    assert torch.isfinite(A).all()
+
+    A.sum().backward()
+    grads = [p.grad for p in model.parameters() if p.requires_grad]
+    assert all(torch.isfinite(g).all() for g in grads if g is not None)
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
 def test_mlp_feature_embedding_runs_without_fourier_features():
