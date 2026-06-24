@@ -132,26 +132,28 @@ def _sample_neighborhood_indices(
     assoc_matrix: np.ndarray,
     max_detections: int,
 ) -> np.ndarray:
-    """Select whole lineages seeded by a spatial neighborhood of the first frame.
+    """Select whole lineages seeded by a spatial neighborhood of the last frame.
 
-    When the first frame holds more than ``max_detections`` detections, pick a random
-    anchor and the ``max_detections`` spatially-closest first-frame detections, then
-    keep the full lineage (connected component) of each. Lineages are kept whole, so no
-    association is ever severed and the subset needs no loss mask. Components without a
-    first-frame member (detections entering mid-window) are dropped.
+    The last frame is the densest (cells divide but never merge, so the count only
+    grows forward) and tracing lineages *back* from it keeps the total bounded: the
+    backward frontier is non-increasing, unlike forward selection from the first frame
+    where divisions can blow the count up. When the last frame holds more than
+    ``max_detections`` detections, pick a random anchor and the ``max_detections``
+    spatially-closest last-frame detections, then keep the full lineage (connected
+    component) of each. Lineages are kept whole, so no association is ever severed and
+    the subset needs no loss mask. Components without a last-frame member (lineages
+    that terminate mid-window) are dropped.
 
-    The budget applies to the first frame only: the total kept count may exceed
-    ``max_detections`` when lineages branch (divisions). Returns the kept indices
-    (sorted ascending).
+    Returns the kept indices (sorted ascending).
     """
     n = len(coords)
-    first = np.flatnonzero(timepoints == timepoints.min())
-    if len(first) <= max_detections:
+    last = np.flatnonzero(timepoints == timepoints.max())
+    if len(last) <= max_detections:
         return np.arange(n)
 
-    anchor = first[np.random.randint(len(first))]
-    distances = np.linalg.norm(coords[first] - coords[anchor], axis=1)
-    seeds = first[np.argsort(distances, kind="stable")[:max_detections]]
+    anchor = last[np.random.randint(len(last))]
+    distances = np.linalg.norm(coords[last] - coords[anchor], axis=1)
+    seeds = last[np.argsort(distances, kind="stable")[:max_detections]]
 
     _, component = connected_components(
         csr_matrix(np.logical_or(assoc_matrix, assoc_matrix.T)),
