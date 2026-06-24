@@ -555,42 +555,6 @@ def _association_target(
     return target
 
 
-def _association_subset_loss_mask(
-    association: np.ndarray, timepoints: np.ndarray, keep: np.ndarray
-) -> np.ndarray:
-    selected = np.zeros(len(timepoints), dtype=bool)
-    selected[keep] = True
-    omitted = ~selected
-    loss_mask = np.ones((len(keep), len(keep)), dtype=bool)
-    if not omitted.any():
-        return loss_mask
-    kept_times = timepoints[keep]
-    for source_time in np.unique(kept_times):
-        source_local = np.flatnonzero(kept_times == source_time)
-        source_full = keep[source_local]
-        source_out = np.flatnonzero(omitted & (timepoints == source_time))
-        for target_time in np.unique(kept_times):
-            if source_time == target_time:
-                continue
-            target_local = np.flatnonzero(kept_times == target_time)
-            target_full = keep[target_local]
-            target_out = np.flatnonzero(omitted & (timepoints == target_time))
-            row_valid = (
-                ~association[np.ix_(source_full, target_out)].any(axis=1)
-                if len(target_out)
-                else np.ones(len(source_full), dtype=bool)
-            )
-            col_valid = (
-                ~association[np.ix_(source_out, target_full)].any(axis=0)
-                if len(source_out)
-                else np.ones(len(target_full), dtype=bool)
-            )
-            loss_mask[np.ix_(source_local, target_local)] = (
-                row_valid[:, None] & col_valid[None, :]
-            )
-    return loss_mask
-
-
 def _sample_neighborhood_indices(
     coords: np.ndarray,
     timepoints: np.ndarray,
@@ -687,8 +651,6 @@ class TrackingData(Dataset):
         window_size: int = 10,
         features: FeatureMode = "wrfeat",
         augment: int = 0,
-        crop_size: int | tuple[int, ...] | None = None,
-        crop_ensure_all_centers: bool = True,
         max_detections: int | None = None,
         detect_drop: float = 0.0,
         detect_drop_fraction: float = 0.1,
@@ -715,15 +677,6 @@ class TrackingData(Dataset):
         self.detect_drop = detect_drop
         self.detect_drop_fraction = detect_drop_fraction
         self.augmenter = _wr_augmenter(augment)
-        self.cropper = (
-            wrfeat.WRRandomCrop(
-                crop_size=crop_size,
-                ndim=self.ndim,
-                ensure_all_centers=crop_ensure_all_centers,
-            )
-            if crop_size is not None
-            else None
-        )
         self.windows = tuple(
             (series_index, start)
             for series_index, series in enumerate(sequence.detection_series)
@@ -780,15 +733,6 @@ class TrackingData(Dataset):
             timepoints=timepoints.astype(np.int32, copy=False),
             features=features,
         )
-        loss_mask = None
-        if self.cropper is not None:
-            cropped_feature, keep = self.cropper(feature)
-            cropped_timepoints = timepoints[keep]
-            if len(np.unique(cropped_timepoints)) == self.window_size:
-                loss_mask = _association_subset_loss_mask(association, timepoints, keep)
-                feature = cropped_feature
-                association = association[np.ix_(keep, keep)]
-
         if self.max_detections is not None:
             keep = _sample_neighborhood_indices(
                 feature.coords,
@@ -799,8 +743,6 @@ class TrackingData(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
-                if loss_mask is not None:
-                    loss_mask = loss_mask[np.ix_(keep, keep)]
 
         if self.detect_drop and np.random.rand() < self.detect_drop:
             keep = _sample_detection_keep_indices(
@@ -809,8 +751,6 @@ class TrackingData(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
-                if loss_mask is not None:
-                    loss_mask = loss_mask[np.ix_(keep, keep)]
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
@@ -830,8 +770,6 @@ class TrackingData(Dataset):
             "timepoints": torch.from_numpy(feature.timepoints).long(),
             "labels": torch.from_numpy(feature.labels).long(),
         }
-        if loss_mask is not None:
-            result["loss_mask"] = torch.from_numpy(loss_mask)
         return result
 
 

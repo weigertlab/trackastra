@@ -111,9 +111,6 @@ def test_parse_architecture_version(monkeypatch, version):
             "train.py",
             "-c",
             str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
-            "--crop_size",
-            "128",
-            "128",
             "--architecture_version",
             str(version),
         ],
@@ -131,9 +128,6 @@ def test_parse_max_neighbors_defaults_to_16(monkeypatch):
             "train.py",
             "-c",
             str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
-            "--crop_size",
-            "128",
-            "128",
         ],
     )
 
@@ -353,12 +347,10 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         train_sequence_kwargs={"slice_pct": (0.0, 0.8)},
         val_sequence_kwargs={"slice_pct": (0.8, 1.0)},
         train_tracking_data_kwargs={
-            "crop_size": (64, 64),
             "detect_drop": 0.5,
             "augment": 3,
         },
         val_tracking_data_kwargs={
-            "crop_size": None,
             "detect_drop": 0.0,
             "augment": 0,
         },
@@ -380,7 +372,6 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         Path("train"),
         {
             "features": "wrfeat",
-            "crop_size": (64, 64),
             "detect_drop": 0.5,
             "augment": 3,
         },
@@ -389,7 +380,6 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         Path("val"),
         {
             "features": "wrfeat",
-            "crop_size": None,
             "detect_drop": 0.0,
             "augment": 0,
         },

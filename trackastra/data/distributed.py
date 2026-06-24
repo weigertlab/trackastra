@@ -350,7 +350,7 @@ class BalancedDataModule(LightningDataModule):
         if not self.association_distance_cutoffs:
             return
         distances = association_distances(
-            dataset.windows, delta_cutoff=self.association_delta_cutoff
+            dataset, delta_cutoff=self.association_delta_cutoff
         )
         for cutoff_name, max_distance in self.association_distance_cutoffs.items():
             if max_distance is None:

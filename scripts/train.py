@@ -926,7 +926,14 @@ def train(args):
             f'Logdir {logdir} exists, set "--resume t"  if you want to overwrite'
         )
 
-    n_gpus = torch.cuda.device_count() if args.distributed else 1
+    accelerator = (
+        args.device
+        if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    n_gpus = (
+        torch.cuda.device_count() if args.distributed and accelerator == "cuda" else 1
+    )
 
     for p in args.input_train + args.input_val:
         if not Path(p).exists():
@@ -942,7 +949,6 @@ def train(args):
         window_size=args.window,
         max_detections=args.max_detections,
         features=args.features,
-        crop_ensure_all_centers=args.crop_ensure_all_centers,
         detect_drop_fraction=args.detect_drop_fraction,
     )
     sampler_kwargs = dict(
@@ -971,12 +977,10 @@ def train(args):
         train_sequence_kwargs={"slice_pct": args.slice_pct_train},
         val_sequence_kwargs={"slice_pct": args.slice_pct_val},
         train_tracking_data_kwargs={
-            "crop_size": args.crop_size,
             "detect_drop": args.detect_drop,
             "augment": args.augment,
         },
         val_tracking_data_kwargs={
-            "crop_size": None,
             "detect_drop": 0.0,
             "augment": 0,
         },
@@ -1108,7 +1112,7 @@ def train(args):
         profiler = None
 
     trainer = pl.Trainer(
-        accelerator="cuda" if torch.cuda.is_available() else "cpu",
+        accelerator=accelerator,
         strategy=strategy,
         devices=n_gpus,
         gradient_clip_val=1.0,
@@ -1165,6 +1169,13 @@ def parse_train_args():
     parser.add_argument(
         "--ndim", type=int, default=2, help="number of spatial dimensions"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="accelerator to train on ('auto' picks cuda when available)",
+    )
     parser.add_argument("-d", "--d_model", type=int, default=256)
     parser.add_argument("-w", "--window", type=int, default=10)
     parser.add_argument("--epochs", type=int, default=100)
@@ -1186,7 +1197,6 @@ def parse_train_args():
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--spatial_pos_cutoff", type=int, default=256)
-    parser.add_argument("--from_subfolder", action="store_true")
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
@@ -1303,9 +1313,6 @@ def parse_train_args():
     )
 
     parser.add_argument(
-        "--compress", type=str2bool, default=False, help="compress dataset"
-    )
-    parser.add_argument(
         "--cache",
         type=str2bool,
         default=False,
@@ -1346,21 +1353,6 @@ def parse_train_args():
         choices=["tensorboard", "wandb", "none"],
     )
     parser.add_argument("--wandb_project", type=str, default="trackastra-new")
-    parser.add_argument(
-        "--crop_size",
-        type=int,
-        required=False,
-        nargs="+",
-        default=None,
-        help="random crop size for augmentation; omit (None) to disable cropping "
-        "and rely on max_detections for the spatial/lineage budget",
-    )
-    parser.add_argument(
-        "--crop_ensure_all_centers",
-        type=str2bool,
-        default=True,
-        help="retain all centers along crop dimensions where their extent fits",
-    )
     parser.add_argument(
         "--weight_by_ndivs",
         type=str2bool,

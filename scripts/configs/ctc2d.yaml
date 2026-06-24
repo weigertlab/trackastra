@@ -11,7 +11,6 @@ num_decoder_layers: 6
 causal_norm: quiet_softmax
 cache: true
 cachedir: runs/.cache
-compress: true
 d_model: 320
 dropout: 0.05
 detect_drop: 0.2

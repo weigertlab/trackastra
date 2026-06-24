@@ -77,18 +77,21 @@ folder names do not require changes to `TrackingData`.
 ## Runtime dataset
 
 `TrackingData` receives a sequence plus `window_size`, feature mode, augmentation,
-crop settings, detection budget, and detection-dropout settings.
+detection budget, and detection-dropout settings.
 
 It stores only a window index of `(detection_series, start_frame)` pairs. For each
 item it concatenates the selected frames, constructs the association target from
 `track_indices` and `lineage_relation`, then applies operations in this order:
 
-1. Spatial crop and its censoring mask, if configured.
-2. Lineage-preserving `max_detections` selection.
-3. Lineage-level detection dropout, retaining at least one lineage.
-4. WR geometric and feature augmentation.
-5. Runtime projection to the selected WR feature representation.
-6. Relative-time coordinate construction and tensor conversion.
+1. Lineage-preserving `max_detections` selection.
+2. Lineage-level detection dropout, retaining at least one lineage.
+3. WR geometric and feature augmentation.
+4. Runtime projection to the selected WR feature representation.
+5. Relative-time coordinate construction and tensor conversion.
+
+Spatial cropping was part of the original design but has been removed (see the
+2026-06-25 decision in the observations log); `max_detections` plus coordinate
+augmentation cover its role.
 
 Association construction becomes a direct relation lookup rather than repeated
 NetworkX ancestor/descendant traversal. `n_objects` and `n_divs` should be computed
@@ -133,7 +136,7 @@ Arguments included in the cached loader call are `root`, resolved folder overrid
 matching parameters. Worker count is ignored because it only affects performance.
 
 The following remain outside the cached call: `window_size`, feature mode,
-augmentation, crop settings, detection budget, detection dropout, batch settings, and
+augmentation, detection budget, detection dropout, batch settings, and
 sampler settings. Changing any of them must reuse the cached `TrackingSequence`.
 
 `BalancedDataModule` will receive separate `sequence_kwargs` and
@@ -183,14 +186,14 @@ scope. Do not start Phase 2 until the user has reviewed and committed Phase 1.
 
 ### Phase 2: runtime behavior, caching, and training integration
 
-- [ ] Add cropping with seeded legacy parity checks.
-- [ ] Add lineage-aware detection limits and dropout with parity checks.
-- [ ] Add WR augmentation levels with seeded parity checks.
+- [x] Spatial cropping removed entirely (see decision below); no parity check needed.
+- [x] Add lineage-aware detection limits and dropout with parity checks.
+- [x] Add WR augmentation levels with seeded parity checks.
 - [x] Add configurable joblib caching around `TrackingSequence.from_ctc`.
 - [x] Split `BalancedDataModule` into sequence and runtime arguments.
-- [ ] Switch training, collation, sampler metadata, and maintained configurations.
-- [ ] Run both fixtures and CPU smoke tests for every supported feature mode.
-- [ ] Verify cache reuse across all runtime-only configuration changes.
+- [x] Switch training, collation, sampler metadata, and maintained configurations.
+- [x] Run both fixtures and CPU smoke tests for every supported feature mode.
+- [x] Verify cache reuse across all runtime-only configuration changes.
 
 Pause after Phase 2. Report tests, cache-hit checks, smoke-test results, and the exact
 diff scope. Do not start Phase 3 until the user has reviewed and committed Phase 2.
@@ -235,8 +238,26 @@ results, blockers, and decisions that revise this plan.
   reuses the cache entry.
 - 2026-06-25: `BalancedDataModule` now caches only `TrackingSequence.from_ctc` and
   constructs split-specific `TrackingData` instances. `scripts/train.py` passes slicing
-  and downsampling as sequence arguments, while windowing, crop, dropout, augmentation,
+  and downsampling as sequence arguments, while windowing, dropout, augmentation,
   and detection limits are runtime arguments.
+- 2026-06-25: Decision - spatial cropping (`WRRandomCrop`, `crop_size`,
+  `crop_ensure_all_centers`) is removed from the new pipeline. `max_detections` already
+  bounds per-window token count via lineage-complete selection, and the geometric
+  coordinate augmentation still provides spatial/translation variety, so the cropper was
+  redundant. Removed the cropper plumbing and the crop-only `loss_mask` censoring path
+  from `TrackingData` (`_association_subset_loss_mask` deleted; in the new dataset the
+  cropper was the only producer of `loss_mask`, since `max_detections` and dropout keep
+  complete lineages and never split a positive association). `train.py`'s common_step
+  still honours an incoming `loss_mask` for the legacy oracle and its unit test. Dropped
+  `--crop_size`/`--crop_ensure_all_centers` train flags, the dead `--compress` and
+  `--from_subfolder` flags, and the corresponding config entries (crop, compress, and the
+  duplicate `features` key in `vanvliet2.yaml`, which now resolves to `wrfeat2`).
+- 2026-06-25: Restored a `--device {auto,cpu,cuda}` override in `scripts/train.py`
+  (accelerator was hardcoded to cuda-when-available) and fixed
+  `association_distances(dataset.windows)` -> `association_distances(dataset)` in
+  `distributed.py`. End-to-end CPU training now runs on local data
+  (`scripts/data/vanvliet2/recA/151031-03`) for both the bare CLI and the `vanvliet2`
+  config; cache reuse verified by changing `--augment` between two cached runs.
 
 ## Current handoff state
 

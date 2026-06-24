@@ -11,7 +11,6 @@ num_decoder_layers: 6
 causal_norm: quiet_softmax
 cache: true
 cachedir: runs/.cache
-compress: true
 d_model: 320
 dropout: 0.05
 pos_embed_per_dim: 32
@@ -25,12 +24,7 @@ max_detections: 2048
 batch_size: 192
 detection_folders:
 - TRA
-crop_size:
-- 512
-- 512
-crop_ensure_all_centers: true
 attn_positional_bias: rope
-features: wrfeat
 input_train:
 - data/vanvliet2/cib/140409-03  
 - data/vanvliet2/cib/140415-08
