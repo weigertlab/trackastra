@@ -8,7 +8,6 @@ from .utils import (
     none_or_path,
     none_or_str,
     normalize,
-    preallocate_memory,
     random_label_cmap,
     render_label,
     seed,

@@ -193,7 +193,7 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     batch = {
         "features": torch.zeros((1, 3, 1)),
         "coords": torch.zeros((1, 3, 2)),
-        "assoc_matrix": torch.zeros((1, 3, 3)),
+        "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
         "timepoints": torch.tensor([[0, 0, 1]]),
         "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
     }
@@ -224,7 +224,7 @@ def test_common_step_excludes_neighborhood_censored_associations():
     batch = {
         "features": torch.zeros((1, 3, 1)),
         "coords": torch.zeros((1, 3, 2)),
-        "assoc_matrix": torch.zeros((1, 3, 3)),
+        "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
         "timepoints": torch.tensor([[0, 1, 1]]),
         "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
         "loss_mask": torch.tensor([[

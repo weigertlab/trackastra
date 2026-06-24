@@ -71,6 +71,22 @@ def test_detection_dropout_drops_whole_lineages():
     assert set(keep.tolist()) in ({0, 1, 2}, {3, 4, 5})
 
 
+def test_detection_dropout_always_keeps_one_lineage():
+    assoc = np.zeros((6, 6), dtype=bool)
+    assoc[0, 1] = assoc[1, 2] = True
+    assoc[3, 4] = assoc[4, 5] = True
+    timepoints = np.array([0, 1, 2, 0, 1, 2])
+
+    state = np.random.get_state()
+    try:
+        np.random.seed(0)
+        keep = _sample_detection_keep_indices(assoc, timepoints, drop_fraction=1.0)
+    finally:
+        np.random.set_state(state)
+
+    assert set(keep.tolist()) in ({0, 1, 2}, {3, 4, 5})
+
+
 def test_detection_dropout_keeps_whole_lineages_in_wrfeat_getitem():
     features = WRFeatures(
         coords=np.arange(12, dtype=np.float32).reshape(6, 2),

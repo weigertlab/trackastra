@@ -88,11 +88,20 @@ class BalancedBatchSampler(BatchSampler):
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
         drop_last: bool = False,
+        balance_batch_objects: bool = False,
+        balance_pct: float = 50.0,
     ):
         """Setting n_pool =1 will result in a regular random batch sampler.
 
         weight_by_ndivs: if True, the probability of sampling an element is proportional to the number of divisions
         weight_by_dataset: if True, the probability of sampling an element is inversely proportional to the length of the dataset
+        balance_batch_objects: if True, use a variable batch size so that the total
+            number of detections per batch is held roughly constant (``batch_size``
+            becomes an upper cap). Dense windows get smaller batches, sparse ones
+            larger -- equalizing GPU memory/compute across differently sized data.
+        balance_pct: percentile of ``n_objects`` used as the reference detection
+            count ``n_ref``; the per-batch budget is ``batch_size * n_ref``. The
+            median (50) anchors a full ``batch_size`` batch at the typical window.
         """
         if isinstance(dataset, CTCData):
             self.n_objects = dataset.n_objects
@@ -116,8 +125,24 @@ class BalancedBatchSampler(BatchSampler):
         self.num_samples = num_samples
         self.weight_by_ndivs = weight_by_ndivs
         self.weight_by_dataset = weight_by_dataset
+        self.balance_batch_objects = balance_batch_objects
+        self.balance_pct = balance_pct
         logger.debug(f"{weight_by_ndivs=}")
         logger.debug(f"{weight_by_dataset=}")
+
+        # Budget on the total number of detections per (padded) batch. Since
+        # n_objects is already capped at max_detections, this reflects the
+        # post-cap GPU-side size. batch_size stays the upper cap on item count.
+        if balance_batch_objects and len(self.n_objects) > 0:
+            n_ref = float(np.percentile(np.asarray(self.n_objects), balance_pct))
+            self.object_budget = max(1.0, batch_size * n_ref)
+            logger.info(
+                f"BalancedBatchSampler: variable batch size, budget"
+                f" {self.object_budget:.0f} detections/batch (n_ref={n_ref:.0f}"
+                f" @ p{balance_pct:g}, cap {batch_size})"
+            )
+        else:
+            self.object_budget = None
 
     def get_probs(self, idx):
         idx = np.array(idx)
@@ -130,6 +155,28 @@ class BalancedBatchSampler(BatchSampler):
 
         probs = probs / (probs.sum() + 1e-10)
         return probs
+
+    def _pack_sorted(self, idx_pool):
+        """Greedily split an N-sorted pool into variable-size batches.
+
+        Keeps adding items while ``len * max_n <= object_budget`` and
+        ``len <= batch_size``. Because idx_pool is sorted ascending by
+        n_objects, the last added item is always the batch max. Always
+        emits at least one item so a single oversized window still progresses.
+        """
+        batches = []
+        start, n = 0, len(idx_pool)
+        while start < n:
+            end = start + 1
+            while end < n:
+                new_count = end - start + 1
+                n_max = self.n_objects[idx_pool[end]]
+                if new_count > self.batch_size or new_count * n_max > self.object_budget:
+                    break
+                end += 1
+            batches.append(idx_pool[start:end])
+            start = end
+        return batches
 
     def sample_batches(self, idx: Iterable[int]):
         # we will split the indices into pools of size n_pool
@@ -148,6 +195,14 @@ class BalancedBatchSampler(BatchSampler):
             idx_pool = idx[i : i + n_pool]
             idx_pool = sorted(idx_pool, key=lambda i: self.n_objects[i])
 
+            if self.object_budget is not None:
+                # variable batch size at constant detection budget; dense batches
+                # are intentionally < batch_size so drop_last does not apply here
+                pool_batches = self._pack_sorted(idx_pool)
+                np.random.shuffle(pool_batches)
+                batches.extend(pool_batches)
+                continue
+
             # such that we can create batches where each element has a similar number of objects
             jj = np.arange(0, len(idx_pool), self.batch_size)
             np.random.shuffle(jj)
@@ -164,8 +219,37 @@ class BalancedBatchSampler(BatchSampler):
         batches = self.sample_batches(idx)
         return iter(batches)
 
+    def _estimate_num_batches(self) -> int:
+        """Estimate epoch length under variable batch sizes.
+
+        Simulates the greedy packing on the sorted population, scales to
+        num_samples, and adds one partial batch per pool. Biased to slightly
+        over-count so the Lightning epoch loop is bounded by the dataloader's
+        StopIteration rather than truncated by an undercounted length.
+        """
+        n_sorted = np.sort(np.asarray(self.n_objects))
+        N = len(n_sorted)
+        cnt, start = 0, 0
+        while start < N:
+            end = start + 1
+            while end < N:
+                new_count = end - start + 1
+                if (
+                    new_count > self.batch_size
+                    or new_count * n_sorted[end] > self.object_budget
+                ):
+                    break
+                end += 1
+            cnt += 1
+            start = end
+        num = self.num_samples if self.num_samples is not None else N
+        n_pool = max(self.batch_size, self.n_pool * self.batch_size)
+        return math.ceil(cnt * num / max(N, 1)) + math.ceil(num / n_pool)
+
     def __len__(self):
         n = self.num_samples if self.num_samples is not None else len(self.n_objects)
+        if self.object_budget is not None:
+            return self._estimate_num_batches()
         if self.drop_last:
             return n // self.batch_size
         return math.ceil(n / self.batch_size)
@@ -180,10 +264,20 @@ class BalancedDistributedSampler(DistributedSampler):
         num_samples: int | None,
         weight_by_ndivs: bool = False,
         weight_by_dataset: bool = False,
+        balance_batch_objects: bool = False,
+        balance_pct: float = 50.0,
         *args,
         **kwargs,
     ) -> None:
         requested_num_samples = num_samples
+        # __iter__ flattens batches into a per-index stream that the DataLoader
+        # re-batches at fixed batch_size, so variable batch sizes cannot survive
+        # DDP. Ignore the request here to keep ranks' step counts matched.
+        if balance_batch_objects:
+            logger.warning(
+                "balance_batch_objects is ignored under distributed (DDP) training;"
+                " batch sizes stay fixed at batch_size."
+            )
         super().__init__(dataset=dataset, *args, drop_last=True, **kwargs)
         per_rank_samples = (
             self.num_samples

@@ -629,8 +629,8 @@ class TrackingTransformer(torch.nn.Module):
         # Back-compat: configs published before a param existed must reconstruct
         # the original architecture, not inherit a newer __init__ default that
         # would add/remove parameters and break strict state_dict loading.
-        # logit_norm defaults to True for new trainings but adds a `logit_scale`
-        # parameter absent from legacy checkpoints (e.g. general_2d v0.3.0).
+        # The training CLI defaults logit_norm to False. Legacy checkpoints also
+        # lack its `logit_scale` parameter (e.g. general_2d v0.3.0).
         if "logit_norm" not in config:
             config["logit_norm"] = False
         if args:

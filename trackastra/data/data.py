@@ -16,7 +16,6 @@ from numba import njit
 from scipy import ndimage as ndi
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
-from scipy.spatial.distance import cdist
 from skimage.measure import regionprops
 from skimage.segmentation import relabel_sequential
 from torch.utils.data import Dataset
@@ -52,7 +51,8 @@ def _sample_detection_keep_indices(
     whole components never severs a retained association, so the kept subset needs no
     loss mask. Only first-frame detections are eligible drop seeds; ``drop_fraction``
     is the fraction of *first-frame* detections to seed. Components without a
-    first-frame member (detections entering mid-window) are left intact.
+    first-frame member (detections entering mid-window) are left intact. At least one
+    lineage component is always retained.
     """
     n = len(assoc_matrix)
     if n == 0:
@@ -63,13 +63,16 @@ def _sample_detection_keep_indices(
     if n_drop == 0:
         return np.arange(n)
 
-    _, component = connected_components(
+    n_components, component = connected_components(
         csr_matrix(np.logical_or(assoc_matrix, assoc_matrix.T)),
         directed=False,
         return_labels=True,
     )
     drop_seeds = np.random.choice(first, size=n_drop, replace=False)
     drop_components = np.unique(component[drop_seeds])
+    if len(drop_components) == n_components:
+        retained_component = np.random.choice(drop_components)
+        drop_components = drop_components[drop_components != retained_component]
     return np.flatnonzero(~np.isin(component, drop_components))
 
 
@@ -387,7 +390,6 @@ class CTCData(Dataset):
             "wrfeat2",
             "wrfeat2_no_intensity",
         ] = "wrfeat",
-        sanity_dist: bool = False,
         crop_size: tuple | None = None,
         crop_ensure_all_centers: bool = True,
         return_dense: bool = False,
@@ -419,8 +421,6 @@ class CTCData(Dataset):
                 Fraction of detections to drop when detection dropout is applied.
             features (str):
                 Types of features to use.
-            sanity_dist (bool):
-                Use euclidian distance instead of the association matrix as a target.
             crop_size (tuple):
                 Size of the crops to use for augmentation. If None, no cropping is used.
             crop_ensure_all_centers (bool):
@@ -498,7 +498,6 @@ class CTCData(Dataset):
         self.window_size = window_size
 
         self.slice_pct = slice_pct
-        self.sanity_dist = sanity_dist
         self.return_dense = return_dense
         self.compress = compress
         self.start_frame = 0
@@ -1094,14 +1093,6 @@ class CTCData(Dataset):
                     self.gt_graph,
                     matching,
                 )
-
-            if self.sanity_dist:
-                # # Sanity check: Can the model learn the euclidian distances?
-                # c = coords - coords.mean(axis=0, keepdims=True)
-                # c /= c.std(axis=0, keepdims=True)
-                # A = np.einsum('id,jd',c,c)
-                # A = 1 / (1 + np.exp(-A))
-                A = np.exp(-0.01 * cdist(_coords, _coords))
 
             w = dict(
                 coords=_coords,
@@ -1968,7 +1959,6 @@ if __name__ == "__main__":
         features="none",
         downscale_temporal=1,
         downscale_spatial=1,
-        sanity_dist=False,
         crop_size=(256, 256),
     )
 

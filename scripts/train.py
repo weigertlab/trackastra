@@ -34,7 +34,6 @@ from torch.optim.lr_scheduler import LRScheduler
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
-    CTCData,
     collate_sequence_padding,
     densify_assoc,
 )
@@ -46,7 +45,6 @@ from trackastra.utils import (
     blockwise_sum,
     blockwise_sum_batched,
     normalize,
-    preallocate_memory,
     random_label_cmap,
     render_label,
     seed,
@@ -247,7 +245,7 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_max_distance: int = 128,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
-        debug_dir:str=None,
+        debug_dir: str | None = None,
         grad_log_every_n_epochs: int = 10,
     ):
         super().__init__()
@@ -268,6 +266,8 @@ class WrappedLightningModule(pl.LightningModule):
         # self.val_loss = []
         self.batch_val_tb_idx = batch_val_tb_idx
         self.batch_val_tb = None
+        # per-step (batch_size, seq_len) pairs, flushed to a 2d histogram each epoch
+        self._bn_log: list[tuple[int, int]] = []
 
         self.lr = learning_rate
         self.tracking_frequency = tracking_frequency
@@ -430,7 +430,8 @@ class WrappedLightningModule(pl.LightningModule):
         if self.debug is not None and loss.item()>.1 and self.current_epoch > 10: 
             ep = self.current_epoch
             
-            if  cur:=self.debug.values_per_epoch.get(ep, -1) < loss.item():
+            cur = self.debug.values_per_epoch.get(ep, -1)
+            if cur < loss.item():
                 self.debug.values_per_epoch[ep] = loss.item()
                 _out = self.debug.dir / f"bad_batch_{ep:04d}.pt"
                 logger.info(f"Debug saving bad batch to {_out}")
@@ -449,9 +450,15 @@ class WrappedLightningModule(pl.LightningModule):
 
         # self.train_loss.append(loss)
 
+        # accumulate (B, N) for the per-epoch 2d histogram (replaces the separate
+        # batch_size / detections_per_sequence scalar logs -- same info, joint view)
+        self._bn_log.append(
+            (int(batch["coords"].shape[0]), int(batch["coords"].shape[1]))
+        )
         self.log_dict(
             {
-                "detections_per_sequence": batch["coords"].shape[1],
+                # real (non-pad) detections summed over the batch
+                "detections_per_batch": float((~batch["padding_mask"].bool()).sum()),
                 "padding_fraction": out["padding_fraction"],
             },
             on_step=True,
@@ -460,13 +467,32 @@ class WrappedLightningModule(pl.LightningModule):
 
         return loss
 
-    # def on_train_epoch_end(self):
-    #     loss = torch.stack(self.train_loss).mean()
-    #     if isinstance(self.logger, TensorBoardLogger):
-    #         self.logger.experiment.add_scalars(
-    #             "loss", {"train": loss}, self.current_epoch
-    #         )
-    #     self.train_loss.clear()
+    def on_train_epoch_end(self):
+        # flush the accumulated (B, N) pairs as a single wandb scatter plot
+        bn = self._bn_log
+        self._bn_log = []
+        if (
+            not bn
+            or not isinstance(self.logger, WandbLogger)
+            or not self.trainer.is_global_zero
+            or self.trainer.sanity_checking
+        ):
+            return
+        import wandb as _wandb
+
+        table = _wandb.Table(
+            data=[[n, b] for b, n in bn], columns=["seq_len_N", "batch_size_B"]
+        )
+        self.logger.experiment.log(
+            {
+                "train/batch_BN": _wandb.plot.scatter(
+                    table,
+                    "seq_len_N",
+                    "batch_size_B",
+                    title=f"B vs N (epoch {self.current_epoch})",
+                )
+            }
+        )
 
     def validation_step(self, batch, batch_idx):
         out = self._common_step(batch)
@@ -734,7 +760,7 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
         if trainer.is_global_zero:
             logging.info(f"using logdir {self._logdir}")
             self._logdir.mkdir(parents=True, exist_ok=True)
-            with open(self._logdir / "train_config.yaml", "tw") as f:
+            with open(self._logdir / "train_config.yaml", "w") as f:
                 yaml.safe_dump(self._training_args, f)
 
     def on_validation_end(self, trainer, pl_module):
@@ -898,76 +924,6 @@ def train(args):
 
     n_gpus = torch.cuda.device_count() if args.distributed else 1
 
-    if args.preallocate:
-        logger.info("Load one dataset to preallocate memory for training")
-        dummy_data = CTCData(
-            root=Path(args.input_train[0]),
-            ndim=args.ndim,
-            detection_folders=args.detection_folders,
-            window_size=args.window,
-            max_detections=args.max_detections,
-            augment=args.augment,
-            detect_drop=args.detect_drop,
-            detect_drop_fraction=args.detect_drop_fraction,
-            features=args.features,
-            slice_pct=args.slice_pct_train,
-            downscale_temporal=args.downscale_temporal,
-            downscale_spatial=args.downscale_spatial,
-            sanity_dist=args.sanity_dist,
-            crop_size=args.crop_size,
-            crop_ensure_all_centers=args.crop_ensure_all_centers,
-            compress=args.compress,
-        )
-
-        dummy_model = TrackingTransformer(
-            coord_dim=dummy_data.ndim,
-            feat_dim=dummy_data.feat_dim,
-            d_model=args.d_model,
-            pos_embed_per_dim=args.pos_embed_per_dim,
-            feat_embed_per_dim=args.feat_embed_per_dim,
-            feature_embed_mode=args.feature_embed_mode,
-            num_encoder_layers=args.num_encoder_layers,
-            num_decoder_layers=args.num_decoder_layers,
-            dropout=args.dropout,
-            window=args.window,
-            spatial_pos_cutoff=args.spatial_pos_cutoff,
-            attn_positional_bias=args.attn_positional_bias,
-            attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
-            attn_dist_mode=args.attn_dist_mode,
-            attn_mode=args.attn_mode,
-            max_neighbors=args.max_neighbors,
-            logit_norm=args.logit_norm,
-            assoc_head=args.assoc_head,
-            assoc_channels=args.assoc_channels,
-            causal_norm=args.causal_norm,
-            architecture_version=args.architecture_version,
-        )
-
-        dummy_model_lightning = WrappedLightningModule(
-            model=dummy_model,
-            warmup_epochs=args.warmup_epochs,
-            max_epochs=args.epochs,
-            learning_rate=args.lr,
-            delta_cutoff=args.delta_cutoff,
-            causal_norm=args.causal_norm,
-            loss_norm=args.loss_norm,
-            focal_loss_gamma=args.focal_loss_gamma,
-            tracking_frequency=args.tracking_frequency,
-            batch_val_tb_idx=0,
-            div_upweight=args.div_upweight,
-                grad_log_every_n_epochs=args.grad_log_every_n_epochs,
-        )
-        dummy_model_lightning.to(device)
-        preallocate_memory(
-            dummy_data,
-            dummy_model_lightning,
-            args.batch_size // n_gpus,
-            args.max_detections,
-            device,
-        )
-        del dummy_model_lightning
-        del dummy_data
-
     for p in args.input_train + args.input_val:
         if not Path(p).exists():
             raise FileNotFoundError(f"Input folder {p} does not exist")
@@ -980,7 +936,6 @@ def train(args):
         features=args.features,
         downscale_temporal=args.downscale_temporal,
         downscale_spatial=args.downscale_spatial,
-        sanity_dist=args.sanity_dist,
         compress=args.compress,
         crop_ensure_all_centers=args.crop_ensure_all_centers,
         detect_drop_fraction=args.detect_drop_fraction,
@@ -991,6 +946,8 @@ def train(args):
         num_samples=args.train_samples if args.train_samples > 0 else None,
         weight_by_ndivs=args.weight_by_ndivs,
         weight_by_dataset=args.weight_by_dataset,
+        balance_batch_objects=args.balance_batch_objects,
+        balance_pct=args.balance_pct,
     )
     loader_kwargs = dict(
         batch_size=args.batch_size,
@@ -1347,8 +1304,6 @@ def parse_train_args():
         help="maximum candidate-link distance during full-movie validation",
     )
 
-    parser.add_argument("--sanity_dist", action="store_true")
-    parser.add_argument("--preallocate", type=str2bool, default=False)
     parser.add_argument(
         "--compress", type=str2bool, default=False, help="compress dataset"
     )
@@ -1421,6 +1376,25 @@ def parse_train_args():
         help=(
             "Inversely weight datasets by number of samples (to counter dataset size"
             " imbalance)"
+        ),
+    )
+    parser.add_argument(
+        "--balance_batch_objects",
+        type=str2bool,
+        default=False,
+        help=(
+            "Use a variable batch size so the total detections per batch stay"
+            " roughly constant (batch_size becomes an upper cap). Equalizes GPU"
+            " memory across differently sized data. Ignored under DDP."
+        ),
+    )
+    parser.add_argument(
+        "--balance_pct",
+        type=float,
+        default=50.0,
+        help=(
+            "Percentile of per-window detection counts used as the reference for"
+            " --balance_batch_objects (budget = batch_size * n_ref)"
         ),
     )
 
