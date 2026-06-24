@@ -198,16 +198,76 @@ scope. Do not start Phase 2 until the user has reviewed and committed Phase 1.
 Pause after Phase 2. Report tests, cache-hit checks, smoke-test results, and the exact
 diff scope. Do not start Phase 3 until the user has reviewed and committed Phase 2.
 
-### Phase 3: legacy removal and final hardening
+### Phase 3: canonical CTC-folder I/O interface
 
-- [ ] Remove legacy feature modes, compression, dense-item plumbing, and obsolete arguments.
-- [ ] Remove unused helpers and replace obsolete skipped tests.
+Goal: a single canonical way to load images, masks, and tracking info from CTC-like
+folders, exposed from the new data module, so inference no longer needs the legacy
+`CTCData.load_for_inference`. This phase is a prerequisite for the Phase 4 migration
+because `predict.py`/`check_errors.py` must move off legacy before `CTCData` is deleted.
+
+Agreed design (decided 2026-06-25):
+
+- Carry optional raw arrays on the immutable data model, defaulting to `None`, so they
+  are absent for training and never forced into every cached frame: raw normalized
+  `images` on `TrackingSequence` (the shared movie) and label `masks` on
+  `DetectionSeries` (per detection folder).
+- Add a `load_images: bool = False` flag to `TrackingSequence.from_ctc`. When set, the
+  loader also retains `images`/`masks` using the existing loading helpers
+  (`_resolve_paths`, `_resolve_detection_folder`, `_load_tiffs`, `_correct_with_st`,
+  `_ensure_ndim`, `normalize`). Update the frozen-dataclass validation and `__reduce__`
+  for the new optional fields.
+- The flag is part of the joblib cache key, so cached inference sequences (with images)
+  stay separate from lean training sequences (without). This makes repeated wandb
+  predict-logging on the same validation data cache-fast.
+- Provide a thin canonical accessor for scripts that only want arrays
+  (e.g. `images, masks, image_path, gt_path`) on top of the same path-discovery logic;
+  do not drag any legacy `CTCData` helper methods along.
+- Tradeoff recorded: `from_ctc` still does the expensive matching/feature extraction
+  even when only images/masks are needed; acceptable because the cache amortizes it for
+  the repeated-logging case, and a future `model.track` that accepts pre-extracted
+  features would remove the waste.
+
+- [x] Add optional `images`/`masks` fields and `load_images` flag with validation and
+      pickle support.
+- [x] Provide the canonical array accessor and repoint `scripts/predict.py` and
+      `scripts/check_errors.py` onto it.
+- [x] Convert `test_load_for_inference_refines_tra_with_st` into a synthetic test of the
+      new interface.
+
+### Phase 4: legacy removal and final hardening
+
+Migration discoveries (2026-06-25) that refine the original plan:
+
+- `data.py` is not purely legacy: `collate_sequence_padding`, `densify_assoc`, and
+  `warn_association_distances` are standalone functions still needed by production
+  (`model/predict.py` uses `collate_sequence_padding` on the installed inference path;
+  `train.py` uses `densify_assoc`; `distributed.py` uses `warn_association_distances`).
+  These must move into the new module before the rename so no production code imports
+  `_legacy_data.py`.
+- `extract_features_regionprops` is defined in `features.py` and only re-exported by
+  `data.py`; the package `__init__` should import it from `features` after the rename.
+- `_FileCache` in `distributed.py` and its `isinstance(dataset, CTCData | TrackingData)`
+  branch are legacy CTCData plumbing to remove (only `TrackingData` remains).
+- `tests/test_data.py` targets legacy `CTCData` (most tests already skipped); its still
+  relevant cases (`load_for_inference`, dropout/neighborhood helpers now living in the
+  new module) move to `test_datanew.py`, the rest are deleted.
+
+Steps:
+
+- [ ] Move the three shared functions (+`pad_tensor`) into the new module.
+- [ ] Rename `data.py` -> `_legacy_data.py` and `datanew.py` -> `data.py`; rewrite the
+      package `__init__` exports (drop `CTCData`/`_ctc_lineages`, add `TrackingSequence`,
+      `TrackingData`, the canonical loader, and the shared functions).
+- [ ] Repoint `distributed.py` imports and remove `_FileCache` and the CTCData isinstance.
+- [ ] Repoint test imports (`trackastra.data.datanew` -> `trackastra.data`).
+- [ ] Remove obsolete skipped tests; migrate the essential ones (Phase 3 already moves
+      the inference test).
 - [ ] Convert essential real-data parity checks into synthetic tests.
 - [ ] Run the full relevant test suite and final real-data smoke tests.
 - [ ] Delete `_legacy_data.py` and the temporary comparison script.
 - [ ] Confirm no production import or configuration references legacy behavior.
 
-Pause after Phase 3 with the final verification report; never create commits automatically.
+Pause after Phase 4 with the final verification report; never create commits automatically.
 
 ## Implementation observations
 
@@ -258,10 +318,34 @@ results, blockers, and decisions that revise this plan.
   `distributed.py`. End-to-end CPU training now runs on local data
   (`scripts/data/vanvliet2/recA/151031-03`) for both the bare CLI and the `vanvliet2`
   config; cache reuse verified by changing `--augment` between two cached runs.
+- 2026-06-25: Phase 2 completed and committed. All Phase 2 checklist items pass (parity
+  script, per-feature-mode CPU smoke test, cache reuse, training/collation/sampler
+  switch). Cropping was removed rather than parity-checked.
+- 2026-06-25: Inference-loading design decided and deferred to its own phase (now
+  Phase 3) rather than improvised during the migration. The original Phase 3 (legacy
+  removal) became Phase 4. Reason: `CTCData.load_for_inference` is the only inference
+  entry point and must be replaced by a canonical CTC-folder loader before `CTCData`
+  can be deleted, and the chosen approach (optional `images`/`masks` on the data model
+  via a `from_ctc(load_images=...)` flag) touches the immutable model enough to warrant
+  a planned phase. No code for this was landed yet.
+
+- 2026-06-25: Phase 3 implemented in `datanew.py`. `DetectionSeries` gained an optional
+  `masks` field and `TrackingSequence` an optional `images` field (both default `None`,
+  read-only, pickled via `__reduce__`); `from_ctc(load_images=True)` attaches the already
+  loaded per-folder masks and normalized images. `load_ctc_for_inference` is the canonical
+  array accessor (exported from `trackastra.data`), reusing the loading helpers; it accepts
+  an optional `loader` so callers can pass a joblib-cached `from_ctc`. `scripts/predict.py`
+  and `scripts/check_errors.py` now use it instead of `CTCData.load_for_inference`.
+  Synthetic test added (`test_load_ctc_for_inference_refines_tra_with_st`,
+  `test_load_images_flag_attaches_arrays_and_survives_pickle`). Parity unchanged (21 + 14),
+  32 focused tests pass, real-data smoke confirmed on Van Vliet.
 
 ## Current handoff state
 
-Work stopped during Phase 2 on 2026-06-25. Do not start Phase 3.
+Phase 2 committed (`7cdcae3`). Phase 3 (canonical CTC-folder I/O) implemented and tested,
+not yet committed. Phase 4 (legacy removal: move shared utils, rename `datanew.py` ->
+`data.py`, delete `CTCData`/`_legacy_data.py`) is planned and not started. Earlier handoff
+notes below predate Phase 2 completion and are kept only for historical context.
 
 Verified before the final test edit:
 

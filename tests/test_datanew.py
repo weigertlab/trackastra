@@ -11,7 +11,9 @@ from trackastra.data.datanew import (
     DetectionSeries,
     TrackingData,
     TrackingSequence,
+    load_ctc_for_inference,
 )
+from trackastra.utils import normalize
 
 
 def _frame(timepoint=0, track_indices=(0, 1)):
@@ -140,6 +142,51 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     assert sample["assoc_matrix"][0, 1]
     assert sample["assoc_matrix"][0, 2]
     assert not sample["assoc_matrix"][1, 2]
+
+
+def test_load_ctc_for_inference_refines_tra_with_st(tmp_path):
+    sequence = tmp_path / "dataset" / "01"
+    gt = tmp_path / "dataset" / "01_GT" / "TRA"
+    st = tmp_path / "dataset" / "01_ST" / "SEG"
+    sequence.mkdir(parents=True)
+    gt.mkdir(parents=True)
+    st.mkdir(parents=True)
+
+    image = np.arange(100, dtype=np.uint8).reshape(10, 10)
+    tra = np.zeros((10, 10), dtype=np.uint16)
+    tra[4, 4] = 1
+    silver = np.zeros_like(tra)
+    silver[3:6, 3:6] = 1
+    imwrite(sequence / "t000.tif", image)
+    imwrite(gt / "man_track000.tif", tra)
+    imwrite(st / "man_seg000.tif", silver)
+
+    imgs, masks, image_path, gt_path = load_ctc_for_inference(sequence, "TRA")
+
+    np.testing.assert_allclose(imgs[0], normalize(image))
+    np.testing.assert_array_equal(masks[0], np.maximum(tra, silver))
+    assert image_path == sequence
+    assert gt_path == gt
+
+
+def test_load_images_flag_attaches_arrays_and_survives_pickle(tmp_path):
+    root = _write_ctc_fixture(tmp_path, "simple")
+
+    bare = TrackingSequence.from_ctc(root, n_workers=1)
+    assert bare.images is None
+    assert bare.detection_series[0].masks is None
+
+    seq = TrackingSequence.from_ctc(root, n_workers=1, load_images=True)
+    assert seq.images is not None and len(seq.images) == 3
+    assert seq.detection_series[0].masks is not None
+    assert len(seq.detection_series[0].masks) == 3
+    assert not seq.images.flags.writeable
+
+    restored = pickle.loads(pickle.dumps(seq))
+    np.testing.assert_array_equal(restored.images, seq.images)
+    np.testing.assert_array_equal(
+        restored.detection_series[0].masks, seq.detection_series[0].masks
+    )
 
 
 def test_tracking_sequence_without_gt_uses_isolated_detections(tmp_path):

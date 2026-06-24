@@ -92,6 +92,7 @@ class DetectionFrame:
 class DetectionSeries:
     name: str
     frames: tuple[DetectionFrame, ...]
+    masks: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         frames = tuple(self.frames)
@@ -100,12 +101,17 @@ class DetectionSeries:
         if frames and len({frame.coords.shape[1] for frame in frames}) != 1:
             raise ValueError("All frames in a series must have the same dimensionality")
         object.__setattr__(self, "frames", frames)
+        if self.masks is not None:
+            masks = _immutable_array(self.masks)
+            if len(masks) != len(frames):
+                raise ValueError("masks must have one frame per detection frame")
+            object.__setattr__(self, "masks", masks)
 
     def __len__(self) -> int:
         return len(self.frames)
 
     def __reduce__(self):
-        return (type(self), (self.name, self.frames))
+        return (type(self), (self.name, self.frames, self.masks))
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,7 @@ class TrackingSequence:
     detection_series: tuple[DetectionSeries, ...]
     lineage_relation: np.ndarray
     lineage_parents: np.ndarray
+    images: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.ndim not in (2, 3):
@@ -140,6 +147,8 @@ class TrackingSequence:
         object.__setattr__(self, "detection_series", series)
         object.__setattr__(self, "lineage_relation", relation)
         object.__setattr__(self, "lineage_parents", parents)
+        if self.images is not None:
+            object.__setattr__(self, "images", _immutable_array(self.images))
 
     def __reduce__(self):
         return (
@@ -150,6 +159,7 @@ class TrackingSequence:
                 self.detection_series,
                 self.lineage_relation,
                 self.lineage_parents,
+                self.images,
             ),
         )
 
@@ -169,6 +179,7 @@ class TrackingSequence:
         track_file: str | Path | None = None,
         match_threshold: float = 0.3,
         match_max_distance: float = 16,
+        load_images: bool = False,
     ) -> TrackingSequence:
         return _load_ctc_sequence(
             cls,
@@ -185,6 +196,7 @@ class TrackingSequence:
             track_file,
             match_threshold,
             match_max_distance,
+            load_images,
         )
 
 
@@ -357,6 +369,7 @@ def _load_ctc_sequence(
     track_file: str | Path | None,
     match_threshold: float,
     match_max_distance: float,
+    load_images: bool = False,
 ) -> TrackingSequence:
     if not 0 <= slice_pct[0] < slice_pct[1] <= 1:
         raise ValueError(f"Invalid slice_pct {slice_pct}")
@@ -510,13 +523,20 @@ def _load_ctc_sequence(
                     track_indices=indices,
                 )
             )
-        series.append(DetectionSeries(str(folder), tuple(frames)))
+        series.append(
+            DetectionSeries(
+                str(folder),
+                tuple(frames),
+                masks=detection_masks if load_images else None,
+            )
+        )
     return sequence_type(
         root=root,
         ndim=ndim,
         detection_series=tuple(series),
         lineage_relation=lineage_relation,
         lineage_parents=lineage_parents,
+        images=images if load_images else None,
     )
 
 
@@ -795,3 +815,44 @@ def association_distances(dataset: TrackingData, delta_cutoff: int) -> np.ndarra
             )
             distances.setdefault(key, float(distance))
     return np.fromiter(distances.values(), dtype=np.float64)
+
+
+def _resolve_inference_paths(root: Path) -> tuple[Path, Path]:
+    """Resolve the image folder and GT TRA folder for a CTC-like sequence root."""
+    if root.name == "TRA":
+        gt_tra = root
+        root = root.parent.parent / root.parent.name.split("_")[0]
+    else:
+        ctc_tra = Path(f"{root}_GT") / "TRA"
+        gt_tra = ctc_tra if ctc_tra.exists() else root / "TRA"
+    image_path = root / "img" if (root / "img").exists() else root
+    return image_path, gt_tra
+
+
+def load_ctc_for_inference(
+    root: str | Path,
+    detection_folder: str = "TRA",
+    ndim: int = 2,
+    loader=None,
+) -> tuple[np.ndarray, np.ndarray, Path, Path]:
+    """Load images, detection masks, and GT path from a CTC-like folder.
+
+    Canonical inference entry point: builds a detection-only ``TrackingSequence``
+    with raw arrays retained (``load_images=True``) and returns the dense arrays the
+    image-based inference API consumes. Pass ``loader`` (e.g. a joblib-cached
+    ``TrackingSequence.from_ctc``) to reuse cached sequences across repeated calls,
+    such as wandb predict-logging on the same validation movie.
+
+    Returns:
+        Normalized images, refined detection masks, image path, GT TRA path.
+    """
+    build = loader if loader is not None else TrackingSequence.from_ctc
+    sequence = build(
+        root=root,
+        ndim=ndim,
+        use_gt=False,
+        detection_folders=(detection_folder,),
+        load_images=True,
+    )
+    image_path, gt_tra = _resolve_inference_paths(Path(root).expanduser())
+    return sequence.images, sequence.detection_series[0].masks, image_path, gt_tra
