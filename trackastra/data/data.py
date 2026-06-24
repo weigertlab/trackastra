@@ -44,30 +44,33 @@ _WRFEAT_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
 
 
 def _sample_detection_keep_indices(
-    assoc_matrix: np.ndarray, drop_fraction: float
+    assoc_matrix: np.ndarray, timepoints: np.ndarray, drop_fraction: float
 ) -> np.ndarray:
-    """Sample detections to keep without removing an entire lineage component."""
+    """Drop whole lineages seeded by a fraction of the first-frame detections.
+
+    A lineage is a connected component of the (undirected) association graph. Dropping
+    whole components never severs a retained association, so the kept subset needs no
+    loss mask. Only first-frame detections are eligible drop seeds; ``drop_fraction``
+    is the fraction of *first-frame* detections to seed. Components without a
+    first-frame member (detections entering mid-window) are left intact.
+    """
     n = len(assoc_matrix)
-    target = min(int(np.floor(drop_fraction * n)), n)
-    if target == 0:
+    if n == 0:
         return np.arange(n)
 
-    adjacency = np.logical_or(assoc_matrix, assoc_matrix.T)
+    first = np.flatnonzero(timepoints == timepoints.min())
+    n_drop = int(np.floor(drop_fraction * len(first)))
+    if n_drop == 0:
+        return np.arange(n)
+
     _, component = connected_components(
-        csr_matrix(adjacency), directed=False, return_labels=True
+        csr_matrix(np.logical_or(assoc_matrix, assoc_matrix.T)),
+        directed=False,
+        return_labels=True,
     )
-    remaining = np.bincount(component)
-    keep = np.ones(n, dtype=bool)
-    dropped = 0
-    for i in np.random.permutation(n):
-        c = component[i]
-        if remaining[c] > 1:
-            keep[i] = False
-            remaining[c] -= 1
-            dropped += 1
-            if dropped == target:
-                break
-    return np.flatnonzero(keep)
+    drop_seeds = np.random.choice(first, size=n_drop, replace=False)
+    drop_components = np.unique(component[drop_seeds])
+    return np.flatnonzero(~np.isin(component, drop_components))
 
 
 def _remove_detections_from_masks(
@@ -123,68 +126,40 @@ def _association_subset_loss_mask(
     return loss_mask
 
 
-def _direct_lineage_neighbors(
-    index: int, assoc_matrix: np.ndarray, timepoints: np.ndarray
-) -> np.ndarray:
-    associated = np.flatnonzero(assoc_matrix[index])
-    t = timepoints[index]
-    neighbors = []
-    before = associated[timepoints[associated] < t]
-    after = associated[timepoints[associated] > t]
-    if len(before):
-        neighbors.extend(before[timepoints[before] == timepoints[before].max()])
-    if len(after):
-        neighbors.extend(after[timepoints[after] == timepoints[after].min()])
-    return np.asarray(neighbors, dtype=int)
-
-
 def _sample_neighborhood_indices(
     coords: np.ndarray,
     timepoints: np.ndarray,
     assoc_matrix: np.ndarray,
     max_detections: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Select a spatially coherent, lineage-aware detection neighborhood."""
+) -> np.ndarray:
+    """Select whole lineages seeded by a spatial neighborhood of the first frame.
+
+    When the first frame holds more than ``max_detections`` detections, pick a random
+    anchor and the ``max_detections`` spatially-closest first-frame detections, then
+    keep the full lineage (connected component) of each. Lineages are kept whole, so no
+    association is ever severed and the subset needs no loss mask. Components without a
+    first-frame member (detections entering mid-window) are dropped.
+
+    The budget applies to the first frame only: the total kept count may exceed
+    ``max_detections`` when lineages branch (divisions). Returns the kept indices
+    (sorted ascending).
+    """
     n = len(coords)
-    if n <= max_detections:
-        keep = np.arange(n)
-        return keep, np.ones((n, n), dtype=bool)
+    first = np.flatnonzero(timepoints == timepoints.min())
+    if len(first) <= max_detections:
+        return np.arange(n)
 
-    unique_times = np.unique(timepoints)
-    if len(unique_times) > max_detections:
-        raise ValueError(
-            f"max_detections={max_detections} cannot retain all "
-            f"{len(unique_times)} represented frames"
-        )
+    anchor = first[np.random.randint(len(first))]
+    distances = np.linalg.norm(coords[first] - coords[anchor], axis=1)
+    seeds = first[np.argsort(distances, kind="stable")[:max_detections]]
 
-    anchor = np.random.randint(n)
-    distances = np.linalg.norm(coords - coords[anchor], axis=1)
-    order = np.argsort(distances, kind="stable")
-    selected = {
-        int(indices[np.argmin(distances[indices])])
-        for t in unique_times
-        if len(indices := np.flatnonzero(timepoints == t))
-    }
-    selected.add(anchor)
-
-    for i in order:
-        closure = {int(i), *map(int, _direct_lineage_neighbors(i, assoc_matrix, timepoints))}
-        if len(selected | closure) <= max_detections:
-            selected.update(closure)
-        if len(selected) == max_detections:
-            break
-    if len(selected) < max_detections:
-        selected.update(map(int, order[: max_detections - len(selected)]))
-    if len(selected) < max_detections:
-        for i in order:
-            selected.add(int(i))
-            if len(selected) == max_detections:
-                break
-
-    keep = np.asarray(sorted(selected), dtype=int)
-    if len(keep) > max_detections:
-        raise RuntimeError("Neighborhood selection exceeded max_detections")
-    return keep, _association_subset_loss_mask(assoc_matrix, timepoints, keep)
+    _, component = connected_components(
+        csr_matrix(np.logical_or(assoc_matrix, assoc_matrix.T)),
+        directed=False,
+        return_labels=True,
+    )
+    keep_components = np.unique(component[seeds])
+    return np.flatnonzero(np.isin(component, keep_components))
 
 
 def _filter_track_df(df, start_frame, end_frame, downscale):
@@ -778,12 +753,15 @@ class CTCData(Dataset):
     def __len__(self):
         return len(self.windows)
 
-    def _detection_keep_indices(self, assoc_matrix: np.ndarray) -> np.ndarray:
+    def _detection_keep_indices(
+        self, assoc_matrix: np.ndarray, timepoints: np.ndarray
+    ) -> np.ndarray:
         detect_drop = getattr(self, "detect_drop", 0.0)
         if detect_drop == 0 or np.random.rand() >= detect_drop:
             return np.arange(len(assoc_matrix))
         return _sample_detection_keep_indices(
             assoc_matrix,
+            timepoints,
             drop_fraction=getattr(self, "detect_drop_fraction", 0.1),
         )
 
@@ -1185,14 +1163,14 @@ class CTCData(Dataset):
 
         max_detections = self._get_max_detections()
         if max_detections is not None:
-            keep, neighborhood_loss_mask = _sample_neighborhood_indices(
+            keep = _sample_neighborhood_indices(
                 coords, timepoints, assoc_matrix, max_detections
             )
             if len(keep) < len(timepoints):
+                # whole lineages are kept, so an existing cropper loss mask only needs
+                # subsetting (no new censoring is introduced by the cap)
                 if loss_mask is not None:
-                    loss_mask = loss_mask[keep][:, keep] & neighborhood_loss_mask
-                else:
-                    loss_mask = neighborhood_loss_mask
+                    loss_mask = loss_mask[keep][:, keep]
                 dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
                 mask = _remove_detections_from_masks(
                     mask, labels, timepoints, dropped, track["t1"]
@@ -1303,7 +1281,7 @@ class CTCData(Dataset):
 
             features = np.concatenate(features, axis=0)
 
-        keep = self._detection_keep_indices(assoc_matrix)
+        keep = self._detection_keep_indices(assoc_matrix, timepoints)
         if len(keep) < len(timepoints):
             if return_dense:
                 dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
@@ -1617,17 +1595,17 @@ class CTCData(Dataset):
 
         max_detections = self._get_max_detections()
         if max_detections is not None:
-            keep, neighborhood_loss_mask = _sample_neighborhood_indices(
+            keep = _sample_neighborhood_indices(
                 feat.coords,
                 timepoints,
                 assoc_matrix,
                 max_detections,
             )
             if len(keep) < len(timepoints):
+                # whole lineages are kept, so an existing cropper loss mask only needs
+                # subsetting (no new censoring is introduced by the cap)
                 if loss_mask is not None:
-                    loss_mask = loss_mask[keep][:, keep] & neighborhood_loss_mask
-                else:
-                    loss_mask = neighborhood_loss_mask
+                    loss_mask = loss_mask[keep][:, keep]
                 if return_dense:
                     dropped = np.setdiff1d(np.arange(len(timepoints)), keep)
                     mask = _remove_detections_from_masks(
@@ -1643,7 +1621,7 @@ class CTCData(Dataset):
                 timepoints = timepoints[keep]
                 assoc_matrix = assoc_matrix[keep][:, keep]
 
-        keep = self._detection_keep_indices(assoc_matrix)
+        keep = self._detection_keep_indices(assoc_matrix, timepoints)
         if len(keep) < len(timepoints):
             if return_dense:
                 dropped = np.setdiff1d(np.arange(len(timepoints)), keep)

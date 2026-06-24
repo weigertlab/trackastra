@@ -1387,10 +1387,11 @@ def parse_train_args():
     parser.add_argument(
         "--crop_size",
         type=int,
-        required=True,
+        required=False,
         nargs="+",
         default=None,
-        help="random crop size for augmentation",
+        help="random crop size for augmentation; omit (None) to disable cropping "
+        "and rely on max_detections for the spatial/lineage budget",
     )
     parser.add_argument(
         "--crop_ensure_all_centers",

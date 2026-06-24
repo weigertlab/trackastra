@@ -52,25 +52,26 @@ def test_load_for_inference_refines_tra_with_st(tmp_path):
     assert gt_path == gt
 
 
-def test_detection_dropout_preserves_each_lineage():
+def test_detection_dropout_drops_whole_lineages():
+    # two 3-frame lineages; dropping a first-frame seed removes its entire lineage,
+    # so the kept set is always a complete lineage (never a severed partner).
     assoc = np.zeros((6, 6), dtype=bool)
-    assoc[np.ix_([0, 1, 2], [0, 1, 2])] = True
-    assoc[np.ix_([3, 4], [3, 4])] = True
+    assoc[0, 1] = assoc[1, 2] = True  # lineage A: 0(t0) -> 1(t1) -> 2(t2)
+    assoc[3, 4] = assoc[4, 5] = True  # lineage B: 3(t0) -> 4(t1) -> 5(t2)
+    timepoints = np.array([0, 1, 2, 0, 1, 2])
 
     state = np.random.get_state()
     try:
-        np.random.seed(42)
-        keep = _sample_detection_keep_indices(assoc, drop_fraction=1.0)
+        np.random.seed(0)
+        keep = _sample_detection_keep_indices(assoc, timepoints, drop_fraction=0.5)
     finally:
         np.random.set_state(state)
 
-    assert len(keep) == 3
-    assert np.intersect1d(keep, [0, 1, 2]).size == 1
-    assert np.intersect1d(keep, [3, 4]).size == 1
-    assert 5 in keep
+    # exactly one of the two first-frame lineages survives, kept whole
+    assert set(keep.tolist()) in ({0, 1, 2}, {3, 4, 5})
 
 
-def test_detection_dropout_subsets_wrfeat_window_consistently():
+def test_detection_dropout_keeps_whole_lineages_in_wrfeat_getitem():
     features = WRFeatures(
         coords=np.arange(12, dtype=np.float32).reshape(6, 2),
         labels=np.array([1, 2, 3, 1, 2, 3]),
@@ -84,7 +85,7 @@ def test_detection_dropout_subsets_wrfeat_window_consistently():
     data.cropper = None
     data.augmenter = None
     data.detect_drop = 1.0
-    data.detect_drop_fraction = 1.0
+    data.detect_drop_fraction = 0.34  # drop 1 of the 3 first-frame lineages
     data.max_tokens = None
     data.ndim = 2
     data.windows = [{
@@ -105,12 +106,15 @@ def test_detection_dropout_subsets_wrfeat_window_consistently():
     finally:
         np.random.set_state(state)
 
-    assert sample["features"].shape == (3, 1)
-    assert sample["assoc_matrix"].shape == (3, 3)
-    assert set(sample["labels"].tolist()) == {1, 2, 3}
+    # one whole 2-frame lineage dropped -> 2 lineages (4 detections) remain
+    assert sample["features"].shape == (4, 1)
+    assert sample["assoc_matrix"].shape == (4, 4)
+    assert len(set(sample["labels"].tolist())) == 2
+    # whole lineages kept -> no censoring needed -> no loss mask emitted
+    assert "loss_mask" not in sample
 
 
-def test_max_detections_is_applied_inside_wrfeat_getitem(monkeypatch):
+def test_max_detections_keeps_whole_lineages_in_wrfeat_getitem(monkeypatch):
     features = WRFeatures(
         coords=np.array([[0, 0], [50, 50], [100, 100]] * 2, dtype=np.float32),
         labels=np.array([1, 2, 3, 1, 2, 3]),
@@ -124,7 +128,7 @@ def test_max_detections_is_applied_inside_wrfeat_getitem(monkeypatch):
     data.cropper = None
     data.augmenter = None
     data.detect_drop = 0.0
-    data.max_detections = 4
+    data.max_detections = 2  # first frame has 3 -> cap triggers
     data.max_tokens = None
     data.ndim = 2
     data.windows = [{
@@ -137,49 +141,45 @@ def test_max_detections_is_applied_inside_wrfeat_getitem(monkeypatch):
         "t1": 0,
         "wrfeat": features,
     }]
-    monkeypatch.setattr(np.random, "randint", lambda _n: 0)
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # anchor = closest seed
 
     sample = data[0]
 
+    # 2 first-frame seeds (the spatially-closest) -> their 2 full lineages = 4 dets
     assert len(sample["coords"]) == 4
     assert set(sample["timepoints"].tolist()) == {0, 1}
-    assert sample["loss_mask"].shape == (4, 4)
+    assert set(sample["labels"].tolist()) == {1, 2}  # the far lineage (3) dropped
+    assert "loss_mask" not in sample
 
 
-def test_neighborhood_sampling_is_bounded_local_and_keeps_every_frame(monkeypatch):
-    timepoints = np.repeat(np.arange(3), 2)
-    coords = np.array([
-        [0, 0], [100, 100],
-        [1, 0], [101, 100],
-        [2, 0], [102, 100],
-    ], dtype=np.float32)
-    labels = np.tile([1, 2], 3)
-    assoc = labels[:, None] == labels[None, :]
-    monkeypatch.setattr(np.random, "randint", lambda _n: 4)
-
-    keep, loss_mask = _sample_neighborhood_indices(
-        coords, timepoints, assoc, max_detections=4
+def test_neighborhood_sampling_keeps_whole_lineages(monkeypatch):
+    # 3 first-frame cells, budget 2: keep the 2 closest seeds' full lineages only.
+    coords = np.array(
+        [[0, 0], [1, 0], [100, 0], [0, 0], [1, 0], [100, 0]], dtype=np.float32
     )
+    timepoints = np.array([0, 0, 0, 1, 1, 1])
+    labels = np.array([1, 2, 3, 1, 2, 3])
+    assoc = labels[:, None] == labels[None, :]
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # anchor = first seed
+
+    keep = _sample_neighborhood_indices(coords, timepoints, assoc, max_detections=2)
 
     assert len(keep) == 4
-    assert set(timepoints[keep]) == {0, 1, 2}
-    assert {0, 2, 4}.issubset(keep)
-    assert np.array_equal(assoc[keep][:, keep], labels[keep, None] == labels[None, keep])
-    partial_lineage = np.flatnonzero(labels[keep] == 2)[0]
-    assert not loss_mask[partial_lineage].all()
+    assert 2 not in keep and 5 not in keep  # far lineage dropped whole
+    # no association of a kept detection points outside the kept set (no severed link)
+    keep_set = set(keep.tolist())
+    for i in keep:
+        assert set(np.flatnonzero(assoc[i]).tolist()) <= keep_set
 
 
-def test_neighborhood_sampling_leaves_small_windows_unchanged():
+def test_neighborhood_sampling_leaves_small_first_frame_unchanged():
     coords = np.zeros((3, 2), dtype=np.float32)
-    timepoints = np.arange(3)
+    timepoints = np.arange(3)  # one detection in the first frame
     assoc = np.eye(3, dtype=bool)
 
-    keep, loss_mask = _sample_neighborhood_indices(
-        coords, timepoints, assoc, max_detections=3
-    )
+    keep = _sample_neighborhood_indices(coords, timepoints, assoc, max_detections=3)
 
     assert np.array_equal(keep, np.arange(3))
-    assert loss_mask.all()
 
 
 def test_collate_pads_optional_neighborhood_loss_masks():
