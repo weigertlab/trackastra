@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 from tifffile import imwrite
-from trackastra.data.datanew import (
+from trackastra.data.data import (
     DetectionFrame,
     DetectionSeries,
     TrackingData,

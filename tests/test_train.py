@@ -19,12 +19,12 @@ from scripts.train import (
 )
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
-from trackastra.data.data import collate_sequence_padding
-from trackastra.data.datanew import (
+from trackastra.data.data import (
     DetectionFrame,
     DetectionSeries,
     TrackingData,
     TrackingSequence,
+    collate_sequence_padding,
 )
 from trackastra.data.distributed import (
     BalancedBatchSampler,

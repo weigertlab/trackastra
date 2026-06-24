@@ -1,10 +1,7 @@
 """Data loading and sampling utils for distributed training."""
 
-import hashlib
-import json
 import logging
 import math
-import pickle
 from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
@@ -23,55 +20,15 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from .data import CTCData, warn_association_distances
-from .datanew import TrackingData, TrackingSequence, association_distances
+from .data import (
+    TrackingData,
+    TrackingSequence,
+    association_distances,
+    warn_association_distances,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-def cache_class(cachedir=None):
-    """A simple file cache for CTCData."""
-
-    def make_hashable(obj):
-        if isinstance(obj, tuple | list):
-            return tuple(make_hashable(e) for e in obj)
-        elif isinstance(obj, Path):
-            return obj.as_posix()
-        elif isinstance(obj, dict):
-            return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-        else:
-            return obj
-
-    def hash_args_kwargs(*args, **kwargs):
-        hashable_args = tuple(make_hashable(arg) for arg in args)
-        hashable_kwargs = make_hashable(kwargs)
-        combined_serialized = json.dumps(
-            [hashable_args, hashable_kwargs], sort_keys=True
-        )
-        hash_obj = hashlib.sha256(combined_serialized.encode())
-        return hash_obj.hexdigest()
-
-    if cachedir is None:
-        return CTCData
-    else:
-        cachedir = Path(cachedir)
-
-        def _wrapped(*args, **kwargs):
-            h = hash_args_kwargs(*args, **kwargs)
-            cachedir.mkdir(exist_ok=True, parents=True)
-            cache_file = cachedir / f"{h}.pkl"
-            if cache_file.exists():
-                logger.info(f"Loading cached dataset from {cache_file}")
-                with open(cache_file, "rb") as f:
-                    return pickle.load(f)
-            else:
-                c = CTCData(*args, **kwargs)
-                logger.info(f"Saving cached dataset to {cache_file}")
-                pickle.dump(c, open(cache_file, "wb"))
-            return c
-
-        return _wrapped
 
 
 class BalancedBatchSampler(BatchSampler):
@@ -105,7 +62,7 @@ class BalancedBatchSampler(BatchSampler):
             count ``n_ref``; the per-batch budget is ``batch_size * n_ref``. The
             median (50) anchors a full ``batch_size`` batch at the typical window.
         """
-        if isinstance(dataset, CTCData | TrackingData):
+        if isinstance(dataset, TrackingData):
             self.n_objects = dataset.n_objects
             self.n_divs = np.array(dataset.n_divs)
             self.n_sizes = np.ones(len(dataset)) * len(dataset)

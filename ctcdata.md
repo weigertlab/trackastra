@@ -254,18 +254,21 @@ Migration discoveries (2026-06-25) that refine the original plan:
 
 Steps:
 
-- [ ] Move the three shared functions (+`pad_tensor`) into the new module.
-- [ ] Rename `data.py` -> `_legacy_data.py` and `datanew.py` -> `data.py`; rewrite the
+- [x] Move the three shared functions (+`pad_tensor`) into the new module.
+- [x] Rename `data.py` -> `_legacy_data.py` and `datanew.py` -> `data.py`; rewrite the
       package `__init__` exports (drop `CTCData`/`_ctc_lineages`, add `TrackingSequence`,
       `TrackingData`, the canonical loader, and the shared functions).
-- [ ] Repoint `distributed.py` imports and remove `_FileCache` and the CTCData isinstance.
-- [ ] Repoint test imports (`trackastra.data.datanew` -> `trackastra.data`).
-- [ ] Remove obsolete skipped tests; migrate the essential ones (Phase 3 already moves
+- [x] Repoint `distributed.py` imports and remove `cache_class` and the CTCData isinstance.
+- [x] Repoint test imports (`trackastra.data.datanew` -> `trackastra.data`).
+- [x] Remove obsolete skipped tests; migrate the essential ones (Phase 3 already moved
       the inference test).
-- [ ] Convert essential real-data parity checks into synthetic tests.
-- [ ] Run the full relevant test suite and final real-data smoke tests.
-- [ ] Delete `_legacy_data.py` and the temporary comparison script.
-- [ ] Confirm no production import or configuration references legacy behavior.
+- [x] Convert essential real-data parity checks into synthetic tests.
+- [x] Run the full relevant test suite and final real-data smoke tests.
+- [ ] Delete `_legacy_data.py` and the temporary comparison script (deferred: kept one
+      review cycle as the parity oracle; delete after a real training run confirms the
+      new pipeline).
+- [x] Confirm no production import or configuration references legacy behavior
+      (`_legacy_data` is imported only by `scripts/compare_tracking_data.py`).
 
 Pause after Phase 4 with the final verification report; never create commits automatically.
 
@@ -340,12 +343,31 @@ results, blockers, and decisions that revise this plan.
   `test_load_images_flag_attaches_arrays_and_survives_pickle`). Parity unchanged (21 + 14),
   32 focused tests pass, real-data smoke confirmed on Van Vliet.
 
+- 2026-06-25: Phase 4 migration done (not committed). Shared functions
+  (`collate_sequence_padding`, `densify_assoc`, `warn_association_distances`, `pad_tensor`)
+  moved into the new module; `datanew.py` renamed to `data.py` and old `data.py` to
+  `_legacy_data.py` via `git mv`. Package `__init__` now exports the new API
+  (`TrackingData`, `TrackingSequence`, `load_ctc_for_inference`, the shared funcs) and
+  `extract_features_regionprops` from `features`; `CTCData`/`_ctc_lineages` dropped.
+  `distributed.py` lost the dead `cache_class` and the `CTCData` isinstance branch.
+  `test_data.py` rewritten to keep only the still-valid helper/collate/dropout/warn tests
+  (now untagged from `train`), with the dedup test rewritten to the new
+  `association_distances(dataset, ...)` API. `test_cli.py` repointed off
+  `CTCData.load_for_inference` (its `example_dataset` helper moved in-file) and its stale
+  `evaluate_ctc` mock fixed; this CLI predict test had been silently broken since Phase 3.
+  Verified: 105 passed / 3 skipped, parity still exact (21 + 14), end-to-end CPU training
+  and the inference accessor work through the renamed module. The 8 `test_pretrained`
+  integration failures are pre-existing (identical on the prior commit; expected-value
+  drift, unrelated to this refactor). `_legacy_data.py` and the comparison script are kept
+  one cycle as the parity oracle.
+
 ## Current handoff state
 
-Phase 2 committed (`7cdcae3`). Phase 3 (canonical CTC-folder I/O) implemented and tested,
-not yet committed. Phase 4 (legacy removal: move shared utils, rename `datanew.py` ->
-`data.py`, delete `CTCData`/`_legacy_data.py`) is planned and not started. Earlier handoff
-notes below predate Phase 2 completion and are kept only for historical context.
+Phase 2 committed (`7cdcae3`), Phase 3 committed (`5b8a6fb`). Phase 4 (legacy-removal
+migration gate) implemented and verified, not yet committed; only the final deletion of
+`_legacy_data.py` + `scripts/compare_tracking_data.py` is deferred pending a real training
+run. Earlier handoff notes below predate Phase 2 completion and are kept only for
+historical context.
 
 Verified before the final test edit:
 

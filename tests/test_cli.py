@@ -5,12 +5,46 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import networkx as nx
+import numpy as np
 import pytest
-
-from test_data import example_dataset
+from tifffile import imwrite
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
+
+
+def example_dataset():
+    img_dir = Path("test_data/img")
+    img_dir.mkdir(exist_ok=True, parents=True)
+    img = np.array([
+        [0, 1, 1],  # t=0
+        [0, 1, 0],  # t=1
+        [1, 1, 0],  # t=2
+    ])
+    img = np.expand_dims(img, -1)
+    for i in range(img.shape[0]):
+        imwrite(img_dir / f"emp_{i}.tif", img[i])
+
+    tra_dir = Path("test_data/TRA")
+    tra_dir.mkdir(exist_ok=True, parents=True)
+    man_track = np.array(
+        [
+            [10, 0, 1, 0],
+            [11, 0, 0, 0],
+            [20, 2, 2, 10],
+            [22, 2, 2, 10],
+        ],
+        dtype=int,
+    )
+    np.savetxt(tra_dir / "man_track.txt", man_track, fmt="%i")
+    y = np.array([
+        [00, 10, 11],  # t=0
+        [00, 10, 00],  # t=1
+        [20, 22, 00],  # t=2
+    ])
+    y = np.expand_dims(y, -1)
+    for i in range(y.shape[0]):
+        imwrite(tra_dir / f"track_{i}.tif", y[i])
 
 
 @pytest.fixture
@@ -222,21 +256,24 @@ def test_predict_run_writes_and_evaluates_ctc_output(
 
     monkeypatch.setattr("trackastra.model.Trackastra", FakeTrackastra)
     monkeypatch.setattr(
-        "trackastra.data.CTCData.load_for_inference",
-        classmethod(
-            lambda cls, root, detection_folder, ndim: (
-                "images",
-                "refined masks",
-                movie / "img",
-                movie / "TRA",
-            )
+        "trackastra.data.load_ctc_for_inference",
+        lambda root, detection_folder, ndim: (
+            "images",
+            "refined masks",
+            movie / "img",
+            movie / "TRA",
         ),
     )
     monkeypatch.setattr("trackastra.tracking.graph_to_ctc", fake_graph_to_ctc)
     monkeypatch.setattr(
         predict_script,
         "evaluate_ctc",
-        lambda gt, pred: {"TRA": 0.5, "AOGM": 4.0, "DET": 0.6, "LNK": 0.7},
+        lambda gt, pred, return_matched=False: {
+            "TRA": 0.5,
+            "AOGM": 4.0,
+            "DET": 0.6,
+            "LNK": 0.7,
+        },
     )
     args = SimpleNamespace(
         model="trained_model",
