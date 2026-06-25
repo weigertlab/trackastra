@@ -315,6 +315,26 @@ the wrapper reads them off the returned object instead of re-resolving. Low prio
 - `pad_tensor`, `densify_assoc`, `collate_sequence_padding`.
 - `association_distances`, `warn_association_distances`.
 
+Data-model decision (confirmed 2026-06-25): KEEP the three-level model. The common
+training case is one image folder + multiple segmentation folders + one common GT
+(`scripts/configs/general2d.yaml` uses `detection_folders: [TRA, RES]`), so multiple
+mid-level objects per sequence is real and intended. `images` and `lineage` stay shared on
+`TrackingSequence`; `masks` and per-frame detections stay per mid-level object. Do NOT
+collapse the hierarchy; do NOT move `images`/`masks` onto `DetectionFrame` (it stays
+strictly per-detection). Per-series GT / differing images per mask are out of scope (use
+separate `TrackingSequence`s if ever needed). (`general2d.yaml` itself is an older config:
+it uses the removed `patch_regionprops` mode and absent data dirs, so it is not maintained
+for the new pipeline; it only documents the multi-segmentation intent.)
+
+Class renames (resolve the `Sequence`/`Series` clash and torch idiom):
+
+- `TrackingSequence` -> keep.
+- `DetectionSeries` -> `Segmentation` (each is one segmentation folder of the movie;
+  `sequence.segmentations[i].masks`). Neutral alternative: `DetectionSource`.
+- `DetectionFrame` -> keep.
+- `TrackingData` -> `TrackingDataset` (idiomatic `torch.utils.data.Dataset` subclass).
+
+- [ ] Apply the class renames above across the package, scripts, and tests.
 - [ ] Keep `from_ctc` as the single canonical loader (no new class); confirm both
       reference layouts resolve from root alone for dataset (`load_images=False`) and
       prediction (`load_images=True`). Optionally DRY the inference path resolution.
