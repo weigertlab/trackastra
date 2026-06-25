@@ -471,6 +471,51 @@ learned-temporal-bias experiment) is OUT OF SCOPE here - see `newfeats.md`.
 
 Pause after Phase 6 with the verification report; never create commits automatically.
 
+### Phase 7: stop the double feature extraction on the inference loader
+
+Decision (user, 2026-06-25): "recompute is fine" - the in-training/wandb eval keeps calling the
+public `Trackastra.track(imgs, masks)` (re-extracts features each eval epoch) for fidelity with
+the real user inference path. NO feature-based eval path and NO cross-epoch caching of the eval
+data.
+
+This also resolves "why have `load_ctc_for_inference` vs `from_ctc`": they produce DIFFERENT
+things and neither replaces the other.
+- `from_ctc` -> a detection-level `TrackingSequence` (regionprops features + lineage +
+  matching): the DATASET. A `TrackingSequence` can't represent "images+masks with no
+  detections" because its `Segmentation` arrays come FROM the extraction.
+- `track(imgs, masks)` wants raw RASTERS (normalized images + refined detection masks) and does
+  its OWN feature extraction.
+So a raster loader is a genuinely distinct operation, not a redundant wrapper - keep it.
+
+The real flaw: `load_ctc_for_inference` currently implements itself via
+`from_ctc(load_images=True)`, which runs the full regionprops extraction and then DISCARDS it,
+so `track()` extracts a SECOND time. Features are extracted TWICE per eval movie per epoch.
+"Recompute is fine" means once; twice is waste.
+
+Goal: a plain raster loader in `io.py` (no `TrackingSequence`, no feature extraction);
+`track()` stays the single feature-extracting end-to-end path; `load_ctc_for_inference` is
+DELETED (not reimplemented). No caching.
+
+- [ ] Add a module-level `load_ctc_images_masks(root, detection_folder, ndim, ...) ->
+      (images, masks, image_path, gt_path)` to `io.py` (normalized images + ST-refined
+      detection masks + resolved paths), composed from the existing
+      `_resolve_paths`/`_load_tiffs`/`_ensure_ndim`/`_correct_with_st`/`normalize`. Decision:
+      module-level function over a `@staticmethod` (pure loading concern, scripts import it
+      cleanly).
+- [ ] Reuse that same image/mask-loading core inside `from_ctc` (it then layers matching +
+      lineage + regionprops on top), so there is one place that turns a CTC folder into
+      rasters.
+- [ ] Delete `load_ctc_for_inference` and `_resolve_inference_paths`; repoint `predict.py`,
+      `scripts/check_errors.py`, and tests (`test_datanew.py`, the `test_cli` predict mock) to
+      `load_ctc_images_masks`. (It is no longer a `TrackingSequence` round-trip - that abuse is
+      what motivated this phase.)
+- [ ] Keep `Trackastra.track(imgs, masks)` + the CLI unchanged (the public raw-array path).
+- [ ] Tests + ruff; port `test_load_ctc_for_inference_refines_tra_with_st` to the new function
+      (ST refinement still applies); confirm eval still works end-to-end via `track()` with a
+      single feature extraction (not two).
+
+Pause after Phase 7 with the verification report; never create commits automatically.
+
 ## Implementation observations
 
 Append short dated entries containing only information that affects later work: discovered

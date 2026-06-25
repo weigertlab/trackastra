@@ -339,8 +339,19 @@ class BalancedDataModule(LightningDataModule):
     def _sequence_loader(self):
         if self.cachedir is None:
             return TrackingSequence.from_ctc
-        memory = joblib.Memory(self.cachedir, verbose=1)
+        memory = joblib.Memory(self.cachedir, verbose=0)
         return memory.cache(TrackingSequence.from_ctc, ignore=["n_workers"])
+
+    def _load_sequence(self, loader, inp, split):
+        """Load one sequence, logging whether it was served from the joblib cache."""
+        kwargs = dict(root=Path(inp), **self._sequence_kwargs_for_split(split))
+        if self.cachedir is not None:
+            hit = loader.check_call_in_cache(**kwargs)
+            logger.info(
+                f"  {split.upper()} {inp}: "
+                + ("loaded from cache" if hit else "cache miss, computing")
+            )
+        return loader(**kwargs)
 
     def prepare_data(self):
         """Loads and caches the datasets if not already done.
@@ -357,11 +368,7 @@ class BalancedDataModule(LightningDataModule):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
             sequences = tuple(
-                loader(
-                    root=Path(inp),
-                    **self._sequence_kwargs_for_split(split),
-                )
-                for inp in inps
+                self._load_sequence(loader, inp, split) for inp in inps
             )
             logger.info(
                 f"Loaded {len(sequences)} {split.upper()} sequences (in"
@@ -379,10 +386,7 @@ class BalancedDataModule(LightningDataModule):
             start = default_timer()
             self.datasets[split] = torch.utils.data.ConcatDataset(
                 TrackingDataset(
-                    loader(
-                        root=Path(inp),
-                        **self._sequence_kwargs_for_split(split),
-                    ),
+                    self._load_sequence(loader, inp, split),
                     **self._tracking_data_kwargs_for_split(split),
                 )
                 for inp in inps
