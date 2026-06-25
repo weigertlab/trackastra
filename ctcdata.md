@@ -272,6 +272,65 @@ Steps:
 
 Pause after Phase 4 with the final verification report; never create commits automatically.
 
+### Phase 5: split data.py into a torch-free sequence/IO module and a torch dataset module
+
+After Phase 4, `data.py` (~970 lines) mixes two concerns: the format-neutral data model
+plus CTC loading (numpy/pandas/tifffile/scipy/networkx, no torch) and the PyTorch dataset
+plus collation (torch). Split them into two modules with a strict one-way dependency
+(`dataset` imports `sequence`, never the reverse). A useful side effect: `sequence` becomes
+importable without torch, so pure data inspection / CTC loading does not pull in torch.
+
+Chosen names: `io.py` (data model + CTC I/O) and `dataset.py` (torch dataset +
+collation). Note: a package-local `trackastra/data/io.py` does not shadow the stdlib
+`io` for other modules, since absolute imports resolve `import io` to the stdlib; only
+`from .io import ...` / `from . import io` reach the local module.
+
+`io.py` (torch-free):
+
+- `DetectionFrame`, `DetectionSeries`, `TrackingSequence`, `_immutable_array`.
+- `TrackingSequence.from_ctc`, `_load_ctc_sequence`, and the loading helpers
+  (`_resolve_paths`, `_resolve_detection_folder`, `_load_tiffs`, `_ensure_ndim`,
+  `_correct_with_st`, `_filter_tracks`, `_isolated_tracks`, `_lineage_arrays`).
+- `load_ctc_for_inference`, `_resolve_inference_paths`.
+
+IO API direction (no new class): `TrackingSequence.from_ctc(root, ...)` IS the canonical
+loader. It is already addressed purely by root (as in the configs) and auto-resolves both
+reference layouts - standard CTC (`<ds>/01` images, `<ds>/01_GT/TRA`, `<ds>/01_ST/SEG`)
+and the simple `<root>/img` + `<root>/TRA` - and the `load_images` flag covers both the
+no-image dataset case and the images-retained prediction case. `load_ctc_for_inference`
+already delegates to `from_ctc(use_gt=False, load_images=True)` and only adds the
+array-returning convenience for prediction, so it stays a thin wrapper. The `_resolve_*`
+helpers remain internal support for `from_ctc`; no separate loader class is introduced.
+
+Optional DRY cleanup: `load_ctc_for_inference` currently re-resolves `(image_path,
+gt_tra)` via `_resolve_inference_paths`, duplicating logic inside `from_ctc`. If desired,
+store the resolved `image_path`/`gt_path` on the `TrackingSequence` (alongside `root`) so
+the wrapper reads them off the returned object instead of re-resolving. Low priority.
+
+`dataset.py` (torch; imports from `io.py`):
+
+- `TrackingData` and its runtime helpers (`_concat_frames`, `_association_target`,
+  `_sample_neighborhood_indices`, `_sample_detection_keep_indices`, `_subset_features`,
+  `_wr_augmenter`, `_division_count`).
+- `pad_tensor`, `densify_assoc`, `collate_sequence_padding`.
+- `association_distances`, `warn_association_distances`.
+
+- [ ] Keep `from_ctc` as the single canonical loader (no new class); confirm both
+      reference layouts resolve from root alone for dataset (`load_images=False`) and
+      prediction (`load_images=True`). Optionally DRY the inference path resolution.
+- [ ] Create `io.py` and `dataset.py`; move the symbols above (keep one-way
+      dependency, no circular imports).
+- [ ] Remove `data.py`; update package `__init__` to import from `io` and `dataset`.
+- [ ] Repoint `distributed.py` and tests (`trackastra.data.data` -> the new modules or the
+      package re-exports).
+- [ ] Update the `scripts/compare_tracking_data.py` import (still references the package).
+- [ ] Confirm `io.py` imports with torch uninstalled/unimported (no torch in its
+      import graph).
+- [ ] Run the full relevant test suite, ruff, and the parity script; update the repository
+      map in `CLAUDE.md` (the `data.py` responsibilities line).
+
+Pause after Phase 5 with the verification report; never create commits automatically.
+
 ## Implementation observations
 
 Append short dated entries containing only information that affects later work: discovered
@@ -360,14 +419,40 @@ results, blockers, and decisions that revise this plan.
   integration failures are pre-existing (identical on the prior commit; expected-value
   drift, unrelated to this refactor). `_legacy_data.py` and the comparison script are kept
   one cycle as the parity oracle.
+- 2026-06-25: Phase 5 design settled (planning only, no code yet). Decisions:
+  (a) NO new loader class - `TrackingSequence.from_ctc(root, ...)` is the canonical loader;
+  it already resolves both reference layouts from root alone and the `load_images` flag
+  covers dataset (no images) vs prediction (images retained); `load_ctc_for_inference`
+  stays a thin wrapper. (b) Module split names: `io.py` (torch-free data model + CTC I/O)
+  and `dataset.py` (torch dataset + collation), `data.py` removed. (c) Dense-array
+  placement is by sharing scope and is correct as-is: `images` on `TrackingSequence` (one
+  movie shared by all series) and `masks` on `DetectionSeries` (one per detection folder);
+  `DetectionFrame` stays strictly per-detection (no dense rasters). (d) A `TrackingSequence`
+  may hold multiple `DetectionSeries`, one per `detection_folders` entry, all sharing the
+  same `images` and lineage; default `("TRA",)` gives one series. (e) Verified on disk:
+  `data/vanvliet/` and `data/vanvliet2/` sequences are all the simple `img/` + `TRA/`
+  layout (no `mask` folder); `Fluo-C2DL-Huh7` is the standard CTC layout. Both load via
+  root alone.
 
 ## Current handoff state
 
-Phase 2 committed (`7cdcae3`), Phase 3 committed (`5b8a6fb`). Phase 4 (legacy-removal
-migration gate) implemented and verified, not yet committed; only the final deletion of
-`_legacy_data.py` + `scripts/compare_tracking_data.py` is deferred pending a real training
-run. Earlier handoff notes below predate Phase 2 completion and are kept only for
-historical context.
+Phases 2-4 are committed (`7cdcae3`, `5b8a6fb`, `c1675c7`). The new `data.py`
+(`TrackingSequence` + `TrackingData` + `load_ctc_for_inference`) is the production module;
+legacy `CTCData` lives in `_legacy_data.py` as a parity oracle (deletion deferred until a
+real training run confirms the new pipeline).
+
+Next up: execute Phase 5 (split `data.py` into `io.py` + `dataset.py`; keep `from_ctc`
+canonical, no new class) per the spec above. No Phase 5 code has been written yet. Resume
+recipe after the split: `ruff check`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+-p no:cacheprovider tests/test_data.py tests/test_datanew.py tests/test_train.py
+--deselect tests/test_train.py::test_train_dry_run`, then `python
+scripts/compare_tracking_data.py` (expect 21 + 14 windows match). Known pre-existing
+failures unrelated to this work: 8 `tests/test_pretrained.py::test_integration` (expected-
+value drift). Untracked working-tree edits to repoint off legacy: `scripts/check_errors.py`
+and `scripts/compare_tracking_data.py` (both intentionally left untracked).
+
+Earlier handoff notes below predate Phase 2 completion and are kept only for historical
+context.
 
 Verified before the final test edit:
 
