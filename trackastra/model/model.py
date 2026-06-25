@@ -329,6 +329,8 @@ class TrackingTransformer(torch.nn.Module):
         assoc_channels: int = 8,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
+        disable_abs_pos: bool = False,
+        disable_input_norm: bool = False,
     ):
         super().__init__()
 
@@ -372,22 +374,27 @@ class TrackingTransformer(torch.nn.Module):
             assoc_head=assoc_head,
             assoc_channels=assoc_channels,
             architecture_version=architecture_version,
+            disable_abs_pos=disable_abs_pos,
+            disable_input_norm=disable_input_norm,
         )
         self.architecture_version = architecture_version
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
         self.max_distance = max_distance
         self.attn_dist_mode = attn_dist_mode
+        self.disable_abs_pos = disable_abs_pos
+        self.disable_input_norm = disable_input_norm
 
         # TODO remove, alredy present in self.config
         # self.window = window
         # self.feat_dim = feat_dim
         # self.coord_dim = coord_dim
 
+        pos_dim = 0 if disable_abs_pos else (1 + coord_dim) * pos_embed_per_dim
         self.proj = nn.Linear(
-            (1 + coord_dim) * pos_embed_per_dim + feat_dim * feat_embed_per_dim, d_model
+            pos_dim + feat_dim * feat_embed_per_dim, d_model
         )
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.Identity() if disable_input_norm else nn.LayerNorm(d_model)
 
         self.encoder = nn.ModuleList([
             EncoderLayer(
@@ -460,10 +467,12 @@ class TrackingTransformer(torch.nn.Module):
         else:
             raise ValueError(f"Unknown feature_embed_mode {feature_embed_mode!r}")
 
-        self.pos_embed = PositionalEncoding(
-            cutoffs=(window,) + (max_distance,) * coord_dim,
-            n_pos=(pos_embed_per_dim,) * (1 + coord_dim),
-        )
+        self.pos_embed = None
+        if not disable_abs_pos:
+            self.pos_embed = PositionalEncoding(
+                cutoffs=(window,) + (max_distance,) * coord_dim,
+                n_pos=(pos_embed_per_dim,) * (1 + coord_dim),
+            )
 
         # self.pos_embed = NoPositionalEncoding(d=pos_embed_per_dim * (1 + coord_dim))
 
@@ -486,13 +495,18 @@ class TrackingTransformer(torch.nn.Module):
                 [coords[:, :, :1] - min_time, coords[:, :, 1:]], dim=-1
             )
 
-        pos = self.pos_embed(coords)
-
-        if features is None or features.numel() == 0:
-            features = pos
+        if self.disable_abs_pos:
+            if features is None or features.numel() == 0:
+                features = coords.new_empty((_B, _N, 0))
+            else:
+                features = self.feat_embed(features)
         else:
-            features = self.feat_embed(features)
-            features = torch.cat((pos, features), axis=-1)
+            pos = self.pos_embed(coords)
+            if features is None or features.numel() == 0:
+                features = pos
+            else:
+                features = self.feat_embed(features)
+                features = torch.cat((pos, features), axis=-1)
 
         features = self.proj(features)
         features = self.norm(features)

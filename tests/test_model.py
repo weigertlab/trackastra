@@ -3,7 +3,10 @@ import torch
 import yaml
 from trackastra.model import TrackingTransformer
 from trackastra.model.model import DecoderLayer, EncoderLayer
-from trackastra.model.model_parts import FeatureMLP, PositionalEncoding
+from trackastra.model.model_parts import (
+    FeatureMLP,
+    PositionalEncoding,
+)
 from trackastra.model.sparse_attn import build_knn_index
 
 # Mark all tests in this module as core/inference tests
@@ -246,6 +249,62 @@ def test_mlp_feature_embedding_survives_save_load(tmp_path):
 
     assert isinstance(restored.feat_embed, FeatureMLP)
     assert restored.config["feature_embed_mode"] == "mlp"
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, restored.state_dict()[key])
+
+
+def test_disable_abs_pos_skips_input_coordinate_embedding_and_survives_save_load(
+    tmp_path,
+):
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=2,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=4,
+        feat_embed_per_dim=4,
+        disable_abs_pos=True,
+    )
+    coords = torch.rand((1, 5, 3))
+    features = torch.rand((1, 5, 2))
+
+    output = model(coords, features)
+    model.save(tmp_path)
+    restored = TrackingTransformer.from_folder(tmp_path)
+
+    assert model.pos_embed is None
+    assert model.proj.in_features == 8
+    assert output.shape == (1, 5, 5)
+    assert torch.isfinite(output).all()
+    assert restored.pos_embed is None
+    assert restored.proj.in_features == 8
+    assert restored.config["disable_abs_pos"] is True
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, restored.state_dict()[key])
+
+
+def test_disable_input_norm_bypasses_initial_layernorm_and_survives_save_load(tmp_path):
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        disable_input_norm=True,
+    )
+    coords = torch.rand((1, 5, 3))
+
+    output = model(coords)
+    model.save(tmp_path)
+    restored = TrackingTransformer.from_folder(tmp_path)
+
+    assert isinstance(model.norm, torch.nn.Identity)
+    assert output.shape == (1, 5, 5)
+    assert torch.isfinite(output).all()
+    assert isinstance(restored.norm, torch.nn.Identity)
+    assert restored.config["disable_input_norm"] is True
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
 

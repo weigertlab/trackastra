@@ -1102,10 +1102,12 @@ def train(args):
         train_tracking_data_kwargs={
             "detect_drop": args.detect_drop,
             "augment": args.augment,
+            "position_noise": args.max_distance,
         },
         val_tracking_data_kwargs={
             "detect_drop": 0.0,
             "augment": 0,
+            "position_noise": 0.0,
         },
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
@@ -1167,6 +1169,8 @@ def train(args):
             assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
             architecture_version=args.architecture_version,
+            disable_abs_pos=args.disable_abs_pos,
+            disable_input_norm=args.disable_input_norm,
         )
 
     model_lightning = WrappedLightningModule(
@@ -1358,6 +1362,16 @@ def parse_train_args():
         choices=(1, 2),
         default=2,
         help="model forward semantics; use 1 only for legacy-compatible training",
+    )
+    parser.add_argument(
+        "--disable_abs_pos",
+        action="store_true",
+        help="omit input coordinate Fourier embeddings; attention RoPE is unchanged",
+    )
+    parser.add_argument(
+        "--disable_input_norm",
+        action="store_true",
+        help="bypass the initial LayerNorm after input projection",
     )
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")

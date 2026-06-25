@@ -134,6 +134,7 @@ class TrackingDataset(Dataset):
         window_size: int = 10,
         features: FeatureMode = "wrfeat",
         augment: int = 0,
+        position_noise: float = 0.0,
         max_detections: int | None = None,
         detect_drop: float = 0.0,
         detect_drop_fraction: float = 0.1,
@@ -146,6 +147,8 @@ class TrackingDataset(Dataset):
             raise ValueError(f"{features} currently supports only 2D data")
         if augment not in range(5):
             raise ValueError("augment must be between 0 and 4")
+        if position_noise < 0:
+            raise ValueError("position_noise must be non-negative")
         if max_detections is not None and max_detections < window_size:
             raise ValueError("max_detections must be at least window_size")
         if not 0 <= detect_drop <= 1 or not 0 <= detect_drop_fraction <= 1:
@@ -156,6 +159,7 @@ class TrackingDataset(Dataset):
         self.features = features
         self.ndim = sequence.ndim
         self.augment = augment
+        self.position_noise = position_noise
         self.max_detections = max_detections
         self.detect_drop = detect_drop
         self.detect_drop_fraction = detect_drop_fraction
@@ -251,8 +255,10 @@ class TrackingDataset(Dataset):
             np.concatenate((feature.timepoints[:, None], feature.coords), axis=1)
         ).float()
         coords = coords0.clone()
-        if self.augmenter is not None:
-            coords[:, 1:] += torch.randint(0, 512, (1, self.ndim))
+        if self.augmenter is not None and self.position_noise:
+            coords[:, 1:] += torch.empty((1, self.ndim)).uniform_(
+                -self.position_noise, self.position_noise
+            )
         result = {
             "features": torch.from_numpy(
                 feature.features_stacked_for(self.features)

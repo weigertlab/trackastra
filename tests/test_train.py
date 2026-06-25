@@ -133,6 +133,38 @@ def test_parse_max_neighbors_defaults_to_16(monkeypatch):
     assert args.max_neighbors == [16]
 
 
+def test_parse_disable_abs_pos(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--disable_abs_pos",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.disable_abs_pos is True
+
+
+def test_parse_disable_input_norm(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--disable_input_norm",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.disable_input_norm is True
+
+
 def test_summarize_tracking_metrics_includes_linking_and_detection():
     metrics = pd.DataFrame(
         {

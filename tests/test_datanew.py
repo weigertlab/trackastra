@@ -295,3 +295,23 @@ def test_tracking_data_augmentation_does_not_mutate_sequence(level):
 
     assert sample["features"].shape == (4, 7)
     np.testing.assert_array_equal(seg.features["inertia_tensor"], original)
+
+
+def test_tracking_data_position_noise_is_bounded_global_offset():
+    seg = _segmentation([(0, (0, 1)), (1, (0, 1))])
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        segmentations=(seg,),
+        lineage_relation=np.eye(2, dtype=bool),
+        lineage_parents=np.full(2, -1),
+    )
+
+    torch.manual_seed(0)
+    sample = TrackingDataset(
+        sequence, window_size=2, augment=1, position_noise=7.0
+    )[0]
+    offset = sample["coords"][:, 1:] - sample["coords0"][:, 1:]
+
+    assert torch.allclose(offset, offset[:1].expand_as(offset))
+    assert offset.abs().max() <= 7.0

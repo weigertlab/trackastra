@@ -20,23 +20,26 @@ The transformer uses two positional mechanisms (`trackastra/model/model.py`,
   head dims (slightly more than each spatial dim).
 
 The spatial side is consistent (single `max_distance` drives mask + additive PE + RoPE + kNN -
-done in `ctcdata.md` Phase 6). The temporal axis is the open question: it is a tiny FIXED
-discrete range (a window has ~`window` timepoints, commonly 6-10) and the association decision
-is fundamentally a function of the relative offset delta-t, so continuous Fourier/RoPE
-frequencies are overkill for ~4-10 integer positions.
+done in `ctcdata.md` Phase 6). The temporal axis is the open question: today RoPE is used for
+both spatial coordinates and time, but time inside a training/inference window is a tiny fixed
+discrete range (`0..window-1`, commonly 4-10 positions). It may be better to treat time as a
+small categorical vocabulary with `window` learned embeddings and reserve RoPE for spatial
+coordinates only.
 
-- [ ] Verify/fix the temporal cutoff wiring: the additive PE uses `cutoff=window`, but RoPE's
-      `cutoff_temporal` defaults to 16. A cutoff of 16 while `window`~6-10 is a latent
-      misalignment (temporal analog of the spatial issue). Confirm the Encoder/Decoder layers
-      pass `cutoff_temporal=window` (or wire it). Cheap, low-risk; do first for a clean baseline.
-- [ ] Learned relative-time bias (preferred): a T5/Swin-style learned bias indexed by delta-t
-      over `[-window, window]` (a `2*window+1` table, per head or shared), added to attention
-      logits; keep RoPE/Fourier for the SPATIAL axes. Hypothesis: matches or beats continuous
-      temporal RoPE/Fourier since association is essentially per-delta-t. Behind a flag
-      (e.g. `temporal_pos_mode={"fourier","rope","learned_bias"}`), default unchanged.
-- [ ] Learned absolute temporal embedding (simpler variant): since the window length is fixed,
-      replace only the temporal component of the additive `PositionalEncoding` with an
-      `nn.Embedding(window, d_t)`; keep spatial Fourier. Same flag/default-off treatment.
+- [x] Verify temporal cutoff wiring: additive PE uses `cutoff=window`, and both
+      Encoder/Decoder layers pass `cutoff_temporal=window` into RoPE. Current tests cover the
+      additive PE cutoff indirectly, but not the RoPE temporal cutoff explicitly; add a focused
+      regression test before changing temporal embedding modes.
+- [ ] Learned absolute temporal embedding (preferred first experiment): since the window length
+      is fixed, replace only the temporal component of the additive `PositionalEncoding` with an
+      `nn.Embedding(window, d_t)` and disable temporal RoPE; keep Fourier/RoPE for the spatial
+      axes. Make this a parameter/flag with the current behavior as the default, e.g.
+      `temporal_pos_mode={"rope","learned_abs"}`.
+- [ ] Learned relative-time bias (second experiment): a T5/Swin-style learned bias indexed by
+      delta-t over `[-window, window]` (a `2*window+1` table, per head or shared), added to
+      attention logits; keep RoPE/Fourier for the spatial axes. This is more directly aligned
+      with association scores depending on temporal offsets, but touches attention logits rather
+      than only input embeddings.
 - Not recommended on its own: allocating MORE RoPE dims to time. A handful of frequencies
   already disambiguate a tiny discrete range; the lever is expressiveness for relative time
   (the two items above), not dim count.
