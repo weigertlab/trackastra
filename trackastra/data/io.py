@@ -298,6 +298,44 @@ def _correct_with_st(
     return np.maximum(masks, st_masks)
 
 
+def _load_normalized_images(
+    image_path: Path,
+    start: int,
+    stop: int,
+    temporal_step: int,
+    spatial_step: int,
+    ndim: int,
+) -> np.ndarray:
+    """Load and percentile-normalize the image frames of a CTC sequence."""
+    images = _ensure_ndim(
+        _load_tiffs(
+            image_path, start, stop, temporal_step, spatial_step, np.dtype(np.float32)
+        ),
+        ndim,
+    )
+    return np.stack(
+        [normalize(image) for image in tqdm(images, desc="Normalizing", leave=False)]
+    )
+
+
+def _load_refined_masks(
+    mask_path: Path,
+    start: int,
+    stop: int,
+    temporal_step: int,
+    spatial_step: int,
+    ndim: int,
+) -> np.ndarray:
+    """Load a CTC mask folder, ST-refining a ``_GT/TRA`` folder with its silver SEG."""
+    masks = _ensure_ndim(
+        _load_tiffs(
+            mask_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32)
+        ),
+        ndim,
+    )
+    return _correct_with_st(mask_path, masks, start, stop, temporal_step, spatial_step)
+
+
 def _filter_tracks(
     tracks: pd.DataFrame, start: int, stop: int, temporal_step: int
 ) -> pd.DataFrame:
@@ -387,38 +425,11 @@ def _load_ctc_sequence(
     reference_mask_path = gt_path if use_gt else detection_paths[0]
     n_frames = len(tuple(reference_mask_path.glob("*.tif")))
     start, stop = int(n_frames * slice_pct[0]), int(n_frames * slice_pct[1])
-    gt_masks = _ensure_ndim(
-        _load_tiffs(
-            reference_mask_path,
-            start,
-            stop,
-            downscale_temporal,
-            downscale_spatial,
-            np.dtype(np.int32),
-        ),
-        ndim,
+    gt_masks = _load_refined_masks(
+        reference_mask_path, start, stop, downscale_temporal, downscale_spatial, ndim
     )
-    gt_masks = _correct_with_st(
-        reference_mask_path,
-        gt_masks,
-        start,
-        stop,
-        downscale_temporal,
-        downscale_spatial,
-    )
-    images = _ensure_ndim(
-        _load_tiffs(
-            image_path,
-            start,
-            stop,
-            downscale_temporal,
-            downscale_spatial,
-            np.dtype(np.float32),
-        ),
-        ndim,
-    )
-    images = np.stack(
-        [normalize(image) for image in tqdm(images, desc="Normalizing", leave=False)]
+    images = _load_normalized_images(
+        image_path, start, stop, downscale_temporal, downscale_spatial, ndim
     )
     if len(images) != len(gt_masks):
         raise ValueError("Image and ground-truth frame counts differ")
@@ -451,24 +462,8 @@ def _load_ctc_sequence(
 
     segmentations = []
     for folder, detection_path in zip(detection_folders, detection_paths):
-        detection_masks = _ensure_ndim(
-            _load_tiffs(
-                detection_path,
-                start,
-                stop,
-                downscale_temporal,
-                downscale_spatial,
-                np.dtype(np.int32),
-            ),
-            ndim,
-        )
-        detection_masks = _correct_with_st(
-            detection_path,
-            detection_masks,
-            start,
-            stop,
-            downscale_temporal,
-            downscale_spatial,
+        detection_masks = _load_refined_masks(
+            detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
         )
         if len(detection_masks) != len(images):
             raise ValueError(
@@ -563,8 +558,8 @@ def _load_ctc_sequence(
     )
 
 
-def _resolve_inference_paths(root: Path) -> tuple[Path, Path]:
-    """Resolve the image folder and GT TRA folder for a CTC-like sequence root."""
+def _resolve_inference_paths(root: Path) -> tuple[Path, Path, Path]:
+    """Resolve (sequence root, image folder, GT TRA folder) for a CTC-like root."""
     if root.name == "TRA":
         gt_tra = root
         root = root.parent.parent / root.parent.name.split("_")[0]
@@ -572,33 +567,29 @@ def _resolve_inference_paths(root: Path) -> tuple[Path, Path]:
         ctc_tra = Path(f"{root}_GT") / "TRA"
         gt_tra = ctc_tra if ctc_tra.exists() else root / "TRA"
     image_path = root / "img" if (root / "img").exists() else root
-    return image_path, gt_tra
+    return root, image_path, gt_tra
 
 
-def load_ctc_for_inference(
+def load_ctc_images_masks(
     root: str | Path,
     detection_folder: str = "TRA",
     ndim: int = 2,
-    loader=None,
 ) -> tuple[np.ndarray, np.ndarray, Path, Path]:
-    """Load images, detection masks, and GT path from a CTC-like folder.
+    """Load normalized images and ST-refined detection masks from a CTC-like folder.
 
-    Canonical inference entry point: builds a detection-only ``TrackingSequence``
-    with raw arrays retained (``load_images=True``) and returns the dense arrays the
-    image-based inference API consumes. Pass ``loader`` (e.g. a joblib-cached
-    ``TrackingSequence.from_ctc``) to reuse cached sequences across repeated calls,
-    such as wandb predict-logging on the same validation movie.
+    Lean raster loader for the image-based inference path (``Trackastra.track``): it does
+    NOT extract regionprops features or build a ``TrackingSequence`` (``track`` re-extracts
+    features from the returned arrays). Auto-resolves the standard CTC and simple
+    ``img/`` + ``TRA/`` layouts.
 
     Returns:
-        Normalized images, refined detection masks, image path, GT TRA path.
+        Normalized images, refined detection masks, image folder, GT TRA folder.
     """
-    build = loader if loader is not None else TrackingSequence.from_ctc
-    sequence = build(
-        root=root,
-        ndim=ndim,
-        use_gt=False,
-        detection_folders=(detection_folder,),
-        load_images=True,
-    )
-    image_path, gt_tra = _resolve_inference_paths(Path(root).expanduser())
-    return sequence.images, sequence.segmentations[0].masks, image_path, gt_tra
+    seq_root, image_path, gt_tra = _resolve_inference_paths(Path(root).expanduser())
+    detection_path = _resolve_detection_folder(seq_root, detection_folder)
+    n_frames = len(tuple(detection_path.glob("*.tif")))
+    images = _load_normalized_images(image_path, 0, n_frames, 1, 1, ndim)
+    masks = _load_refined_masks(detection_path, 0, n_frames, 1, 1, ndim)
+    if len(images) != len(masks):
+        raise ValueError("Image and detection frame counts differ")
+    return images, masks, image_path, gt_tra

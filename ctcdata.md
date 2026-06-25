@@ -496,25 +496,29 @@ Goal: a plain raster loader in `io.py` (no `TrackingSequence`, no feature extrac
 `track()` stays the single feature-extracting end-to-end path; `load_ctc_for_inference` is
 DELETED (not reimplemented). No caching.
 
-- [ ] Add a module-level `load_ctc_images_masks(root, detection_folder, ndim, ...) ->
-      (images, masks, image_path, gt_path)` to `io.py` (normalized images + ST-refined
-      detection masks + resolved paths), composed from the existing
-      `_resolve_paths`/`_load_tiffs`/`_ensure_ndim`/`_correct_with_st`/`normalize`. Decision:
-      module-level function over a `@staticmethod` (pure loading concern, scripts import it
-      cleanly).
-- [ ] Reuse that same image/mask-loading core inside `from_ctc` (it then layers matching +
-      lineage + regionprops on top), so there is one place that turns a CTC folder into
-      rasters.
-- [ ] Delete `load_ctc_for_inference` and `_resolve_inference_paths`; repoint `predict.py`,
-      `scripts/check_errors.py`, and tests (`test_datanew.py`, the `test_cli` predict mock) to
-      `load_ctc_images_masks`. (It is no longer a `TrackingSequence` round-trip - that abuse is
-      what motivated this phase.)
-- [ ] Keep `Trackastra.track(imgs, masks)` + the CLI unchanged (the public raw-array path).
-- [ ] Tests + ruff; port `test_load_ctc_for_inference_refines_tra_with_st` to the new function
-      (ST refinement still applies); confirm eval still works end-to-end via `track()` with a
-      single feature extraction (not two).
+- [x] Added module-level `load_ctc_images_masks(root, detection_folder, ndim) ->
+      (images, masks, image_path, gt_tra)` to `io.py` (normalized images + ST-refined
+      detection masks + resolved paths), composed from the new `_load_normalized_images` /
+      `_load_refined_masks` raster helpers. No `TrackingSequence`, no regionprops.
+- [x] `from_ctc` now uses the same `_load_normalized_images` / `_load_refined_masks` helpers
+      for its image + GT/detection mask loading (one place turns a CTC folder into rasters),
+      layering matching + lineage + regionprops on top.
+- [x] Deleted `load_ctc_for_inference`; repointed `predict.py`, `scripts/check_errors.py`,
+      `__init__` export, and tests (`test_datanew.py`, the `test_cli` predict mock) to
+      `load_ctc_images_masks`. KEPT `_resolve_inference_paths` (repurposed to also return the
+      sequence root): it is the GT-TRA resolver, genuinely distinct from `_resolve_paths`
+      (which returns the SEG-preferred `gt_path` + `track_path` for the dataset loader), so it
+      is not redundant - deviation from the original "delete it" checkbox.
+- [x] `Trackastra.track(imgs, masks)` + CLI unchanged (public raw-array path).
+- [x] Tests + ruff: ruff clean; focused suite 72 passed / 1 deselected; ported
+      `test_load_ctc_images_masks_refines_tra_with_st` (ST refinement still applies); parity
+      script still exact (21 + 14). The eval (`predict_and_evaluate`) now extracts features
+      once (in `track()`), not twice - the loader no longer round-trips through `from_ctc`.
 
 Pause after Phase 7 with the verification report; never create commits automatically.
+
+(An intensity-free image-skip optimization for `wrfeat2_no_intensity` - skipping image load /
+normalize and allowing `track(imgs=None)` - is tracked in `newfeats.md`, not here.)
 
 ## Implementation observations
 
@@ -637,10 +641,20 @@ results, blockers, and decisions that revise this plan.
   deselected (test_data + test_datanew + test_train); parity exact (21 + 14). torch-free
   caveat and the `as_torch` removal follow-up are recorded in the Phase 5 checklist above.
 
+- 2026-06-25: Phase 7 executed (not committed). Added `load_ctc_images_masks` to `io.py`
+  (lean raster loader: normalized images + ST-refined masks + paths, no `TrackingSequence`,
+  no regionprops) on top of two new shared helpers `_load_normalized_images` /
+  `_load_refined_masks`, which `from_ctc` now also uses for its image/mask loading. Deleted
+  `load_ctc_for_inference` (it round-tripped through `from_ctc`, extracting features only to
+  discard them, so `track()` extracted twice); kept `_resolve_inference_paths` (now also
+  returns the sequence root) as the GT-TRA resolver, distinct from `_resolve_paths`. Repointed
+  `predict.py` / `check_errors.py` / `__init__` / tests. Verified: ruff clean; 72 passed / 1
+  deselected; parity exact (21 + 14). Eval now extracts features once, not twice.
+
 ## Current handoff state
 
-Phases 2-4 are committed (`7cdcae3`, `5b8a6fb`, `c1675c7`); Phase 5 is done but NOT
-committed. Production data layer is now `io.py` (model + CTC I/O) + `dataset.py` (torch
+Phases 2-6 are committed (`7cdcae3`, `5b8a6fb`, `c1675c7`, `6985c1b`, `b1a0abc`, `a488082`);
+Phase 7 is done but NOT committed. Production data layer is now `io.py` (model + CTC I/O) + `dataset.py` (torch
 dataset/collation); `data.py` removed. Legacy `CTCData` still lives in `_legacy_data.py`
 as the parity oracle (deletion deferred until a real training run confirms the new
 pipeline, together with `augmentations.py` / `scripts/compare_tracking_data.py` /

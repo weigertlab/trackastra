@@ -256,7 +256,7 @@ def test_predict_run_writes_and_evaluates_ctc_output(
 
     monkeypatch.setattr("trackastra.model.Trackastra", FakeTrackastra)
     monkeypatch.setattr(
-        "trackastra.data.load_ctc_for_inference",
+        "trackastra.data.load_ctc_images_masks",
         lambda root, detection_folder, ndim: (
             "images",
             "refined masks",

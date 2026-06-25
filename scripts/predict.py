@@ -186,7 +186,7 @@ def predict_and_evaluate(
     error_report: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
-    from trackastra.data import load_ctc_for_inference
+    from trackastra.data import load_ctc_images_masks
     from trackastra.tracking import graph_to_ctc
 
     rows = []
@@ -195,7 +195,7 @@ def predict_and_evaluate(
         root = Path(root)
         transformer = getattr(model, "transformer", None)
         config = getattr(transformer, "config", {})
-        imgs, masks, image_path, gt_path = load_ctc_for_inference(
+        imgs, masks, image_path, gt_path = load_ctc_images_masks(
             root,
             detection_folder=detection_folder,
             ndim=int(config.get("coord_dim", 2)),

@@ -7,7 +7,7 @@ import pytest
 import torch
 from tifffile import imwrite
 from trackastra.data.dataset import TrackingDataset
-from trackastra.data.io import Segmentation, TrackingSequence, load_ctc_for_inference
+from trackastra.data.io import Segmentation, TrackingSequence, load_ctc_images_masks
 from trackastra.utils import normalize
 
 
@@ -155,7 +155,7 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     assert not sample["assoc_matrix"][1, 2]
 
 
-def test_load_ctc_for_inference_refines_tra_with_st(tmp_path):
+def test_load_ctc_images_masks_refines_tra_with_st(tmp_path):
     sequence = tmp_path / "dataset" / "01"
     gt = tmp_path / "dataset" / "01_GT" / "TRA"
     st = tmp_path / "dataset" / "01_ST" / "SEG"
@@ -172,7 +172,7 @@ def test_load_ctc_for_inference_refines_tra_with_st(tmp_path):
     imwrite(gt / "man_track000.tif", tra)
     imwrite(st / "man_seg000.tif", silver)
 
-    imgs, masks, image_path, gt_path = load_ctc_for_inference(sequence, "TRA")
+    imgs, masks, image_path, gt_path = load_ctc_images_masks(sequence, "TRA")
 
     np.testing.assert_allclose(imgs[0], normalize(image))
     np.testing.assert_array_equal(masks[0], np.maximum(tra, silver))
