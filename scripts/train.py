@@ -297,11 +297,11 @@ class WrappedLightningModule(pl.LightningModule):
         else:
             self.debug = None
 
-    _EDGE_KEYS = ("fn_div", "fp_div")
+    _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
     @staticmethod
     def _edge_error_counts(A, prob, timepoints, mask, gt_division):
-        """Pre-solver association FN/FP counts on DIVISION links.
+        """Pre-solver association FN/FP counts on regular and division links.
 
         Proxy for tracking quality: thresholds the predicted association ``prob``
         against the GT assoc ``A`` on the in-window forward edges (``mask``), before
@@ -319,7 +319,13 @@ class WrappedLightningModule(pl.LightningModule):
 
         fn = gt_pos & ~pred_pos
         fp = pred_pos & ~gt_pos
+        gt_regular = gt_pos & ~gt_division
+        pred_regular = pred_pos & ~pred_division
         return {
+            "fn_num": (fn & gt_regular).sum().float(),
+            "fn_den": gt_regular.sum().float(),
+            "fp_num": (fp & pred_regular).sum().float(),
+            "fp_den": pred_regular.sum().float(),
             "fn_div_num": (fn & gt_division).sum().float(),
             "fn_div_den": (gt_pos & gt_division).sum().float(),
             "fp_div_num": (fp & pred_division).sum().float(),
@@ -472,13 +478,15 @@ class WrappedLightningModule(pl.LightningModule):
                 continue
             rates[key] = float(num / den)
             _emit(f"{stage}_assoc_{key}", rates[key])
-        # division F1 (precision = 1 - fp rate, recall = 1 - fn rate)
+        # F1 from error rates: precision = 1 - fp rate, recall = 1 - fn rate.
+        if "fn" in rates and "fp" in rates:
+            _emit(f"{stage}_assoc_f1", self._error_rate_f1(rates["fn"], rates["fp"]))
         if "fn_div" in rates and "fp_div" in rates:
-            _emit(f"{stage}_assoc_f1_div", self._division_f1(rates["fn_div"], rates["fp_div"]))
+            _emit(f"{stage}_assoc_f1_div", self._error_rate_f1(rates["fn_div"], rates["fp_div"]))
 
     @staticmethod
-    def _division_f1(fn_rate, fp_rate):
-        """F1 on division links from the FN rate (1 - recall) and FP rate (1 - precision)."""
+    def _error_rate_f1(fn_rate, fp_rate):
+        """F1 from the FN rate (1 - recall) and FP rate (1 - precision)."""
         recall, precision = 1.0 - fn_rate, 1.0 - fp_rate
         total = precision + recall
         if total > 0:

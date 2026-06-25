@@ -193,17 +193,17 @@ def test_summarize_tracking_metrics_includes_linking_and_detection():
     assert summary["val_track_f1_div"] == pytest.approx(0.64)
 
 
-def test_division_f1_from_error_rates():
+def test_error_rate_f1():
     # recall = 1 - fn = 0.5, precision = 1 - fp = 0.8 -> F1 = 2*0.4/1.3
-    assert WrappedLightningModule._division_f1(0.5, 0.2) == pytest.approx(
+    assert WrappedLightningModule._error_rate_f1(0.5, 0.2) == pytest.approx(
         2 * 0.8 * 0.5 / (0.8 + 0.5)
     )
     # perfect: no FN, no FP -> F1 = 1
-    assert WrappedLightningModule._division_f1(0.0, 0.0) == pytest.approx(1.0)
+    assert WrappedLightningModule._error_rate_f1(0.0, 0.0) == pytest.approx(1.0)
     # total failure: all missed and all spurious -> precision=recall=0 -> F1 = 0
-    assert WrappedLightningModule._division_f1(1.0, 1.0) == 0.0
+    assert WrappedLightningModule._error_rate_f1(1.0, 1.0) == 0.0
     # undefined component (NaN rate) -> NaN
-    assert WrappedLightningModule._division_f1(float("nan"), 0.2) != WrappedLightningModule._division_f1(
+    assert WrappedLightningModule._error_rate_f1(float("nan"), 0.2) != WrappedLightningModule._error_rate_f1(
         float("nan"), 0.2
     )
 
@@ -233,6 +233,10 @@ def test_edge_error_counts_for_division_links():
     counts = {k: float(v) for k, v in counts.items()}
 
     assert counts == {
+        "fn_num": 0.0,
+        "fn_den": 1.0,  # continuation 0->2
+        "fp_num": 0.0,  # spurious 0->5 is a predicted division edge
+        "fp_den": 1.0,  # predicted regular edge 1->3
         "fn_div_num": 1.0,  # missed daughter 1->4
         "fn_div_den": 2.0,  # two GT division edges
         "fp_div_num": 1.0,  # spurious 0->5
