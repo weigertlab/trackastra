@@ -178,8 +178,18 @@ class BalancedBatchSampler(BatchSampler):
 
     def __iter__(self):
         idx = np.arange(len(self.n_objects))
+        # Yield exactly len(self) batches so Lightning's num_training_batches
+        # (== len of this sampler) matches the realized epoch length. With the
+        # variable batch size, sample_batches() draws num_samples windows with
+        # replacement and the batch count fluctuates below the __len__ estimate;
+        # if the loader stops short, the epoch-end validation modulo
+        # ((batch_idx + 1) % num_training_batches == 0) never fires and the
+        # whole validation loop is silently skipped every epoch.
+        target = len(self)
         batches = self.sample_batches(idx)
-        return iter(batches)
+        while len(batches) < target:
+            batches.extend(self.sample_batches(idx))
+        return iter(batches[:target])
 
     def _estimate_num_batches(self) -> int:
         """Estimate epoch length under variable batch sizes.

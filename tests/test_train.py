@@ -302,6 +302,23 @@ def test_balanced_batch_sampler_partial_batch():
     assert sorted(len(batch) for batch in batches) == [2, 4, 4]
 
 
+def test_balanced_batch_sampler_iter_len_match_variable_batch():
+    # with balance_batch_objects the realized batch count fluctuates below the
+    # __len__ estimate; __iter__ must still yield exactly len(sampler) batches so
+    # Lightning's epoch-end validation modulo fires (otherwise validation is
+    # silently skipped every epoch).
+    dataset = ConcatDataset([_SamplerDataset(40), _SamplerDataset(35)])
+    sampler = BalancedBatchSampler(
+        dataset,
+        batch_size=8,
+        n_pool=2,
+        num_samples=64,
+        balance_batch_objects=True,
+    )
+    for _ in range(5):
+        assert len(list(sampler)) == len(sampler)
+
+
 def test_balanced_distributed_sampler_supports_all_samples():
     dataset = ConcatDataset([_SamplerDataset(7), _SamplerDataset(6)])
     sampler = BalancedDistributedSampler(
