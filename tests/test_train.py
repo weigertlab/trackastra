@@ -130,7 +130,7 @@ def test_parse_max_neighbors_defaults_to_16(monkeypatch):
 
     args = parse_train_args()
 
-    assert args.max_neighbors == 16
+    assert args.max_neighbors == [16]
 
 
 def test_summarize_tracking_metrics_includes_linking_and_detection():
@@ -141,14 +141,70 @@ def test_summarize_tracking_metrics_includes_linking_and_detection():
             "AOGM": [4.0, 2.0, 3.0],
             "LNK": [0.7, 0.9, 0.8],
             "DET": [0.6, 1.0, 0.8],
+            # 02 has no divisions -> NaN div rate, nanmean skips it
+            "fn_div": [0.5, np.nan, np.nan],
+            "fp_div": [0.2, np.nan, np.nan],
+            "f1_div": [0.64, np.nan, np.nan],
         }
     )
 
-    assert _summarize_tracking_metrics(metrics) == {
-        "val_TRA": pytest.approx(0.9),
-        "val_AOGM": pytest.approx(3.0),
-        "val_LNK": pytest.approx(0.8),
-        "val_DET": pytest.approx(0.8),
+    summary = _summarize_tracking_metrics(metrics)
+    assert summary["val_TRA"] == pytest.approx(0.9)
+    assert summary["val_AOGM"] == pytest.approx(3.0)
+    assert summary["val_DET"] == pytest.approx(0.8)
+    # LNK is logged as its error (1 - LNK), not the saturating score
+    assert "val_LNK" not in summary
+    assert summary["val_LNK_ERR"] == pytest.approx(0.2)
+    # only division links are logged, under the post-solver "track" prefix
+    assert summary["val_track_fn_div"] == pytest.approx(0.5)
+    assert summary["val_track_fp_div"] == pytest.approx(0.2)
+    assert summary["val_track_f1_div"] == pytest.approx(0.64)
+
+
+def test_division_f1_from_error_rates():
+    # recall = 1 - fn = 0.5, precision = 1 - fp = 0.8 -> F1 = 2*0.4/1.3
+    assert WrappedLightningModule._division_f1(0.5, 0.2) == pytest.approx(
+        2 * 0.8 * 0.5 / (0.8 + 0.5)
+    )
+    # perfect: no FN, no FP -> F1 = 1
+    assert WrappedLightningModule._division_f1(0.0, 0.0) == pytest.approx(1.0)
+    # total failure: all missed and all spurious -> precision=recall=0 -> F1 = 0
+    assert WrappedLightningModule._division_f1(1.0, 1.0) == 0.0
+    # undefined component (NaN rate) -> NaN
+    assert WrappedLightningModule._division_f1(float("nan"), 0.2) != WrappedLightningModule._division_f1(
+        float("nan"), 0.2
+    )
+
+
+def test_edge_error_counts_for_division_links():
+    from trackastra.utils import blockwise_sum_batched
+
+    # t0: nodes 0,1 ; t1: nodes 2,3,4,5. GT: 0->2 (continuation), 1->{3,4} (division)
+    tp = torch.tensor([[0, 0, 1, 1, 1, 1]])
+    A = torch.zeros((1, 6, 6))
+    A[0, 0, 2] = A[0, 1, 3] = A[0, 1, 4] = 1.0
+    # prediction: keep 0->2 and 1->3, MISS 1->4 (FN div), add spurious 0->5 (FP);
+    # 0->{2,5} makes node 0 a predicted division, so the FP lands in fp_div
+    prob = torch.zeros((1, 6, 6))
+    prob[0, 0, 2] = prob[0, 1, 3] = prob[0, 0, 5] = 0.9
+    prob[0, 1, 4] = 0.1
+
+    dt = tp.unsqueeze(1) - tp.unsqueeze(2)
+    mask = ((dt > 0) & (dt <= 2)).float()
+    b1 = blockwise_sum_batched(A, tp, dim=-1, reduce="sum")
+    b2 = blockwise_sum_batched(A, tp, dim=-2, reduce="sum")
+    block_sum = A * (b1 + b2)
+
+    counts = WrappedLightningModule._edge_error_counts(
+        A, prob, tp, mask, block_sum > 2
+    )
+    counts = {k: float(v) for k, v in counts.items()}
+
+    assert counts == {
+        "fn_div_num": 1.0,  # missed daughter 1->4
+        "fn_div_den": 2.0,  # two GT division edges
+        "fp_div_num": 1.0,  # spurious 0->5
+        "fp_div_den": 2.0,  # two predicted division edges (0->2, 0->5)
     }
 
 

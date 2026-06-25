@@ -210,6 +210,7 @@ def log_tracking_metrics(
             max_distance=max_distance,
             overwrite=True,
             print_results=False,
+            link_breakdown=True,
         )
 
 
@@ -220,10 +221,16 @@ def _is_tracking_epoch(current_epoch: int, frequency: int) -> bool:
 
 def _summarize_tracking_metrics(metrics) -> dict[str, float]:
     movies = metrics[metrics["movie"] != "Mean"]
-    return {
-        f"val_{name}": float(movies[name].mean())
-        for name in ("TRA", "AOGM", "LNK", "DET")
+    summary = {
+        f"val_{name}": float(movies[name].mean()) for name in ("TRA", "AOGM", "DET")
     }
+    # LNK saturates near 1; log the error (1 - LNK) so late-training gains stay visible
+    summary["val_LNK_ERR"] = float(1.0 - movies["LNK"].mean())
+    # post-solver division-link FP/FN/F1; nanmean so a division-free movie omits it
+    for name in ("fn_div", "fp_div", "f1_div"):
+        if name in movies and movies[name].notna().any():
+            summary[f"val_track_{name}"] = float(np.nanmean(movies[name]))
+    return summary
 
 
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
@@ -248,9 +255,14 @@ class WrappedLightningModule(pl.LightningModule):
         div_upweight: float = 20,
         debug_dir: str | None = None,
         grad_log_every_n_epochs: int = 10,
+        log_edge_rates: bool = True,
     ):
         super().__init__()
         self.grad_log_every_n_epochs = grad_log_every_n_epochs
+        # pre-solver association FP/FN by link type (regular vs division); accumulated
+        # per epoch and pooled across DDP ranks at epoch end (see _log_edge_error_rates)
+        self.log_edge_rates = log_edge_rates
+        self._edge_counts: dict[str, dict] = {}
 
         self.model = model
         self.causal_norm = causal_norm
@@ -284,6 +296,35 @@ class WrappedLightningModule(pl.LightningModule):
             self.debug.dir.mkdir(parents=True, exist_ok=True)
         else:
             self.debug = None
+
+    _EDGE_KEYS = ("fn_div", "fp_div")
+
+    @staticmethod
+    def _edge_error_counts(A, prob, timepoints, mask, gt_division):
+        """Pre-solver association FN/FP counts on DIVISION links.
+
+        Proxy for tracking quality: thresholds the predicted association ``prob``
+        against the GT assoc ``A`` on the in-window forward edges (``mask``), before
+        candidate pruning and greedy/ILP solving. Returns raw numerator/denominator
+        counts (not rates) so they pool cleanly across steps and DDP ranks.
+        """
+        m = mask.bool()
+        gt_pos = (A > 0.5) & m
+        pred_pos = (prob >= 0.5) & m
+        # mark predicted edges leaving a predicted division (source out-degree >= 2)
+        pred = pred_pos.to(A.dtype)
+        row = blockwise_sum_batched(pred, timepoints, dim=-1, reduce="sum")
+        col = blockwise_sum_batched(pred, timepoints, dim=-2, reduce="sum")
+        pred_division = pred * (row + col) > 2
+
+        fn = gt_pos & ~pred_pos
+        fp = pred_pos & ~gt_pos
+        return {
+            "fn_div_num": (fn & gt_division).sum().float(),
+            "fn_div_den": (gt_pos & gt_division).sum().float(),
+            "fp_div_num": (fp & pred_division).sum().float(),
+            "fp_div_den": (pred_pos & pred_division).sum().float(),
+        }
 
     def _common_step(self, batch):
         feats = batch["features"]
@@ -365,6 +406,22 @@ class WrappedLightningModule(pl.LightningModule):
         else:
             loss = _reduce_matrix_loss(loss_before_reduce, mask)
 
+        edge_counts = None
+        if self.log_edge_rates:
+            with torch.no_grad():
+                if self.causal_norm != "none":
+                    prob = blockwise_causal_norm_batched(
+                        A_pred.float(),
+                        timepoints,
+                        mode=self.causal_norm,
+                        mask_invalid=mask_invalid,
+                    )
+                else:
+                    prob = torch.sigmoid(A_pred.float())
+                edge_counts = self._edge_error_counts(
+                    A, prob, timepoints, mask, division_tracks
+                )
+
         # print(padding_mask.float().mean())
         return dict(
             loss=loss,
@@ -374,7 +431,67 @@ class WrappedLightningModule(pl.LightningModule):
             mask=mask,
             mask_time=mask_time,
             mask_valid=mask_valid,
+            edge_counts=edge_counts,
         )
+
+    def _accumulate_edge_counts(self, stage, counts):
+        if counts is None:
+            return
+        acc = self._edge_counts.setdefault(stage, {})
+        for key, value in counts.items():
+            acc[key] = acc[key] + value if key in acc else value
+
+    def _log_edge_error_rates(self, stage):
+        """Pool per-epoch num/den across DDP ranks and log {stage}_assoc_* rates.
+
+        all_gather is called for every key on every rank (fixed order, zeros when a
+        rank saw no such edge) so an epoch with no divisions on one rank cannot
+        deadlock the collective; the rank-0 log skips keys whose pooled den is 0.
+        """
+        if not self.log_edge_rates:
+            return
+        acc = self._edge_counts.get(stage, {})
+        zero = torch.zeros((), device=self.device)
+
+        def _emit(name, value):
+            self.log(
+                name,
+                value,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=False,
+                rank_zero_only=True,
+                batch_size=1,
+            )
+
+        rates = {}
+        for key in self._EDGE_KEYS:
+            num = self.all_gather(acc.get(f"{key}_num", zero)).sum()
+            den = self.all_gather(acc.get(f"{key}_den", zero)).sum()
+            if den.item() == 0:
+                continue
+            rates[key] = float(num / den)
+            _emit(f"{stage}_assoc_{key}", rates[key])
+        # division F1 (precision = 1 - fp rate, recall = 1 - fn rate)
+        if "fn_div" in rates and "fp_div" in rates:
+            _emit(f"{stage}_assoc_f1_div", self._division_f1(rates["fn_div"], rates["fp_div"]))
+
+    @staticmethod
+    def _division_f1(fn_rate, fp_rate):
+        """F1 on division links from the FN rate (1 - recall) and FP rate (1 - precision)."""
+        recall, precision = 1.0 - fn_rate, 1.0 - fp_rate
+        total = precision + recall
+        if total > 0:
+            return 2.0 * precision * recall / total
+        if recall == recall and precision == precision:  # both finite (both 0)
+            return 0.0
+        return float("nan")
+
+    def on_train_epoch_start(self):
+        self._edge_counts["train"] = {}
+
+    def on_validation_epoch_start(self):
+        self._edge_counts["val"] = {}
 
     def checkpoint_path(self, logdir):
         path = Path(logdir) / "checkpoints" / "last.ckpt"
@@ -439,6 +556,8 @@ class WrappedLightningModule(pl.LightningModule):
             print("NaN loss, skipping")
             return None
 
+        self._accumulate_edge_counts("train", out["edge_counts"])
+
         if self.debug is not None and loss.item() > 0.1 and self.current_epoch > 10:
             ep = self.current_epoch
 
@@ -482,6 +601,8 @@ class WrappedLightningModule(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
+        self._log_edge_error_rates("train")
+
         # flush the accumulated (B, N) pairs as a single wandb scatter plot
         bn = self._bn_log
         self._bn_log = []
@@ -525,6 +646,8 @@ class WrappedLightningModule(pl.LightningModule):
             batch_size=batch["coords"].shape[0],
         )
 
+        self._accumulate_edge_counts("val", out["edge_counts"])
+
         # self.val_loss.append(loss)
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
@@ -535,6 +658,8 @@ class WrappedLightningModule(pl.LightningModule):
         # skip if sanity checking
         if self.trainer.sanity_checking:
             return
+
+        self._log_edge_error_rates("val")
 
         # val_loss = torch.stack(self.val_loss).mean()
 
@@ -561,13 +686,18 @@ class WrappedLightningModule(pl.LightningModule):
                     max_distance=self.model.config["max_distance"],
                 )
                 values = _summarize_tracking_metrics(metrics)
-                print(
+                msg = (
                     f"[epoch {self.current_epoch}] "
                     f"val_TRA={values['val_TRA']:.4f} "
                     f"val_AOGM={values['val_AOGM']:.4f} "
-                    f"val_LNK={values['val_LNK']:.4f} "
+                    f"val_LNK_ERR={values['val_LNK_ERR']:.4f} "
                     f"val_DET={values['val_DET']:.4f}"
                 )
+                for name in ("fn_div", "fp_div", "f1_div"):
+                    key = f"val_track_{name}"
+                    if key in values:
+                        msg += f" {key}={values[key]:.4f}"
+                print(msg)
                 self.log_dict(
                     values,
                     on_step=False,
@@ -854,11 +984,6 @@ def _init_wandb(project, name, config, save_dir):
 
 def train(args):
     args.seed = seed(args.seed)
-    if args.max_detections is not None and args.max_tokens is not None:
-        raise ValueError("Specify only --max_detections; --max_tokens is deprecated")
-    if args.max_detections is None:
-        args.max_detections = args.max_tokens
-    args.max_tokens = None
     args.feature_embed_mode = _resolve_feature_embed_mode(
         args.features, getattr(args, "feature_embed_mode", None)
     )
@@ -1207,12 +1332,6 @@ def parse_train_args():
     parser.add_argument("--num_workers", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_detections", type=int, default=None)
-    parser.add_argument(
-        "--max_tokens",
-        type=int,
-        default=None,
-        help="deprecated alias for --max_detections",
-    )
     parser.add_argument("--delta_cutoff", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
@@ -1227,7 +1346,7 @@ def parse_train_args():
     parser.add_argument(
         "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
     )
-    parser.add_argument("--max_neighbors", type=int, default=16)
+    parser.add_argument("--max_neighbors", type=int, nargs="+", default=[16])
     parser.add_argument("--logit_norm", type=str2bool, default=False)
     parser.add_argument(
         "--assoc_head", choices=["bilinear", "multichannel"], default="bilinear"

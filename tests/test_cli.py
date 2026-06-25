@@ -112,7 +112,7 @@ def test_predict_parser_reads_test_movies_from_config(tmp_path, predict_script):
 
     assert args.input_test == [Path("movie_a"), Path("movie_b")]
     assert args.detection_folders == ["SEG"]
-    assert args.max_distance == 128
+    assert args.max_distance is None
     assert predict_script.parse_args(
         ["-m", "model", "-c", str(config), "-f"]
     ).overwrite
@@ -230,6 +230,38 @@ def test_error_viz_renders_wrong_semantic_once():
     )
 
     assert edges == [{"t": 1, "p0": (1, 2), "p1": (3, 4), "cls": "ws"}]
+
+
+def test_link_type_breakdown_division_rates(predict_script):
+    pytest.importorskip("traccuracy")
+    from traccuracy._tracking_graph import EdgeFlag
+
+    # gt: a->b (regular), c->{d,e} (division); the missed daughter c->e is FN
+    gt = nx.DiGraph()
+    gt.add_edges_from([("a", "b"), ("c", "d"), ("c", "e")])
+    # pred: a->b, c->d (regular), f->{g,h} (false division); the extra f->h is FP
+    pred = nx.DiGraph()
+    pred.add_edges_from([("a", "b"), ("c", "d"), ("f", "g"), ("f", "h")])
+
+    class G:
+        def __init__(self, digraph, flagged):
+            self.graph = digraph
+            self.edges = list(digraph.edges)
+            self._flagged = flagged
+
+        def get_edges_with_flag(self, flag):
+            return self._flagged.get(flag, [])
+
+    matched = SimpleNamespace(
+        gt_graph=G(gt, {EdgeFlag.CTC_FALSE_NEG: [("c", "e")]}),
+        pred_graph=G(pred, {EdgeFlag.CTC_FALSE_POS: [("f", "h")]}),
+    )
+
+    assert predict_script.link_type_breakdown(matched) == {
+        "fn_div": 0.5,  # one of two GT division edges missed
+        "fp_div": 0.5,  # one of two predicted division edges is spurious
+        "f1_div": 0.5,  # precision 0.5, recall 0.5 -> F1 0.5
+    }
 
 
 def test_predict_run_writes_and_evaluates_ctc_output(

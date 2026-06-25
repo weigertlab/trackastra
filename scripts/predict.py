@@ -44,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode", choices=("greedy", "greedy_nodiv", "ilp"), default="greedy"
     )
-    parser.add_argument("--max-distance", type=int, default=128)
+    parser.add_argument("--max-distance", type=int, default=None)
     parser.add_argument("-f", "--overwrite", action="store_true")
     parser.add_argument(
         "--errormovie",
@@ -138,6 +138,41 @@ def evaluate_ctc(
     return (values, matched) if return_matched else values
 
 
+def link_type_breakdown(matched) -> dict[str, float]:
+    """Per-movie FN/FP/F1 on DIVISION links (source out-degree >= 2).
+
+    Uses only the matched GT/pred graphs (CTC edge flags + node out-degree); no model
+    internals. Rates are NaN when the movie has no division edges, so a division-free
+    movie does not read as a perfect division score (callers should nanmean).
+    """
+    from traccuracy._tracking_graph import EdgeFlag
+
+    gt, pred = matched.gt_graph, matched.pred_graph
+
+    def n_division(graph, edges):
+        return sum(1 for source, _target in edges if graph.graph.out_degree(source) >= 2)
+
+    gt_div = n_division(gt, gt.edges)
+    pred_div = n_division(pred, pred.edges)
+    fn_div = n_division(gt, gt.get_edges_with_flag(EdgeFlag.CTC_FALSE_NEG))
+    fp_div = n_division(pred, pred.get_edges_with_flag(EdgeFlag.CTC_FALSE_POS))
+
+    def rate(num, den):
+        return float(num) / den if den else float("nan")
+
+    fn, fp = rate(fn_div, gt_div), rate(fp_div, pred_div)
+    # division F1 (precision = 1 - fp rate, recall = 1 - fn rate)
+    recall, precision = 1.0 - fn, 1.0 - fp
+    total = precision + recall
+    if total > 0:
+        f1 = 2.0 * precision * recall / total
+    elif recall == recall and precision == precision:  # both finite (both 0)
+        f1 = 0.0
+    else:
+        f1 = float("nan")
+    return {"fn_div": fn, "fp_div": fp, "f1_div": f1}
+
+
 def _write_error_report(
     graph, details, matched, output_path: Path, ndim: int, mode: str
 ) -> None:
@@ -179,11 +214,12 @@ def predict_and_evaluate(
     outdir: Path,
     model_name: str,
     mode: str = "greedy",
-    max_distance: int = 128,
+    max_distance: int | None = None,
     overwrite: bool = False,
     print_results: bool = True,
     errormovie: bool = False,
     error_report: bool = False,
+    link_breakdown: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
     from trackastra.data import load_ctc_images_masks
@@ -221,8 +257,11 @@ def predict_and_evaluate(
         tracked = model.track(imgs, masks, **track_kwargs)
         graph, masks, details = tracked if error_report else (*tracked, None)
         graph_to_ctc(graph, masks, outdir=output_path)
-        evaluated = evaluate_ctc(gt_path, output_path, return_matched=error_report)
-        values, matched = evaluated if error_report else (evaluated, None)
+        need_matched = error_report or link_breakdown
+        evaluated = evaluate_ctc(gt_path, output_path, return_matched=need_matched)
+        values, matched = evaluated if need_matched else (evaluated, None)
+        if link_breakdown and matched is not None:
+            values = {**values, **link_type_breakdown(matched)}
 
         if error_report:
             try:
