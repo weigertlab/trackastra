@@ -287,7 +287,8 @@ collation). Note: a package-local `trackastra/data/io.py` does not shadow the st
 
 `io.py` (torch-free):
 
-- `DetectionFrame`, `DetectionSeries`, `TrackingSequence`, `_immutable_array`.
+- `Segmentation` (flat), `TrackingSequence`, `_immutable_array`. (`DetectionFrame` and
+  `DetectionSeries` are merged into `Segmentation` - see the data-model decision below.)
 - `TrackingSequence.from_ctc`, `_load_ctc_sequence`, and the loading helpers
   (`_resolve_paths`, `_resolve_detection_folder`, `_load_tiffs`, `_ensure_ndim`,
   `_correct_with_st`, `_filter_tracks`, `_isolated_tracks`, `_lineage_arrays`).
@@ -309,32 +310,45 @@ the wrapper reads them off the returned object instead of re-resolving. Low prio
 
 `dataset.py` (torch; imports from `io.py`):
 
-- `TrackingData` and its runtime helpers (`_concat_frames`, `_association_target`,
+- `TrackingDataset` and its runtime helpers (`_association_target`,
   `_sample_neighborhood_indices`, `_sample_detection_keep_indices`, `_subset_features`,
-  `_wr_augmenter`, `_division_count`).
+  `_wr_augmenter`, `_division_count`). `_concat_frames` is dropped - a window becomes a
+  `timepoints`-range slice of the flat `Segmentation` arrays (`searchsorted`).
 - `pad_tensor`, `densify_assoc`, `collate_sequence_padding`.
 - `association_distances`, `warn_association_distances`.
 
-Data-model decision (confirmed 2026-06-25): KEEP the three-level model. The common
-training case is one image folder + multiple segmentation folders + one common GT
+Data-model decision (confirmed 2026-06-25): KEEP a two-level model (sequence -> flat
+segmentation), one image folder + multiple segmentation folders + one common GT. The
+common training case has several segmentation folders for one movie
 (`scripts/configs/general2d.yaml` uses `detection_folders: [TRA, RES]`), so multiple
-mid-level objects per sequence is real and intended. `images` and `lineage` stay shared on
-`TrackingSequence`; `masks` and per-frame detections stay per mid-level object. Do NOT
-collapse the hierarchy; do NOT move `images`/`masks` onto `DetectionFrame` (it stays
-strictly per-detection). Per-series GT / differing images per mask are out of scope (use
-separate `TrackingSequence`s if ever needed). (`general2d.yaml` itself is an older config:
-it uses the removed `patch_regionprops` mode and absent data dirs, so it is not maintained
-for the new pipeline; it only documents the multi-segmentation intent.)
+segmentations per sequence is real and intended. `images` and `lineage` stay shared on
+`TrackingSequence`; `masks` and the detections stay per `Segmentation`. Do NOT collapse the
+sequence/segmentation levels into one, and `images`/`masks` are dense `(T, H, W)` rasters
+stored at the level where they are invariant (image on the sequence, masks per
+segmentation) - never per detection. Per-series GT / differing images per mask are out of
+scope (use separate `TrackingSequence`s if ever needed). (`general2d.yaml` itself is an
+older config: it uses the removed `patch_regionprops` mode and absent data dirs, so it is
+not maintained for the new pipeline; it only documents the multi-segmentation intent.)
 
-Class renames (resolve the `Sequence`/`Series` clash and torch idiom):
+Final class set (confirmed 2026-06-25):
 
-- `TrackingSequence` -> keep.
-- `DetectionSeries` -> `Segmentation` (each is one segmentation folder of the movie;
-  `sequence.segmentations[i].masks`). Neutral alternative: `DetectionSource`.
-- `DetectionFrame` -> keep.
+- `TrackingSequence` (keep): `root, ndim, segmentations, lineage_relation,
+  lineage_parents, images`.
+- `Segmentation` (new, replaces `DetectionSeries` + `DetectionFrame`): a single
+  segmentation of the movie stored as flat columnar arrays - `coords, labels, timepoints
+  (sorted), features (dict), track_indices`, plus optional `masks (T, H, W)`. The former
+  per-frame `DetectionFrame` grouping becomes transient locals during `from_ctc`
+  extraction, then concatenated into these flat arrays. Name avoids "Series" (no clash
+  with `Sequence`).
+- `DetectionFrame` -> removed (merged into the flat `Segmentation`).
 - `TrackingData` -> `TrackingDataset` (idiomatic `torch.utils.data.Dataset` subclass).
 
-- [ ] Apply the class renames above across the package, scripts, and tests.
+- [ ] Merge `DetectionFrame` + `DetectionSeries` into the flat `Segmentation` class
+      (columnar arrays + sorted `timepoints` + optional `masks`); update `from_ctc`
+      assembly and `TrackingDataset` windowing (timepoint-range slice, drop
+      `_concat_frames`); update the tests that construct these directly.
+- [ ] Apply the remaining renames (`TrackingData` -> `TrackingDataset`) across the
+      package, scripts, and tests.
 - [ ] Keep `from_ctc` as the single canonical loader (no new class); confirm both
       reference layouts resolve from root alone for dataset (`load_images=False`) and
       prediction (`load_images=True`). Optionally DRY the inference path resolution.
