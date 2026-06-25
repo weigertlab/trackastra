@@ -182,6 +182,15 @@ class TrackingSequence:
         match_max_distance: float = 16,
         load_images: bool = False,
     ) -> TrackingSequence:
+        """Load a CTC-like sequence into immutable detections and lineage metadata.
+
+        Standard CTC layouts are resolved from the movie root (for example
+        ``01`` with ``01_GT/TRA`` and optional ``01_ST/SEG``), as are simple
+        ``img/`` + ``TRA/`` layouts. Ground-truth ``*_GT/TRA`` masks are refined
+        with ``np.maximum(TRA, ST)`` when the matching ``*_ST/SEG`` folder exists.
+        Detection folders also use standard CTC resolution, so requesting
+        ``detection_folders=("SEG",)`` uses ``*_ST/SEG`` when present.
+        """
         return _load_ctc_sequence(
             cls,
             root,
@@ -239,11 +248,17 @@ def _resolve_paths(
 
 
 def _resolve_detection_folder(root: Path, folder: str | Path) -> Path:
+    """Resolve detection masks, including standard CTC ``*_ST/SEG`` folders."""
     folder = Path(folder)
     if folder.is_absolute():
         guesses = (folder,)
     else:
-        guesses = (root / folder, Path(f"{root}_{folder}"), Path(f"{root}_GT") / folder)
+        guesses = (
+            root / folder,
+            Path(f"{root}_{folder}"),
+            Path(f"{root}_ST") / folder,
+            Path(f"{root}_GT") / folder,
+        )
     for guess in guesses:
         if guess.exists():
             return guess
@@ -580,7 +595,9 @@ def load_ctc_images_masks(
     Lean raster loader for the image-based inference path (``Trackastra.track``): it does
     NOT extract regionprops features or build a ``TrackingSequence`` (``track`` re-extracts
     features from the returned arrays). Auto-resolves the standard CTC and simple
-    ``img/`` + ``TRA/`` layouts.
+    ``img/`` + ``TRA/`` layouts. ``TRA`` masks are refined with the matching ``*_ST/SEG``
+    folder when it exists, and requesting ``detection_folder="SEG"`` resolves to
+    ``*_ST/SEG`` in standard CTC layouts.
 
     Returns:
         Normalized images, refined detection masks, image folder, GT TRA folder.

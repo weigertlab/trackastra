@@ -7,9 +7,20 @@ longer matches the dense model numerically. These tests validate the trackastra-
 kNN graph construction and that the model runs end to end in sparse mode.
 """
 
+import pytest
 import torch
 from trackastra.model.model import TrackingTransformer
 from trackastra.model.sparse_attn import build_knn_index
+
+
+def _sparse_inputs(B=2, N=40, coord_dim=2, seed=0):
+    torch.manual_seed(seed)
+    t = torch.randint(0, 4, (B, N, 1)).float()
+    yx = 50 * torch.rand((B, N, coord_dim))
+    coords = torch.cat([t, yx], dim=-1)
+    padding_mask = torch.zeros(B, N, dtype=torch.bool)
+    padding_mask[:, -3:] = True
+    return coords, padding_mask
 
 
 def test_build_knn_index_sentinels():
@@ -56,4 +67,56 @@ def test_sparse_model_runs_finite():
     ).eval()
     with torch.no_grad():
         a = model(coords, padding_mask=padding_mask)
+    assert torch.isfinite(a).all()
+
+
+def test_max_neighbors_normalized_to_pair():
+    # a scalar k becomes the fixed pair (k, k)
+    m = TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=8)
+    assert m.max_neighbors == (8, 8)
+    assert m.config["max_neighbors"] == (8, 8)
+    # a range is preserved as (lo, hi)
+    m = TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=(3, 16))
+    assert m.max_neighbors == (3, 16)
+    # invalid pairs are rejected early
+    for bad in [(0, 4), (16, 3), (1, 2, 3)]:
+        with pytest.raises(ValueError):
+            TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=bad)
+
+
+def test_sparse_model_runs_with_sampled_k():
+    coords, padding_mask = _sparse_inputs()
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=2,
+        num_decoder_layers=2,
+        dropout=0.0,
+        window=6,
+        max_distance=40,
+        attn_mode="sparse",
+        max_neighbors=(3, 16),
+    )
+    # training samples K~[lo, hi] per forward; eval uses hi. Both must stay finite.
+    model.train()
+    a_train = model(coords, padding_mask=padding_mask)
+    assert torch.isfinite(a_train).all()
+    model.eval()
+    with torch.no_grad():
+        a_eval = model(coords, padding_mask=padding_mask)
+    assert torch.isfinite(a_eval).all()
+
+
+def test_max_neighbors_roundtrips_through_folder(tmp_path):
+    model = TrackingTransformer(
+        coord_dim=2, attn_mode="sparse", max_neighbors=(3, 16)
+    ).eval()
+    model.save(tmp_path)
+    # yaml serializes the pair as a list; reload must normalize it back to (3, 16).
+    loaded = TrackingTransformer.from_folder(tmp_path).eval()
+    assert loaded.max_neighbors == (3, 16)
+    coords, padding_mask = _sparse_inputs()
+    with torch.no_grad():
+        a = loaded(coords, padding_mask=padding_mask)
     assert torch.isfinite(a).all()

@@ -81,16 +81,17 @@ def test_model():
 def test_sparse_attention_defaults_to_16_neighbors():
     model = TrackingTransformer(coord_dim=2, attn_mode="sparse")
 
-    assert model.max_neighbors == 16
-    assert model.config["max_neighbors"] == 16
+    # a scalar default is normalized to the fixed pair (16, 16)
+    assert model.max_neighbors == (16, 16)
+    assert model.config["max_neighbors"] == (16, 16)
 
 
 def test_explicit_max_neighbors_overrides_default():
     """A saved config with max_neighbors=64 must keep 64, not the new default."""
     model = TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=64)
 
-    assert model.max_neighbors == 64
-    assert model.config["max_neighbors"] == 64
+    assert model.max_neighbors == (64, 64)
+    assert model.config["max_neighbors"] == (64, 64)
 
 
 def test_build_knn_index_excludes_cutoff_and_padding_with_minus_one():

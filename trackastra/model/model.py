@@ -3,6 +3,7 @@
 import logging
 import math
 from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -322,7 +323,7 @@ class TrackingTransformer(torch.nn.Module):
         ] = "quiet_softmax",
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
-        max_neighbors: int = 16,
+        max_neighbors: int | Sequence[int] = 16,
         logit_norm: bool = True,
         assoc_head: Literal["bilinear", "multichannel"] = "bilinear",
         assoc_channels: int = 8,
@@ -335,6 +336,18 @@ class TrackingTransformer(torch.nn.Module):
             raise ValueError(
                 f"Unsupported architecture_version={architecture_version}; expected 1 or 2"
             )
+
+        # Normalize max_neighbors to a (lo, hi) pair. A single k becomes (k, k)
+        # (fixed K); a (k1, k2) pair samples K~Uniform[k1, k2] per forward during
+        # sparse training, while eval/inference always uses the larger hi.
+        mn = (max_neighbors,) if isinstance(max_neighbors, int) else tuple(max_neighbors)
+        if len(mn) == 1:
+            mn = (mn[0], mn[0])
+        if len(mn) != 2 or not (1 <= mn[0] <= mn[1]):
+            raise ValueError(
+                f"max_neighbors must be k or (k1, k2) with 1<=k1<=k2, got {max_neighbors}"
+            )
+        max_neighbors = mn
 
         self.config = dict(
             coord_dim=coord_dim,
@@ -489,15 +502,18 @@ class TrackingTransformer(torch.nn.Module):
         # Precompute the layer-independent attention context once and share it
         # across all encoder/decoder layers (depends only on coords/padding).
         # dense: a single additive (B, nH, N, N) mask. sparse: a fixed kNN
-        # neighbour list (-1 padded), shared across all layers.
+        # neighbour list (-1 padded), shared across all layers. K is sampled in
+        # [lo, hi] per forward during training (augmentation), hi at eval.
         attn_mask = None
         nbr_idx = None
         if self.attn_mode == "sparse":
+            lo, hi = self.max_neighbors
+            K = int(torch.randint(lo, hi + 1, (1,)).item()) if self.training else hi
             nbr_idx = build_knn_index(
                 coords,
                 padding_mask,
                 self.max_distance,
-                self.max_neighbors,
+                K,
             )
         elif self.encoder:
             a0 = self.encoder[0].attn

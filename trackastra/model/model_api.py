@@ -280,7 +280,9 @@ class Trackastra:
             config["max_distance"], max_distance
         )
         if max_neighbors is None:
-            max_neighbors = config["max_neighbors"]
+            # config["max_neighbors"] is a (lo, hi) pair; the tracking candidate
+            # graph uses the larger hi (inference always takes the larger one).
+            max_neighbors = max(config["max_neighbors"])
 
         candidate_graph = build_graph(
             nodes=nodes,

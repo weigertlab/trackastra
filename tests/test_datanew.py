@@ -170,6 +170,7 @@ def test_load_ctc_images_masks_refines_tra_with_st(tmp_path):
     silver[3:6, 3:6] = 1
     imwrite(sequence / "t000.tif", image)
     imwrite(gt / "man_track000.tif", tra)
+    (gt / "man_track.txt").write_text("1 0 0 0\n")
     imwrite(st / "man_seg000.tif", silver)
 
     imgs, masks, image_path, gt_path = load_ctc_images_masks(sequence, "TRA")
@@ -178,6 +179,17 @@ def test_load_ctc_images_masks_refines_tra_with_st(tmp_path):
     np.testing.assert_array_equal(masks[0], np.maximum(tra, silver))
     assert image_path == sequence
     assert gt_path == gt
+
+    _, seg_masks, seg_image_path, seg_gt_path = load_ctc_images_masks(sequence, "SEG")
+    np.testing.assert_array_equal(seg_masks[0], silver)
+    assert seg_image_path == sequence
+    assert seg_gt_path == gt
+
+    loaded = TrackingSequence.from_ctc(
+        sequence, detection_folders=("SEG",), n_workers=1
+    )
+    assert loaded.segmentations[0].name == "SEG"
+    assert loaded.segmentations[0].labels.tolist() == [1]
 
 
 def test_load_images_flag_attaches_arrays_and_survives_pickle(tmp_path):
