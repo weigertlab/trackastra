@@ -266,9 +266,15 @@ Steps:
 - [x] Run the full relevant test suite and final real-data smoke tests.
 - [ ] Delete `_legacy_data.py` and the temporary comparison script (deferred: kept one
       review cycle as the parity oracle; delete after a real training run confirms the
-      new pipeline).
+      new pipeline). Also delete `trackastra/data/augmentations.py` and
+      `tests/test_augmentations.py` at the same time: the kornia image-based
+      `AugmentationPipeline`/`RandomCrop` is dead in the new pipeline (only `_legacy_data`
+      and that test use it; new WR augmentation lives in `wrfeat.py` via `_wr_augmenter`),
+      so it can only go once `_legacy_data` is removed. Drop the stale `augmentations`
+      comment in `__init__.py` too.
 - [x] Confirm no production import or configuration references legacy behavior
-      (`_legacy_data` is imported only by `scripts/compare_tracking_data.py`).
+      (`_legacy_data` is imported only by `scripts/compare_tracking_data.py`; the dead
+      `augmentations.py` only by `_legacy_data.py` and `tests/test_augmentations.py`).
 
 Pause after Phase 4 with the final verification report; never create commits automatically.
 
