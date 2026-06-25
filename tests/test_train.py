@@ -19,11 +19,8 @@ from scripts.train import (
 )
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
-from trackastra.data.data import (
-    DetectionFrame,
-    DetectionSeries,
-    TrackingData,
-    TrackingSequence,
+from trackastra.data.dataset import (
+    TrackingDataset,
     collate_sequence_padding,
 )
 from trackastra.data.distributed import (
@@ -31,6 +28,7 @@ from trackastra.data.distributed import (
     BalancedDataModule,
     BalancedDistributedSampler,
 )
+from trackastra.data.io import Segmentation, TrackingSequence
 from trackastra.model import TrackingTransformer
 
 # Mark all tests in this module as requiring training dependencies
@@ -66,24 +64,23 @@ def test_tracking_data_cpu_training_smoke(features, width):
         "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (2, 1)),
         "border_dist": np.zeros((2, 1), np.float32),
     }
-    frames = tuple(
-        DetectionFrame(
-            timepoint=t,
-            coords=np.array([[0, 0], [4, 4]], dtype=np.float32),
-            labels=np.array([1, 2]),
-            features=raw_features,
-            track_indices=np.array([0, 1]),
-        )
-        for t in range(2)
+    seg = Segmentation(
+        name="TRA",
+        n_frames=2,
+        coords=np.tile(np.array([[0, 0], [4, 4]], dtype=np.float32), (2, 1)),
+        labels=np.array([1, 2, 1, 2]),
+        timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
+        features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
+        track_indices=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", frames),),
+        segmentations=(seg,),
         lineage_relation=np.eye(2, dtype=bool),
         lineage_parents=np.full(2, -1),
     )
-    batch = collate_sequence_padding([TrackingData(sequence, 2, features)[0]])
+    batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(
         coord_dim=2,
         feat_dim=width,
@@ -336,7 +333,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
             dataset_calls.append((sequence, kwargs))
 
     monkeypatch.setattr(distributed, "TrackingSequence", RecordingSequence)
-    monkeypatch.setattr(distributed, "TrackingData", RecordingTrackingData)
+    monkeypatch.setattr(distributed, "TrackingDataset", RecordingTrackingData)
     module = BalancedDataModule(
         input_train=["train"],
         input_val=["val"],

@@ -807,7 +807,7 @@ def create_run_name(args):
 
 
 def _feature_dim(ndim: int, features: str) -> int:
-    """Return the feature width produced by TrackingData."""
+    """Return the feature width produced by TrackingDataset."""
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
     if features in ("wrfeat2", "wrfeat2_no_intensity"):

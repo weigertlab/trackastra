@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Literal, Optional
 import joblib
 import numpy as np
 import pandas as pd
-import torch
 from edt import edt
 from skimage.measure import regionprops, regionprops_table
 from tqdm import tqdm
@@ -22,7 +21,6 @@ from trackastra.data.utils import load_tiff_timeseries
 try:
     # Optional fast (vectorized) regionprops backend; falls back to skimage below.
     from fast_regionprops import regionprops_table_fast
-
     FAST_REGIONPROPS_INSTALLED = True
 except ImportError:
     FAST_REGIONPROPS_INSTALLED = False
@@ -37,6 +35,12 @@ except ImportError:
         FeatureExtractor = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+if not FAST_REGIONPROPS_INSTALLED:
+    logger.warning(
+        "fast_regionprops not installed; using slower skimage regionprops. "
+        "Install it for a speedup: pip install fast-regionprops"
+    )
 
 _PROPERTIES = {
     "regionprops": (
@@ -810,6 +814,8 @@ def build_windows(
 ) -> list[dict]:
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")
+    if as_torch:
+        import torch
     # Clamp window size to number of frames
     window_size = min(window_size, len(features))
     windows = []

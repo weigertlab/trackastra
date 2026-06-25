@@ -4,8 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-# from .data import CTCData
 import tifffile
 from tqdm import tqdm
 

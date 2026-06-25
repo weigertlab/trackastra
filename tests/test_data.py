@@ -2,11 +2,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from trackastra.data.data import (
-    DetectionFrame,
-    DetectionSeries,
-    TrackingData,
-    TrackingSequence,
+from trackastra.data.dataset import (
+    TrackingDataset,
     _sample_detection_keep_indices,
     _sample_neighborhood_indices,
     association_distances,
@@ -14,6 +11,7 @@ from trackastra.data.data import (
     densify_assoc,
     warn_association_distances,
 )
+from trackastra.data.io import Segmentation, TrackingSequence
 
 
 def test_detection_dropout_drops_whole_lineages():
@@ -133,21 +131,20 @@ def test_collate_assoc_coo_densifies_to_dense_padding():
 
 def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
     """One detection per frame, all the same tracklet, placed at the given x."""
-
-    def frame(t: int, x: float) -> DetectionFrame:
-        return DetectionFrame(
-            timepoint=t,
-            coords=np.array([[x, 0.0]], dtype=np.float32),
-            labels=np.array([10 + t]),
-            features={"v": np.zeros((1, 1), dtype=np.float32)},
-            track_indices=np.array([0]),
-        )
-
-    frames = tuple(frame(t, x) for t, x in enumerate(xs))
+    n_frames = len(xs)
+    seg = Segmentation(
+        name="TRA",
+        n_frames=n_frames,
+        coords=np.array([[x, 0.0] for x in xs], dtype=np.float32),
+        labels=np.array([10 + t for t in range(n_frames)]),
+        timepoints=np.arange(n_frames, dtype=np.int64),
+        features={"v": np.zeros((n_frames, 1), dtype=np.float32)},
+        track_indices=np.zeros(n_frames, dtype=np.int64),
+    )
     return TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", frames),),
+        segmentations=(seg,),
         lineage_relation=np.eye(1, dtype=bool),
         lineage_parents=np.full(1, -1),
     )
@@ -157,7 +154,7 @@ def test_association_distances_deduplicate_overlapping_windows():
     # 4 frames, window_size 3 -> windows [0,1,2] and [1,2,3] share the t1->t2 edge,
     # which must be counted once.
     sequence = _single_lineage_sequence((0.0, 3.0, 13.0, 30.0))
-    data = TrackingData(sequence, window_size=3)
+    data = TrackingDataset(sequence, window_size=3)
 
     distances = association_distances(data, delta_cutoff=1)
 

@@ -6,56 +6,68 @@ import numpy as np
 import pytest
 import torch
 from tifffile import imwrite
-from trackastra.data.data import (
-    DetectionFrame,
-    DetectionSeries,
-    TrackingData,
-    TrackingSequence,
-    load_ctc_for_inference,
-)
+from trackastra.data.dataset import TrackingDataset
+from trackastra.data.io import Segmentation, TrackingSequence, load_ctc_for_inference
 from trackastra.utils import normalize
 
 
-def _frame(timepoint=0, track_indices=(0, 1)):
-    n = len(track_indices)
-    return DetectionFrame(
-        timepoint=timepoint,
-        coords=np.arange(n * 2, dtype=np.float32).reshape(n, 2),
-        labels=np.arange(1, n + 1, dtype=np.int32),
-        features={
-            "equivalent_diameter_area": np.full((n, 1), 2, np.float32),
-            "intensity_mean": np.full((n, 1), 0.5, np.float32),
-            "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (n, 1)),
-            "border_dist": np.zeros((n, 1), np.float32),
-        },
-        track_indices=np.asarray(track_indices),
+def _segmentation(frames, name="TRA"):
+    """Build a flat Segmentation from ``(timepoint, track_indices)`` frame specs."""
+    coords, labels, timepoints, track_indices = [], [], [], []
+    feats = {
+        "equivalent_diameter_area": [],
+        "intensity_mean": [],
+        "inertia_tensor": [],
+        "border_dist": [],
+    }
+    for t, ti in frames:
+        n = len(ti)
+        coords.append(np.arange(n * 2, dtype=np.float32).reshape(n, 2))
+        labels.append(np.arange(1, n + 1, dtype=np.int32))
+        timepoints.append(np.full(n, t, dtype=np.int64))
+        track_indices.append(np.asarray(ti, dtype=np.int64))
+        feats["equivalent_diameter_area"].append(np.full((n, 1), 2, np.float32))
+        feats["intensity_mean"].append(np.full((n, 1), 0.5, np.float32))
+        feats["inertia_tensor"].append(
+            np.tile(np.eye(2, dtype=np.float32).ravel(), (n, 1))
+        )
+        feats["border_dist"].append(np.zeros((n, 1), np.float32))
+    return Segmentation(
+        name=name,
+        n_frames=max(t for t, _ in frames) + 1,
+        coords=np.concatenate(coords),
+        labels=np.concatenate(labels),
+        timepoints=np.concatenate(timepoints),
+        features={k: np.concatenate(v) for k, v in feats.items()},
+        track_indices=np.concatenate(track_indices),
     )
 
 
-def test_detection_frame_is_immutable_and_validates_alignment():
-    frame = _frame()
+def test_segmentation_is_immutable_and_validates_alignment():
+    seg = _segmentation([(0, (0, 1))])
 
     with pytest.raises(ValueError):
-        frame.coords[0, 0] = 10
-    for values in frame.features.values():
+        seg.coords[0, 0] = 10
+    for values in seg.features.values():
         with pytest.raises(ValueError):
             values[0] = 10
     with pytest.raises(ValueError, match="aligned"):
-        DetectionFrame(
-            0,
-            np.zeros((2, 2)),
-            np.ones(1),
-            {},
-            np.zeros(2),
+        Segmentation(
+            name="TRA",
+            n_frames=1,
+            coords=np.zeros((2, 2)),
+            labels=np.ones(1),
+            timepoints=np.zeros(2),
+            features={},
+            track_indices=np.zeros(2),
         )
 
 
 def test_tracking_sequence_pickle_roundtrip_remains_immutable():
-    frame = _frame()
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", (frame,)),),
+        segmentations=(_segmentation([(0, (0, 1))]),),
         lineage_relation=np.eye(2, dtype=bool),
         lineage_parents=np.full(2, -1),
     )
@@ -63,24 +75,24 @@ def test_tracking_sequence_pickle_roundtrip_remains_immutable():
     restored = pickle.loads(pickle.dumps(sequence))
 
     with pytest.raises(ValueError):
-        restored.detection_series[0].frames[0].coords[0, 0] = 10
-    for values in restored.detection_series[0].frames[0].features.values():
+        restored.segmentations[0].coords[0, 0] = 10
+    for values in restored.segmentations[0].features.values():
         with pytest.raises(ValueError):
             values[0] = 10
 
 
 def test_tracking_data_uses_lineage_relation_and_excludes_unmatched():
-    frames = (_frame(0, (0, -1)), _frame(1, (1, 2)))
+    seg = _segmentation([(0, (0, -1)), (1, (1, 2))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", frames),),
+        segmentations=(seg,),
         lineage_relation=np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
         lineage_parents=np.array([-1, 0, 0]),
     )
 
     for mode, width in (("wrfeat", 7), ("wrfeat2", 6), ("wrfeat2_no_intensity", 5)):
-        data = TrackingData(sequence, window_size=2, features=mode)
+        data = TrackingDataset(sequence, window_size=2, features=mode)
         sample = data[0]
         association = sample["assoc_matrix"].bool().numpy()
 
@@ -125,16 +137,15 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     root = _write_ctc_fixture(tmp_path, layout)
 
     sequence = TrackingSequence.from_ctc(root, n_workers=1)
-    data = TrackingData(sequence, window_size=2)
+    data = TrackingDataset(sequence, window_size=2)
     sample = data[0]
 
     assert sequence.root == root
-    assert len(sequence.detection_series) == 1
-    assert tuple(len(frame) for frame in sequence.detection_series[0].frames) == (
-        1,
-        2,
-        2,
-    )
+    assert len(sequence.segmentations) == 1
+    seg = sequence.segmentations[0]
+    assert seg.n_frames == 3
+    counts = tuple(int((seg.timepoints == t).sum()) for t in range(seg.n_frames))
+    assert counts == (1, 2, 2)
     assert np.array_equal(
         sequence.lineage_relation,
         np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
@@ -174,18 +185,18 @@ def test_load_images_flag_attaches_arrays_and_survives_pickle(tmp_path):
 
     bare = TrackingSequence.from_ctc(root, n_workers=1)
     assert bare.images is None
-    assert bare.detection_series[0].masks is None
+    assert bare.segmentations[0].masks is None
 
     seq = TrackingSequence.from_ctc(root, n_workers=1, load_images=True)
     assert seq.images is not None and len(seq.images) == 3
-    assert seq.detection_series[0].masks is not None
-    assert len(seq.detection_series[0].masks) == 3
+    assert seq.segmentations[0].masks is not None
+    assert len(seq.segmentations[0].masks) == 3
     assert not seq.images.flags.writeable
 
     restored = pickle.loads(pickle.dumps(seq))
     np.testing.assert_array_equal(restored.images, seq.images)
     np.testing.assert_array_equal(
-        restored.detection_series[0].masks, seq.detection_series[0].masks
+        restored.segmentations[0].masks, seq.segmentations[0].masks
     )
 
 
@@ -205,7 +216,7 @@ def test_tracking_sequence_without_gt_uses_isolated_detections(tmp_path):
     sequence = TrackingSequence.from_ctc(
         root, use_gt=False, detection_folders=("masks",), n_workers=1
     )
-    sample = TrackingData(sequence, window_size=2)[0]
+    sample = TrackingDataset(sequence, window_size=2)[0]
 
     assert sequence.lineage_relation.shape == (2, 2)
     assert np.array_equal(sequence.lineage_relation, np.eye(2, dtype=bool))
@@ -222,24 +233,24 @@ def test_tracking_sequence_joblib_cache_ignores_workers(tmp_path):
     assert loader.check_call_in_cache(root=root, n_workers=4)
     cached = loader(root=root, n_workers=4)
     assert not cached.lineage_relation.flags.writeable
-    assert not cached.detection_series[0].frames[0].coords.flags.writeable
+    assert not cached.segmentations[0].coords.flags.writeable
     assert np.array_equal(sequence.lineage_relation, cached.lineage_relation)
 
 
 def test_tracking_data_runtime_selection_keeps_complete_lineages():
-    frames = (_frame(0, (0, 1, 2)), _frame(1, (0, 1, 2)))
+    seg = _segmentation([(0, (0, 1, 2)), (1, (0, 1, 2))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", frames),),
+        segmentations=(seg,),
         lineage_relation=np.eye(3, dtype=bool),
         lineage_parents=np.full(3, -1),
     )
 
     np.random.seed(0)
-    capped = TrackingData(sequence, window_size=2, max_detections=2)[0]
+    capped = TrackingDataset(sequence, window_size=2, max_detections=2)[0]
     np.random.seed(0)
-    dropped = TrackingData(
+    dropped = TrackingDataset(
         sequence,
         window_size=2,
         detect_drop=1,
@@ -256,19 +267,19 @@ def test_tracking_data_runtime_selection_keeps_complete_lineages():
 
 @pytest.mark.parametrize("level", (1, 2, 3, 4))
 def test_tracking_data_augmentation_does_not_mutate_sequence(level):
-    frames = (_frame(0), _frame(1))
+    seg = _segmentation([(0, (0, 1)), (1, (0, 1))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detection_series=(DetectionSeries("TRA", frames),),
+        segmentations=(seg,),
         lineage_relation=np.eye(2, dtype=bool),
         lineage_parents=np.full(2, -1),
     )
-    original = frames[0].features["inertia_tensor"].copy()
+    original = seg.features["inertia_tensor"].copy()
 
     np.random.seed(4)
     torch.manual_seed(4)
-    sample = TrackingData(sequence, window_size=2, augment=level)[0]
+    sample = TrackingDataset(sequence, window_size=2, augment=level)[0]
 
     assert sample["features"].shape == (4, 7)
-    np.testing.assert_array_equal(frames[0].features["inertia_tensor"], original)
+    np.testing.assert_array_equal(seg.features["inertia_tensor"], original)

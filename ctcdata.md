@@ -364,8 +364,26 @@ Final class set (confirmed 2026-06-25):
 - [ ] Repoint `distributed.py` and tests (`trackastra.data.data` -> the new modules or the
       package re-exports).
 - [ ] Update the `scripts/compare_tracking_data.py` import (still references the package).
-- [ ] Confirm `io.py` imports with torch uninstalled/unimported (no torch in its
-      import graph).
+- [x] Confirm `io.py` imports with torch uninstalled/unimported (no torch in its
+      import graph). RESULT: io.py's own source is torch-free and the one-way dependency
+      holds (dataset -> io, never the reverse), and `wrfeat.py`'s top-level `import torch`
+      was made lazy (only `build_windows(as_torch=True)` uses it). But the package cannot be
+      imported torch-free, for two reasons: (1) `trackastra/data/__init__.py` eagerly does
+      `from .dataset import ...` (torch by design), so importing any `trackastra.data.*`
+      submodule runs the package __init__ and pulls torch via dataset.py; (2) `from
+      trackastra.utils import normalize` pulls torch because `trackastra/utils/utils.py`
+      imports torch at module top (~10 torch functions). Full torch-free import would need a
+      lazy package __init__ AND a torch-lazy `trackastra.utils` - both out of Phase 5 scope
+      (not worth churning a shared module / changing public import semantics mid-refactor).
+      The split's realized value is the clean separation + one-way dependency, not torch-free
+      importability.
+
+Deferred follow-up (not Phase 5): remove the `as_torch` flag from `wrfeat.build_windows`
+entirely so it always returns numpy (it is inference-only - `model_api.py`,
+`benchmark_training.py`, `scripts/check_errors.py` - and never used in training). The
+numpy->torch conversion then moves to those call sites (chiefly `model_api.py`, the public
+inference path, so it needs care + an inference smoke test). For now the lazy `import torch`
+inside `build_windows` already makes wrfeat torch-free at import without touching inference.
 - [ ] Run the full relevant test suite, ruff, and the parity script; update the repository
       map in `CLAUDE.md` (the `data.py` responsibilities line).
 
@@ -474,16 +492,34 @@ results, blockers, and decisions that revise this plan.
   layout (no `mask` folder); `Fluo-C2DL-Huh7` is the standard CTC layout. Both load via
   root alone.
 
+- 2026-06-25: Phase 5 executed (not committed). `data.py` split into `io.py` (torch-free
+  source: `_immutable_array`, flat `Segmentation`, `TrackingSequence` + `from_ctc` and
+  loaders, `load_ctc_for_inference`) and `dataset.py` (torch: `TrackingDataset`, runtime
+  helpers, `association_distances`/`warn_association_distances`, `pad_tensor`/`densify_assoc`/
+  `collate_sequence_padding`); `dataset` imports `io` one-way. `DetectionFrame` +
+  `DetectionSeries` merged into the flat `Segmentation` (columnar arrays + sorted
+  `timepoints` + `n_frames` + optional `masks`); per-frame `DetectionFrame` grouping is now
+  transient locals in `from_ctc`. Windowing is a `timepoints`-range slice via `searchsorted`
+  (`_window_slice`/`_window_arrays`), `_concat_frames` dropped. IMPORTANT parity detail:
+  `_window_arrays` `.copy()`s the slice because stored arrays are read-only and the old
+  `_concat_frames` returned fresh writable concatenations (augmentation mutates in place).
+  `TrackingData` renamed to `TrackingDataset` across package/scripts/tests; `detection_series`
+  -> `segmentations`. Restored the legacy `Normalizing`/`Matching` tqdm bars in `from_ctc`
+  (the `joblib.Parallel` feature step never had one). `wrfeat.py`'s top-level `import torch`
+  made lazy (only `build_windows(as_torch=True)`). Verified: ruff clean; 41 passed / 1
+  deselected (test_data + test_datanew + test_train); parity exact (21 + 14). torch-free
+  caveat and the `as_torch` removal follow-up are recorded in the Phase 5 checklist above.
+
 ## Current handoff state
 
-Phases 2-4 are committed (`7cdcae3`, `5b8a6fb`, `c1675c7`). The new `data.py`
-(`TrackingSequence` + `TrackingData` + `load_ctc_for_inference`) is the production module;
-legacy `CTCData` lives in `_legacy_data.py` as a parity oracle (deletion deferred until a
-real training run confirms the new pipeline).
+Phases 2-4 are committed (`7cdcae3`, `5b8a6fb`, `c1675c7`); Phase 5 is done but NOT
+committed. Production data layer is now `io.py` (model + CTC I/O) + `dataset.py` (torch
+dataset/collation); `data.py` removed. Legacy `CTCData` still lives in `_legacy_data.py`
+as the parity oracle (deletion deferred until a real training run confirms the new
+pipeline, together with `augmentations.py` / `scripts/compare_tracking_data.py` /
+`tests/test_augmentations.py`).
 
-Next up: execute Phase 5 (split `data.py` into `io.py` + `dataset.py`; keep `from_ctc`
-canonical, no new class) per the spec above. No Phase 5 code has been written yet. Resume
-recipe after the split: `ruff check`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+Resume recipe: `ruff check`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 -p no:cacheprovider tests/test_data.py tests/test_datanew.py tests/test_train.py
 --deselect tests/test_train.py::test_train_dry_run`, then `python
 scripts/compare_tracking_data.py` (expect 21 + 14 windows match). Known pre-existing

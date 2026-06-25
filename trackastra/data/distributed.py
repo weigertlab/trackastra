@@ -20,12 +20,12 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from .data import (
-    TrackingData,
-    TrackingSequence,
+from .dataset import (
+    TrackingDataset,
     association_distances,
     warn_association_distances,
 )
+from .io import TrackingSequence
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -62,7 +62,7 @@ class BalancedBatchSampler(BatchSampler):
             count ``n_ref``; the per-batch budget is ``batch_size * n_ref``. The
             median (50) anchors a full ``batch_size`` batch at the typical window.
         """
-        if isinstance(dataset, TrackingData):
+        if isinstance(dataset, TrackingDataset):
             self.n_objects = dataset.n_objects
             self.n_divs = np.array(dataset.n_divs)
             self.n_sizes = np.ones(len(dataset)) * len(dataset)
@@ -378,7 +378,7 @@ class BalancedDataModule(LightningDataModule):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
             self.datasets[split] = torch.utils.data.ConcatDataset(
-                TrackingData(
+                TrackingDataset(
                     loader(
                         root=Path(inp),
                         **self._sequence_kwargs_for_split(split),
