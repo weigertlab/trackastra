@@ -166,7 +166,7 @@ def test_association_distance_warning_ignores_values_at_cutoff(caplog):
         np.array([3.0, 10.0]),
         max_distance=10,
         delta_cutoff=1,
-        cutoff_name="spatial_pos_cutoff",
+        cutoff_name="max_distance",
         dataset_name="test dataset",
     )
     assert caplog.text == ""
@@ -180,7 +180,7 @@ def test_association_distance_warning_reports_exceedances(caplog):
             np.array([3.0, 10.0]),
             max_distance=5,
             delta_cutoff=1,
-            cutoff_name="spatial_pos_cutoff",
+            cutoff_name="max_distance",
             dataset_name="test dataset",
         )
     assert "1/2 (50.00%)" in caplog.text

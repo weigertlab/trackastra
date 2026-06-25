@@ -21,7 +21,6 @@ focal_loss_gamma: 2.0
 train_samples: 32000
 tracking_frequency: 5
 tracking_mode: greedy
-tracking_max_distance: 128
 max_detections: 1024
 batch_size: 128
 weight_by_dataset: true

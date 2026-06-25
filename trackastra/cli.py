@@ -71,8 +71,11 @@ def cli():
     p_track.add_argument(
         "--max-distance",
         type=float,
-        default=128,
-        help="Maximum distance for linking cells.",
+        default=None,
+        help=(
+            "Maximum distance for linking cells. Defaults to the model's trained"
+            " max_distance; a lower value tightens linking, a higher value warns."
+        ),
     )
 
     p_track.add_argument(

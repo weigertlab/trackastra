@@ -29,6 +29,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_inference_max_distance(trained: float, requested: float | None) -> float:
+    """Resolve the candidate-graph distance against the model's trained radius.
+
+    Defaults to the trained ``max_distance`` (the radius the model's attention was
+    masked to). A lower request is honoured as-is (tighter linking); a higher request
+    is honoured but warned, since edges beyond the trained radius were masked out during
+    training and cannot be scored.
+    """
+    if requested is None:
+        return trained
+    if requested > trained:
+        logger.warning(
+            "Requested max_distance=%g exceeds the model's trained max_distance=%g; "
+            "candidate edges beyond the trained radius were masked during training and "
+            "cannot be scored.",
+            requested,
+            trained,
+        )
+    return requested
+
+
 def _default_batch_size(device: str | torch.device):
     if isinstance(device, torch.device):
         device = device.type
@@ -242,8 +263,8 @@ class Trackastra:
         predictions,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         use_distance: bool = False,
-        max_distance: int = 256,
-        max_neighbors: int = 10,
+        max_distance: int | None = None,
+        max_neighbors: int | None = None,
         delta_t: int = 1,
         return_candidate: bool = False,
         **kwargs,
@@ -251,6 +272,15 @@ class Trackastra:
         logger.info("Running greedy tracker")
         nodes = predictions["nodes"]
         weights = predictions["weights"]
+
+        # Spatial radius and neighbour count default to the values the model was
+        # trained with (stored in its config) so inference matches training.
+        config = self.transformer.config
+        max_distance = _resolve_inference_max_distance(
+            config["max_distance"], max_distance
+        )
+        if max_neighbors is None:
+            max_neighbors = config["max_neighbors"]
 
         candidate_graph = build_graph(
             nodes=nodes,

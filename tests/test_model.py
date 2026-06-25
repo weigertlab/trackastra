@@ -31,6 +31,37 @@ def test_positional_encoding_cutoffs_start():
     assert not torch.allclose(f_default, f_small)
 
 
+def test_max_distance_drives_attention_pos_enc_and_knn():
+    """The single max_distance reaches the attention cutoff, pos-enc, and kNN radius."""
+    R = 123
+    model = TrackingTransformer(
+        coord_dim=2,
+        attn_positional_bias="rope",
+        attn_mode="sparse",
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        max_distance=R,
+    )
+
+    assert model.config["max_distance"] == R
+    assert model.max_distance == R  # feeds build_knn_index in forward
+    # reaches the attention layers (spatial mask + rope cutoff)
+    assert model.encoder[0].attn.cutoff_spatial == R
+    assert model.decoder[0].attn.cutoff_spatial == R
+
+    # reaches the additive positional encoding: the spatial frequency groups depend on
+    # max_distance, the temporal group depends on `window` and must not change.
+    other = TrackingTransformer(
+        coord_dim=2,
+        attn_positional_bias="rope",
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        max_distance=2 * R,
+    )
+    assert torch.equal(model.pos_embed.freqs[0], other.pos_embed.freqs[0])  # time
+    assert not torch.allclose(model.pos_embed.freqs[1], other.pos_embed.freqs[1])  # space
+
+
 def test_model():
     torch.manual_seed(0)
     coords = torch.randint(0, 400, (1, 100, 3)).float()

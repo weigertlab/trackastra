@@ -27,6 +27,25 @@ except ModuleNotFoundError:
     ILP_TESTS = False
 
 
+def test_resolve_inference_max_distance_defaults_warns_and_allows_lower(caplog):
+    import logging
+
+    from trackastra.model.model_api import _resolve_inference_max_distance
+
+    # default to the model's trained radius
+    assert _resolve_inference_max_distance(256, None) == 256
+
+    # a lower request is honoured silently (tighter linking)
+    with caplog.at_level(logging.WARNING):
+        assert _resolve_inference_max_distance(256, 100) == 100
+    assert caplog.text == ""
+
+    # a higher request is honoured but warns
+    with caplog.at_level(logging.WARNING):
+        assert _resolve_inference_max_distance(256, 400) == 400
+    assert "exceeds" in caplog.text
+
+
 def test_greedy_retains_isolated_detections():
     candidate_graph = nx.DiGraph()
     candidate_graph.add_node(0, time=0, label=1)

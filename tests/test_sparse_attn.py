@@ -50,7 +50,7 @@ def test_sparse_model_runs_finite():
         num_decoder_layers=2,
         dropout=0.0,
         window=6,
-        spatial_pos_cutoff=40,
+        max_distance=40,
         attn_mode="sparse",
         max_neighbors=8,
     ).eval()

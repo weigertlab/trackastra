@@ -244,7 +244,6 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_detection_folder: str = "TRA",
         tracking_features: str = "wrfeat",
         tracking_mode: str = "greedy",
-        tracking_max_distance: int = 128,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
         debug_dir: str | None = None,
@@ -277,7 +276,6 @@ class WrappedLightningModule(pl.LightningModule):
         self.tracking_detection_folder = tracking_detection_folder
         self.tracking_features = tracking_features
         self.tracking_mode = tracking_mode
-        self.tracking_max_distance = tracking_max_distance
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
@@ -560,7 +558,7 @@ class WrappedLightningModule(pl.LightningModule):
                     detection_folder=self.tracking_detection_folder,
                     features=self.tracking_features,
                     mode=self.tracking_mode,
-                    max_distance=self.tracking_max_distance,
+                    max_distance=self.model.config["max_distance"],
                 )
                 values = _summarize_tracking_metrics(metrics)
                 print(
@@ -987,8 +985,7 @@ def train(args):
         sampler_kwargs=sampler_kwargs,
         loader_kwargs=loader_kwargs,
         association_distance_cutoffs={
-            "spatial_pos_cutoff": args.spatial_pos_cutoff,
-            "tracking_max_distance": args.tracking_max_distance,
+            "max_distance": args.max_distance,
         },
         association_delta_cutoff=args.delta_cutoff,
     )
@@ -1034,7 +1031,7 @@ def train(args):
             num_decoder_layers=args.num_decoder_layers,
             dropout=args.dropout,
             window=args.window,
-            spatial_pos_cutoff=args.spatial_pos_cutoff,
+            max_distance=args.max_distance,
             attn_positional_bias=args.attn_positional_bias,
             attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
             attn_dist_mode=args.attn_dist_mode,
@@ -1061,7 +1058,6 @@ def train(args):
         tracking_detection_folder=args.detection_folders[0],
         tracking_features=args.features,
         tracking_mode=args.tracking_mode,
-        tracking_max_distance=args.tracking_max_distance,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
         grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1088,7 +1084,6 @@ def train(args):
                 tracking_detection_folder=args.detection_folders[0],
                 tracking_features=args.features,
                 tracking_mode=args.tracking_mode,
-                tracking_max_distance=args.tracking_max_distance,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1196,7 +1191,7 @@ def parse_train_args():
     parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
-    parser.add_argument("--spatial_pos_cutoff", type=int, default=256)
+    parser.add_argument("--max_distance", type=int, default=256)
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
@@ -1305,13 +1300,6 @@ def parse_train_args():
         default="greedy",
         help="linking mode used for full-movie validation",
     )
-    parser.add_argument(
-        "--tracking_max_distance",
-        type=int,
-        default=128,
-        help="maximum candidate-link distance during full-movie validation",
-    )
-
     parser.add_argument(
         "--cache",
         type=str2bool,

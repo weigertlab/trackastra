@@ -19,7 +19,6 @@ lr: 0.0001
 train_samples: 32000
 tracking_frequency: 5
 tracking_mode: greedy
-tracking_max_distance: 128
 max_detections: 2048
 batch_size: 192
 detection_folders:

@@ -389,6 +389,88 @@ inside `build_windows` already makes wrfeat torch-free at import without touchin
 
 Pause after Phase 5 with the verification report; never create commits automatically.
 
+### Phase 6: unify the spatial distance into a single `max_distance`
+
+Today there are three independent spatial radii that should be one, plus a separate
+neighbour-count knob:
+
+- `spatial_pos_cutoff` (model, default 256, formerly `n`): the trained radius. Already
+  drives THREE behaviors via one value - dense attention mask
+  (`invalid = dist > spatial_pos_cutoff`, model.py:567), positional encoding
+  (`PositionalEncoding(cutoffs=(window,) + (spatial_pos_cutoff,)*coord_dim)`, model.py:451),
+  and the sparse kNN radius (`build_knn_index(coords, padding, spatial_pos_cutoff,
+  max_neighbors)`, model.py:499 + sparse_attn.py:71-77, which already does "k nearest within
+  the radius"). Internal layer param is `cutoff_spatial`.
+- `tracking_max_distance` (train.py `--tracking_max_distance`, default 128): candidate-graph
+  radius for in-training tracking eval (`WrappedLightningModule`, train.py:563) AND the
+  `association_distance_cutoffs` warning key (train.py:991).
+- `max_distance` (inference candidate graph): `model_api._track_from_predictions`
+  (default 256, model_api.py:245) via `build_graph(... max_distance=...)`; `cli.py:132`
+  passes `args.max_distance`; `tracking/tracking.py` consumes it (`dist <= max_distance`,
+  line 158).
+
+These are mutually inconsistent (256 vs 128 vs 256) and the inference radii are decoupled
+from the trained radius. This is a real footgun: the model masks attention beyond its
+trained radius, so a candidate edge longer than the trained radius gets a garbage/near-zero
+score and can never link - yet nothing stops inference from proposing such edges, and
+in-training eval used 128 while the model was trained at 256 (so learned 128-256 links were
+never proposed at eval). The Phase 5 warning fired precisely on this.
+
+Goal: ONE spatial parameter `max_distance` (rename of `spatial_pos_cutoff`/`n`) that governs
+attention mask + positional encoding + sparse kNN radius + the candidate graph at inference.
+Keep `max_neighbors` (k) as the only additional, sparse-only knob. Temporal `window` /
+`delta_cutoff` stay separate. Hard-unify (no wide-context multiplier; attention context ==
+link radius, since wide context is unused today - add a `>=1` multiplier later only if a need
+appears). DEVIATION from "no compat": a 2-line legacy-key rename was added in
+`TrackingTransformer.create` (`spatial_pos_cutoff`/`n` -> `max_distance`) because the renamed
+`__init__` would otherwise reject the config of every RELEASED/pretrained checkpoint (e.g.
+`general_2d`), breaking the public `trackastra track --model-pretrained` path and 9 core
+inference tests - far more severe than the data-pickle compat that was waived. Old training
+runs / data pickles are still unsupported; this shim only keeps model loading working.
+
+Inference rule (user-specified): the candidate-graph `max_distance` defaults to the value in
+the model config (`model.config["max_distance"]`). A caller may pass a LOWER value (tighter
+linking for precision) and it is used as-is; passing a HIGHER value logs a warning (those
+edges exceed the trained attention radius and cannot be scored) but is still honoured.
+
+- [x] Rename `spatial_pos_cutoff` -> `max_distance` in `model.py` (param, `self.`,
+      `config` key, the `invalid` mask, `PositionalEncoding` cutoffs, `build_knn_index`
+      call). Decision: kept the internal layer param `cutoff_spatial`/`cutoff_temporal` pair
+      (a coherent internal name); only the public knob is `max_distance`, fed in as
+      `cutoff_spatial=max_distance`.
+- [x] Rename `--spatial_pos_cutoff` -> `--max_distance` (default 256) in `scripts/train.py`
+      and pass it to the model; removed `--tracking_max_distance`. Also stripped
+      `tracking_max_distance: 128` from `scripts/configs/{ctc2d,hela,vanvliet,vanvliet2}.yaml`
+      (configargparse would reject the now-unknown key).
+- [x] Wired in-training tracking eval to `self.model.config["max_distance"]` and collapsed
+      `association_distance_cutoffs` to a single `{"max_distance": args.max_distance}` key;
+      removed `WrappedLightningModule.tracking_max_distance`.
+- [x] Inference: `model_api._track_from_predictions` defaults `max_distance`/`max_neighbors`
+      to `None` and resolves from `self.transformer.config`; a testable helper
+      `_resolve_inference_max_distance` warns on higher-than-trained and passes lower through.
+      `cli.py --max-distance` default -> None (resolved from config).
+- [x] Fixed the `max_neighbors` 16-vs-10 mismatch the same way (default `None` ->
+      `config["max_neighbors"]`); kept it a separate count knob.
+- [x] Tests: `test_model.py::test_max_distance_drives_attention_pos_enc_and_knn` (config /
+      self / layer `cutoff_spatial` / pos-enc spatial-vs-temporal freqs) and
+      `test_inference_api.py::test_resolve_inference_max_distance_defaults_warns_and_allows_lower`.
+      ruff clean; focused suite 91 passed / 1 deselected (incl. the pretrained `test_api`
+      track pipeline exercising default-from-config); CPU training smoke completed end-to-end
+      with the unified `max_distance=256` warning.
+
+Spatial positional-encoding alignment (relevant to the rename): spatial RoPE is ALREADY
+aligned with the proposed `max_distance`. `RelativePositionalAttention` builds
+`RotaryPositionalEncoding(cutoffs=(cutoff_temporal,) + (cutoff_spatial,)*coord_dim)` and
+`cutoff_spatial` is fed `spatial_pos_cutoff` - the same value used by the attention mask
+(model.py:567) and the additive Fourier `PositionalEncoding` (model.py:451). So the rename to
+`max_distance` keeps mask + additive PE + RoPE spatial frequencies locked to one number for
+free; the rename must flow into `cutoff_spatial` (it already does via the param).
+
+Temporal positional-encoding work (the `cutoff_temporal`/`window` wiring check and the
+learned-temporal-bias experiment) is OUT OF SCOPE here - see `newfeats.md`.
+
+Pause after Phase 6 with the verification report; never create commits automatically.
+
 ## Implementation observations
 
 Append short dated entries containing only information that affects later work: discovered

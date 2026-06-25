@@ -314,7 +314,7 @@ class TrackingTransformer(torch.nn.Module):
         pos_embed_per_dim: int = 32,
         feat_embed_per_dim: int = 1,
         window: int = 6,
-        spatial_pos_cutoff: int = 256,
+        max_distance: int = 256,
         attn_positional_bias: Literal["rope", "none"] = "rope",
         attn_positional_bias_n_spatial: int = 16,
         causal_norm: Literal[
@@ -348,7 +348,7 @@ class TrackingTransformer(torch.nn.Module):
             dropout=dropout,
             attn_positional_bias=attn_positional_bias,
             attn_positional_bias_n_spatial=attn_positional_bias_n_spatial,
-            spatial_pos_cutoff=spatial_pos_cutoff,
+            max_distance=max_distance,
             feat_embed_per_dim=feat_embed_per_dim,
             feature_embed_mode=feature_embed_mode,
             causal_norm=causal_norm,
@@ -363,7 +363,7 @@ class TrackingTransformer(torch.nn.Module):
         self.architecture_version = architecture_version
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
-        self.spatial_pos_cutoff = spatial_pos_cutoff
+        self.max_distance = max_distance
         self.attn_dist_mode = attn_dist_mode
 
         # TODO remove, alredy present in self.config
@@ -383,7 +383,7 @@ class TrackingTransformer(torch.nn.Module):
                 nhead,
                 dropout,
                 window=window,
-                cutoff_spatial=spatial_pos_cutoff,
+                cutoff_spatial=max_distance,
                 positional_bias=attn_positional_bias,
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
@@ -399,7 +399,7 @@ class TrackingTransformer(torch.nn.Module):
                 nhead,
                 dropout,
                 window=window,
-                cutoff_spatial=spatial_pos_cutoff,
+                cutoff_spatial=max_distance,
                 positional_bias=attn_positional_bias,
                 positional_bias_n_spatial=attn_positional_bias_n_spatial,
                 attn_dist_mode=attn_dist_mode,
@@ -448,7 +448,7 @@ class TrackingTransformer(torch.nn.Module):
             raise ValueError(f"Unknown feature_embed_mode {feature_embed_mode!r}")
 
         self.pos_embed = PositionalEncoding(
-            cutoffs=(window,) + (spatial_pos_cutoff,) * coord_dim,
+            cutoffs=(window,) + (max_distance,) * coord_dim,
             n_pos=(pos_embed_per_dim,) * (1 + coord_dim),
         )
 
@@ -496,7 +496,7 @@ class TrackingTransformer(torch.nn.Module):
             nbr_idx = build_knn_index(
                 coords,
                 padding_mask,
-                self.spatial_pos_cutoff,
+                self.max_distance,
                 self.max_neighbors,
             )
         elif self.encoder:
@@ -564,7 +564,7 @@ class TrackingTransformer(torch.nn.Module):
 
         # spatial distances
         dist = torch.cdist(coords[:, :, 1:], coords[:, :, 1:])
-        invalid = dist > self.config["spatial_pos_cutoff"]
+        invalid = dist > self.config["max_distance"]
         invalid = (
             invalid | (timepoints.unsqueeze(1) == -1) | (timepoints.unsqueeze(2) == -1)
         )
@@ -590,6 +590,14 @@ class TrackingTransformer(torch.nn.Module):
 
     @staticmethod
     def create(config):
+        config = dict(config)
+        # The model's single spatial radius was historically named `n`, then
+        # `spatial_pos_cutoff`; it is now `max_distance`. Map the legacy keys so
+        # released/pretrained checkpoints still load.
+        for legacy in ("spatial_pos_cutoff", "n"):
+            if legacy in config:
+                config.setdefault("max_distance", config.pop(legacy))
+
         model_classes = {
             "default": TrackingTransformer,
         }
