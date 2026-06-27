@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -137,7 +138,8 @@ def evaluate_scale(
 def run(args: argparse.Namespace) -> None:
     device = args.device
     model = Trackastra.from_folder(args.model, device=device)
-    ta = model.train_args
+    # Training-time hyperparameters live in the provenance dump, not the model.
+    ta = yaml.load(open(Path(args.model) / "train_config.yaml"), Loader=yaml.FullLoader)
     transformer = model.transformer
     transformer.eval()
 

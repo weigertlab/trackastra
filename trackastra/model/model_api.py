@@ -29,6 +29,17 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Keys required to reproduce feature extraction at inference time. Persisted to
+# inference_config.yaml (the inference contract), separate from the free-form
+# train_config.yaml provenance dump.
+INFERENCE_CONFIG_KEYS = (
+    "features",
+    "normalize_diameter",
+    "pretrained_feats_model",
+    "pretrained_feats_mode",
+    "pretrained_feats_additional_props",
+)
+
 
 def _resolve_inference_max_distance(trained: float, requested: float | None) -> float:
     """Resolve the candidate-graph distance against the model's trained radius.
@@ -88,7 +99,7 @@ class Trackastra:
     def __init__(
         self,
         transformer: TrackingTransformer,
-        train_args: dict,
+        inference_config: dict,
         device: Literal["cuda", "mps", "cpu", "automatic", None] = None,
         batch_size: int | None = None,
     ):
@@ -96,7 +107,9 @@ class Trackastra:
 
         Args:
             transformer: The underlying transformer model.
-            train_args: Training configuration arguments.
+            inference_config: Curated keys required to reproduce feature extraction at
+                inference time (see ``INFERENCE_CONFIG_KEYS``). This is the complete
+                inference contract; training provenance is not needed for prediction.
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
             batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
         """
@@ -143,7 +156,7 @@ class Trackastra:
         )
 
         self.transformer = transformer.to(self.device)
-        self.train_args = train_args
+        self.inference_config = inference_config
         self.imgs_path = None
         self.masks_path = None
         self.feature_extractor = None
@@ -161,7 +174,8 @@ class Trackastra:
         Args:
             dir: Path to model folder containing:
                 - model weights
-                - train_config.yaml with training arguments
+                - inference_config.yaml with the feature-extraction contract
+                - train_config.yaml with the full training-argument provenance dump
             device: Device to run model on.
             checkpoint_path: Path to model checkpoint file (defaults to "model.pt" in dir).
 
@@ -174,9 +188,30 @@ class Trackastra:
         transformer = TrackingTransformer.from_folder(
             Path(dir).expanduser(), map_location="cpu", checkpoint_path=checkpoint_path
         )
-        train_args = yaml.load(open(dir / "train_config.yaml"), Loader=yaml.FullLoader)
+        inference_config_path = dir / "inference_config.yaml"
+        if inference_config_path.exists():
+            inference_config = yaml.load(
+                open(inference_config_path), Loader=yaml.FullLoader
+            )
+        else:
+            # LEGACY: pre-split model folder without inference_config.yaml. Derive the
+            # contract from the train_config dump. Remove once all published/saved
+            # models ship an inference_config.yaml.
+            train_args = yaml.load(
+                open(dir / "train_config.yaml"), Loader=yaml.FullLoader
+            )
+            inference_config = {k: train_args.get(k) for k in INFERENCE_CONFIG_KEYS}
+            logger.info(
+                "No inference_config.yaml found in %s; derived inference config from "
+                "train_config.yaml (legacy model folder): %s",
+                dir,
+                inference_config,
+            )
         return cls(
-            transformer=transformer, train_args=train_args, device=device, **kwargs
+            transformer=transformer,
+            inference_config=inference_config,
+            device=device,
+            **kwargs,
         )
 
     @classmethod
@@ -226,14 +261,14 @@ class Trackastra:
         features = get_features(
             detections=masks,
             imgs=imgs,
-            features=self.train_args["features"],
+            features=self.inference_config["features"],
             feature_extractor=self.feature_extractor,
             ndim=self.transformer.config["coord_dim"],
             n_workers=n_workers,
             progbar_class=progbar_class,
         )
         if normalize_diameter is None:
-            normalize_diameter = self.train_args.get("normalize_diameter")
+            normalize_diameter = self.inference_config.get("normalize_diameter")
         features = normalize_to_diameter(features, normalize_diameter)
         logger.info("Building windows")
         windows = build_windows(
@@ -242,8 +277,8 @@ class Trackastra:
             progbar_class=progbar_class,
             as_torch=True,
             feature_mode=(
-                self.train_args["features"]
-                if self.train_args["features"]
+                self.inference_config["features"]
+                if self.inference_config["features"]
                 in ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
                 else "wrfeat"
             ),
@@ -342,7 +377,7 @@ class Trackastra:
             batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
             normalize_diameter: If set, scale spatial WR features so the movie's
                 median equivalent diameter equals this value. If None, uses the value
-                stored in the model's train config when present.
+                stored in the model's inference config when present.
             return_details: If True, additionally return a diagnostics dict with the
                 pre-solution ``candidate_graph`` (all scored edges with weights) and
                 the raw ``predictions`` (nodes + edge weights). Cheap: reuses the work
@@ -356,7 +391,7 @@ class Trackastra:
             ``predictions``.
         """
         # Pretrained feature extraction requires the trackastra_pretrained_feats package
-        feat_type = self.train_args["features"]
+        feat_type = self.inference_config["features"]
         if feat_type == "pretrained_feats" or feat_type == "pretrained_feats_aug":
             if not PRETRAINED_FEATS_INSTALLED:
                 raise ImportError(
@@ -364,7 +399,7 @@ class Trackastra:
                     "Please install it with :"
                     "pip install trackastra[etultra]"
                 )
-            additional_features = self.train_args.get(
+            additional_features = self.inference_config.get(
                 "pretrained_feats_additional_props", None
             )
             if self.imgs_path is None:
@@ -372,10 +407,10 @@ class Trackastra:
             else:
                 save_path = self.imgs_path / "embeddings"
             self.feature_extractor = FeatureExtractor.from_model_name(
-                self.train_args["pretrained_feats_model"],
+                self.inference_config["pretrained_feats_model"],
                 imgs.shape[-2:],
                 save_path=save_path,
-                mode=self.train_args["pretrained_feats_mode"],
+                mode=self.inference_config["pretrained_feats_mode"],
                 device=self.device,
                 additional_features=additional_features,
                 batch_size=batch_size or self.batch_size,

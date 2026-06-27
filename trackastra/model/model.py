@@ -300,6 +300,28 @@ class DecoderLayer(nn.Module):
 #         return x, y
 
 
+# ---------------------------------------------------------------------------
+# LEGACY checkpoint shims. Self-contained and key-based (not gated on
+# architecture_version) so they stay no-ops for current checkpoints and can be
+# deleted wholesale once all published/saved weights are re-exported.
+# ---------------------------------------------------------------------------
+def _migrate_legacy_state_dict(state: OrderedDict) -> OrderedDict:
+    """Adapt pre-``head_mode`` checkpoints to the current module layout.
+
+    The bilinear head used to live at the top level (``head_x.*``, ``head_y.*``);
+    it now sits under the ``head`` submodule (``head.head_x.*``). Detection is
+    key-based, so this is a no-op for checkpoints already saved with the new
+    layout.
+    """
+    if any(k.startswith(("head_x.", "head_y.")) for k in state):
+        logger.info("Migrating legacy top-level head_* state_dict keys under `head.`")
+        state = OrderedDict(
+            (f"head.{k}" if k.startswith(("head_x.", "head_y.")) else k, v)
+            for k, v in state.items()
+        )
+    return state
+
+
 class TrackingTransformer(torch.nn.Module):
     def __init__(
         self,
@@ -703,6 +725,7 @@ class TrackingTransformer(torch.nn.Module):
             state = OrderedDict(
                 (k[6:], v) for k, v in state.items() if k.startswith("model.")
             )
+        state = _migrate_legacy_state_dict(state)  # LEGACY: drop with the shim above
         model.load_state_dict(state)
 
         return model

@@ -40,7 +40,7 @@ from trackastra.data import (
     densify_assoc,
 )
 from trackastra.data.distributed import BalancedDataModule
-from trackastra.model import TrackingTransformer
+from trackastra.model import INFERENCE_CONFIG_KEYS, TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_log_prob_batched,
     blockwise_causal_norm,
@@ -339,7 +339,7 @@ def log_tracking_metrics(
     device = next(model.parameters()).device.type
     tracking_model = Trackastra(
         transformer=model,
-        train_args={
+        inference_config={
             "features": features,
             "normalize_diameter": normalize_diameter,
         },
@@ -1228,6 +1228,11 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
             self._logdir.mkdir(parents=True, exist_ok=True)
             with open(self._logdir / "train_config.yaml", "w") as f:
                 yaml.safe_dump(self._training_args, f)
+            inference_config = {
+                k: self._training_args.get(k) for k in INFERENCE_CONFIG_KEYS
+            }
+            with open(self._logdir / "inference_config.yaml", "w") as f:
+                yaml.safe_dump(inference_config, f)
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.is_global_zero and not trainer.sanity_checking:
