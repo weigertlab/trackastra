@@ -1511,7 +1511,7 @@ def train(args):
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
             logit_norm=args.logit_norm,
-            assoc_head=args.assoc_head,
+            head_mode=args.head_mode,
             causal_norm=args.causal_norm,
             architecture_version=args.architecture_version,
             disable_abs_pos=args.disable_abs_pos,
@@ -1713,7 +1713,12 @@ def parse_train_args():
     )
     parser.add_argument("--max_neighbors", type=int, nargs="+", default=[16])
     parser.add_argument("--logit_norm", type=str2bool, default=True)
-    parser.add_argument("--assoc_head", choices=["bilinear"], default="bilinear")
+    parser.add_argument(
+        "--head_mode",
+        choices=["bilinear", "sparse_bilinear"],
+        default=None,
+        help="Association head; None auto-selects from --attn_mode.",
+    )
     parser.add_argument(
         "--architecture_version",
         type=int,

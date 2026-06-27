@@ -323,7 +323,7 @@ class TrackingTransformer(torch.nn.Module):
         attn_mode: Literal["dense", "sparse"] = "dense",
         max_neighbors: int | Sequence[int] = 16,
         logit_norm: bool = True,
-        assoc_head: Literal["bilinear"] = "bilinear",
+        head_mode: Literal["bilinear", "sparse_bilinear"] | None = None,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
@@ -348,6 +348,23 @@ class TrackingTransformer(torch.nn.Module):
             )
         max_neighbors = mn
 
+        # head_mode selects the association readout. None auto-follows attn_mode
+        # ("sparse_bilinear" for sparse attention, else "bilinear"). The sparse
+        # head scores only against the kNN neighbour list that sparse attention
+        # builds, so "sparse_bilinear" under dense attention is rejected.
+        if head_mode is None:
+            head_mode = "sparse_bilinear" if attn_mode == "sparse" else "bilinear"
+        if head_mode not in ("bilinear", "sparse_bilinear"):
+            raise ValueError(
+                "head_mode must be None, 'bilinear' or 'sparse_bilinear', "
+                f"got {head_mode!r}"
+            )
+        if head_mode == "sparse_bilinear" and attn_mode != "sparse":
+            raise ValueError(
+                "head_mode='sparse_bilinear' requires attn_mode='sparse' "
+                "(the sparse head needs the kNN neighbour list)"
+            )
+
         self.config = dict(
             coord_dim=coord_dim,
             feat_dim=feat_dim,
@@ -368,7 +385,7 @@ class TrackingTransformer(torch.nn.Module):
             attn_mode=attn_mode,
             max_neighbors=max_neighbors,
             logit_norm=logit_norm,
-            assoc_head=assoc_head,
+            head_mode=head_mode,
             architecture_version=architecture_version,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
@@ -429,10 +446,8 @@ class TrackingTransformer(torch.nn.Module):
         # a Literal so further heads can be added later. In sparse mode the same
         # head is computed over the kNN neighbour list (identical parameters, so a
         # dense checkpoint runs sparse and vice versa).
-        self.assoc_head = assoc_head
-        if assoc_head != "bilinear":
-            raise ValueError(f"unknown assoc_head: {assoc_head!r}")
-        head_cls = HeadSparseBilinear if attn_mode == "sparse" else HeadBilinear
+        self.head_mode = head_mode
+        head_cls = HeadSparseBilinear if head_mode == "sparse_bilinear" else HeadBilinear
         self.head = head_cls(d_model, logit_norm=logit_norm, dropout=dropout)
 
         if feature_embed_mode == "fourier":
@@ -538,7 +553,11 @@ class TrackingTransformer(torch.nn.Module):
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
         # outer product is the association matrix (logits), (B, N, N)
-        A = self.head(x, y, nbr_idx) if self.attn_mode == "sparse" else self.head(x, y)
+        A = (
+            self.head(x, y, nbr_idx)
+            if self.head_mode == "sparse_bilinear"
+            else self.head(x, y)
+        )
 
         return A
 
