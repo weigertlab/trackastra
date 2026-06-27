@@ -16,11 +16,12 @@ dropout: 0.05
 pos_embed_per_dim: 32
 feat_embed_per_dim: 8
 lr: 0.0001
+focal_loss_gamma: 0.0
 train_samples: 32000
 tracking_frequency: 5
 tracking_mode: greedy
-max_detections: 2048
-batch_size: 192
+max_detections: 1024
+batch_size: 64
 detection_folders:
 - TRA
 input_train:
