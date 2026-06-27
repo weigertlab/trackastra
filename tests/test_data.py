@@ -79,26 +79,6 @@ def test_neighborhood_sampling_leaves_small_first_frame_unchanged():
     assert np.array_equal(keep, np.arange(3))
 
 
-def test_collate_pads_optional_neighborhood_loss_masks():
-    def sample(n):
-        return {
-            "coords": torch.zeros((n, 3)),
-            "features": torch.zeros((n, 1)),
-            "labels": torch.arange(n),
-            "timepoints": torch.arange(n),
-            "assoc_matrix": torch.eye(n),
-        }
-
-    first = sample(2)
-    first["loss_mask"] = torch.tensor([[True, False], [True, True]])
-    second = sample(1)
-    batch = collate_sequence_padding([first, second])
-
-    assert torch.equal(batch["loss_mask"][0], first["loss_mask"])
-    assert batch["loss_mask"][1, 0, 0]
-    assert not batch["loss_mask"][1, 1].any()
-
-
 def test_collate_assoc_coo_densifies_to_dense_padding():
     torch.manual_seed(0)
 

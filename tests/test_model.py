@@ -74,7 +74,7 @@ def test_model():
     padding_mask = torch.zeros(1, 100).bool()
     padding_mask[:, -10:] = True
     coords[padding_mask] += 100
-    A = model(coords, padding_mask=padding_mask)
+    A, _ = model(coords, padding_mask=padding_mask)
     M = torch.logical_or(padding_mask.unsqueeze(1), padding_mask.unsqueeze(2))
     A[M] = 0
 
@@ -142,7 +142,7 @@ def test_sparse_model_forward_backward_cpu_fallback():
     )
     coords = torch.randint(0, 100, (2, 40, 3)).float()
 
-    A = model(coords)
+    A, _ = model(coords)
     assert A.shape == (2, 40, 40)
     assert torch.isfinite(A).all()
 
@@ -207,7 +207,7 @@ def test_sparse_model_forward_backward_cuda():
     ).cuda()
     coords = torch.randint(0, 100, (2, 64, 3)).float().cuda()
 
-    A = model(coords)
+    A, _ = model(coords)
     assert A.shape == (2, 64, 64)
     assert torch.isfinite(A).all()
 
@@ -232,7 +232,7 @@ def test_mlp_feature_embedding_runs_without_fourier_features():
     )
     coords = torch.rand((2, 12, 3))
     features = torch.rand((2, 12, 6))
-    output = model(coords, features)
+    output, _ = model(coords, features)
 
     assert isinstance(model.feat_embed, FeatureMLP)
     assert model.feat_embed.fc1.in_features == 6
@@ -292,7 +292,7 @@ def test_disable_abs_pos_skips_input_coordinate_embedding_and_survives_save_load
     coords = torch.rand((1, 5, 3))
     features = torch.rand((1, 5, 2))
 
-    output = model(coords, features)
+    output, _ = model(coords, features)
     model.save(tmp_path)
     restored = TrackingTransformer.from_folder(tmp_path)
 
@@ -318,7 +318,7 @@ def test_disable_input_norm_bypasses_initial_layernorm_and_survives_save_load(tm
     )
     coords = torch.rand((1, 5, 3))
 
-    output = model(coords)
+    output, _ = model(coords)
     model.save(tmp_path)
     restored = TrackingTransformer.from_folder(tmp_path)
 

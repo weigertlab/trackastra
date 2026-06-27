@@ -496,7 +496,7 @@ class WrappedLightningModule(pl.LightningModule):
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
 
-        A_pred = self.model(coords, feats, padding_mask=padding_mask)
+        A_pred, scored_mask = self.model(coords, feats, padding_mask=padding_mask)
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
@@ -543,8 +543,12 @@ class WrappedLightningModule(pl.LightningModule):
         loss = loss * loss_weight
 
         mask_valid = ~mask_invalid
-        if "loss_mask" in batch:
-            mask_valid = mask_valid & batch["loss_mask"].bool()
+        if scored_mask is not None:
+            # Sparse head: only the kNN pairs carry a real logit; every other pair
+            # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
+            # those from the loss (numerator and the normalisation count) so an
+            # unrecoverable positive outside the neighbourhood cannot spike it.
+            mask_valid = mask_valid & scored_mask
         dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
         mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
 

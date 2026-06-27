@@ -66,7 +66,7 @@ def test_sparse_model_runs_finite():
         max_neighbors=8,
     ).eval()
     with torch.no_grad():
-        a = model(coords, padding_mask=padding_mask)
+        a, _ = model(coords, padding_mask=padding_mask)
     assert torch.isfinite(a).all()
 
 
@@ -100,11 +100,11 @@ def test_sparse_model_runs_with_sampled_k():
     )
     # training samples K~[lo, hi] per forward; eval uses hi. Both must stay finite.
     model.train()
-    a_train = model(coords, padding_mask=padding_mask)
+    a_train, _ = model(coords, padding_mask=padding_mask)
     assert torch.isfinite(a_train).all()
     model.eval()
     with torch.no_grad():
-        a_eval = model(coords, padding_mask=padding_mask)
+        a_eval, _ = model(coords, padding_mask=padding_mask)
     assert torch.isfinite(a_eval).all()
 
 
@@ -118,5 +118,5 @@ def test_max_neighbors_roundtrips_through_folder(tmp_path):
     assert loaded.max_neighbors == (3, 16)
     coords, padding_mask = _sparse_inputs()
     with torch.no_grad():
-        a = loaded(coords, padding_mask=padding_mask)
+        a, _ = loaded(coords, padding_mask=padding_mask)
     assert torch.isfinite(a).all()

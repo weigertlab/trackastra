@@ -437,16 +437,6 @@ def collate_sequence_padding(batch):
             torch.cat(coos, dim=0) if coos else torch.zeros((0, 3), dtype=torch.int32)
         )
 
-    if any("loss_mask" in x for x in batch):
-        loss_mask = torch.zeros((len(batch), n_max_len, n_max_len), dtype=torch.bool)
-        for i, x in enumerate(batch):
-            n = len(x["coords"])
-            if "loss_mask" in x:
-                loss_mask[i, :n, :n] = x["loss_mask"]
-            else:
-                loss_mask[i, :n, :n] = True
-        batch_new["loss_mask"] = loss_mask
-
     # boolean mask flagging padded tokens so they can be ignored downstream
     pad_mask = torch.zeros((len(batch), n_max_len), dtype=torch.bool)
     for i, n_pad in enumerate(n_pads):

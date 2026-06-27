@@ -323,7 +323,7 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
             self.logits = torch.nn.Parameter(logits)
 
         def forward(self, coords, features, padding_mask=None):
-            return self.logits.unsqueeze(0) + 0
+            return self.logits.unsqueeze(0) + 0, None
 
     model = FixedBF16Model()
     module = WrappedLightningModule(
@@ -348,40 +348,6 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     assert torch.isfinite(loss)
     assert torch.isfinite(model.logits.grad).all()
     assert model.logits.grad[0, 2] > 0.1
-
-
-def test_common_step_excludes_neighborhood_censored_associations():
-    class ZeroModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.bias = torch.nn.Parameter(torch.tensor(0.0))
-
-        def forward(self, coords, features, padding_mask=None):
-            n = coords.shape[1]
-            return torch.zeros((len(coords), n, n)) + self.bias
-
-    module = WrappedLightningModule(ZeroModel(), causal_norm="none", delta_cutoff=1)
-    batch = {
-        "features": torch.zeros((1, 3, 1)),
-        "coords": torch.zeros((1, 3, 2)),
-        "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
-        "timepoints": torch.tensor([[0, 1, 1]]),
-        "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
-        "loss_mask": torch.tensor(
-            [
-                [
-                    [True, False, True],
-                    [True, True, True],
-                    [True, True, True],
-                ]
-            ]
-        ),
-    }
-
-    mask = module._common_step(batch)["mask"].bool()
-
-    assert not mask[0, 0, 1]
-    assert mask[0, 0, 2]
 
 
 def test_balanced_batch_sampler_partial_batch():

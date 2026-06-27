@@ -63,9 +63,9 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     with torch.no_grad():
         if pretrained_feats is None:
-            A = model(coords, features=feats, padding_mask=padding_mask)
+            A, _ = model(coords, features=feats, padding_mask=padding_mask)
         else:
-            A = model(
+            A, _ = model(
                 coords,
                 features=feats,
                 pretrained_features=pretrained_feats,
