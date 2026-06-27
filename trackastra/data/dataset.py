@@ -87,8 +87,8 @@ def _subset_features(feature: wrfeat.WRFeatures, keep: np.ndarray) -> wrfeat.WRF
     )
 
 
-def _diameter_scale_factor(
-    sequence: TrackingSequence, target_diameter: float | None
+def _normalize_diameter_factor(
+    sequence: TrackingSequence, normalize_diameter: float | None
 ) -> float:
     features = tuple(
         wrfeat.WRFeatures(
@@ -99,7 +99,7 @@ def _diameter_scale_factor(
         )
         for seg in sequence.segmentations
     )
-    return wrfeat.diameter_scale_factor(features, target_diameter)
+    return wrfeat.normalize_diameter_factor(features, normalize_diameter)
 
 
 def _wr_augmenter(level: int):
@@ -153,7 +153,7 @@ class TrackingDataset(Dataset):
         max_detections: int | None = None,
         detect_drop: float = 0.0,
         detect_drop_fraction: float = 0.1,
-        scale_target_diameter: float | None = None,
+        normalize_diameter: float | None = None,
         dataset_index: int = 0,
     ) -> None:
         if window_size <= 1:
@@ -183,7 +183,14 @@ class TrackingDataset(Dataset):
         self.max_detections = max_detections
         self.detect_drop = detect_drop
         self.detect_drop_fraction = detect_drop_fraction
-        self.scale_factor = _diameter_scale_factor(sequence, scale_target_diameter)
+        self.scale_factor = _normalize_diameter_factor(sequence, normalize_diameter)
+        if normalize_diameter is not None:
+            logger.info(
+                "Normalizing %s: scale factor %.4g (target diameter %.4g)",
+                getattr(sequence, "root", "<sequence>"),
+                self.scale_factor,
+                normalize_diameter,
+            )
         self.augmenter = _wr_augmenter(augment)
         self.windows = tuple(
             (seg_index, start)

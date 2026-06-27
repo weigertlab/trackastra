@@ -89,38 +89,45 @@ def _border_dist(mask: np.ndarray, cutoff: float = 5):
     return tuple(r.intensity_max for r in regionprops(mask, intensity_image=dist))
 
 
-def diameter_scale_factor(
-    features: Sequence["WRFeatures"], target_diameter: float | None
+def normalize_diameter_factor(
+    features: Sequence["WRFeatures"], normalize_diameter: float | None
 ) -> float:
-    if target_diameter is None:
+    """Single scale factor mapping the median equivalent diameter to a target.
+
+    Length-based (``equivalent_diameter`` is a length in any dimension), so the
+    same factor works in 2D and 3D: ``s = normalize_diameter / median(diameter)``.
+    One shared scalar over all the given features preserves every relative size
+    (division asymmetry, growth) while removing the absolute pixel unit.
+    """
+    if normalize_diameter is None:
         return 1.0
-    if target_diameter <= 0:
-        raise ValueError("scale_target_diameter must be positive")
+    if normalize_diameter <= 0:
+        raise ValueError("normalize_diameter must be positive")
     diameters = []
     for feature in features:
         values = feature.features.get("equivalent_diameter_area")
         if values is not None:
             diameters.append(values[:, 0])
     if not diameters:
-        raise ValueError(
-            "scale_target_diameter requires equivalent_diameter_area features"
-        )
+        raise ValueError("normalize_diameter requires equivalent_diameter_area features")
     diameters = np.concatenate(diameters)
     valid = diameters[np.isfinite(diameters) & (diameters > 0)]
     if len(valid) == 0:
-        raise ValueError("scale_target_diameter found no positive diameters")
-    return float(target_diameter) / float(np.median(valid))
+        raise ValueError("normalize_diameter found no positive diameters")
+    return float(normalize_diameter) / float(np.median(valid))
 
 
 def scale_feature_geometry(feature: "WRFeatures", scale: float) -> "WRFeatures":
     if scale == 1.0:
         return feature
     features = OrderedDict(feature.features)
+    # lengths scale as s, areas/second-moments as s**2
     for name in ("equivalent_diameter_area", "border_dist"):
         if name in features:
             features[name] = features[name] * scale
-    if "inertia_tensor" in features:
-        features["inertia_tensor"] = features["inertia_tensor"] * scale**2
+    for name in ("area", "inertia_tensor"):
+        if name in features:
+            features[name] = features[name] * scale**2
     return WRFeatures(
         coords=feature.coords * scale,
         labels=feature.labels,
@@ -129,10 +136,10 @@ def scale_feature_geometry(feature: "WRFeatures", scale: float) -> "WRFeatures":
     )
 
 
-def scale_to_target_diameter(
-    features: Sequence["WRFeatures"], target_diameter: float | None
+def normalize_to_diameter(
+    features: Sequence["WRFeatures"], normalize_diameter: float | None
 ) -> list["WRFeatures"]:
-    scale = diameter_scale_factor(features, target_diameter)
+    scale = normalize_diameter_factor(features, normalize_diameter)
     return [scale_feature_geometry(feature, scale) for feature in features]
 
 

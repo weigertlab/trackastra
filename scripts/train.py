@@ -1,6 +1,8 @@
 import json
 import os
 
+import pandas as pd
+
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 import torch
@@ -324,7 +326,7 @@ def log_tracking_metrics(
     features: str,
     mode: str,
     max_distance: int,
-    scale_target_diameter: float | None = None,
+    normalize_diameter: float | None = None,
 ):
     """Run full-movie CTC validation with the current transformer weights."""
     try:
@@ -339,7 +341,7 @@ def log_tracking_metrics(
         transformer=model,
         train_args={
             "features": features,
-            "scale_target_diameter": scale_target_diameter,
+            "normalize_diameter": normalize_diameter,
         },
         device=device,
     )
@@ -352,7 +354,7 @@ def log_tracking_metrics(
             model_name="validation",
             mode=mode,
             max_distance=max_distance,
-            scale_target_diameter=scale_target_diameter,
+            normalize_diameter=normalize_diameter,
             overwrite=True,
             print_results=False,
             link_breakdown=True,
@@ -396,7 +398,7 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_detection_folder: str = "TRA",
         tracking_features: str = "wrfeat",
         tracking_mode: str = "greedy",
-        tracking_scale_target_diameter: float | None = None,
+        tracking_normalize_diameter: float | None = None,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
         grad_log_every_n_epochs: int = 10,
@@ -432,7 +434,7 @@ class WrappedLightningModule(pl.LightningModule):
         self.tracking_detection_folder = tracking_detection_folder
         self.tracking_features = tracking_features
         self.tracking_mode = tracking_mode
-        self.tracking_scale_target_diameter = tracking_scale_target_diameter
+        self.tracking_normalize_diameter = tracking_normalize_diameter
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
@@ -441,9 +443,12 @@ class WrappedLightningModule(pl.LightningModule):
         self._loss_spike_debug_total = 0
         self._last_train_debug_context = None
         # Per-batch provenance log (which dataset each sample came from). Set by
-        # the trainer to a JSONL path; the index->root map is dumped on first use.
+        # the trainer to a directory; one human-readable CSV is written per epoch
+        # and the index->root map is dumped once on first use.
         self.batch_provenance_path: Path | None = None
+        self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
+        self._batch_provenance_epochs_started: set[int] = set()
 
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
@@ -819,7 +824,7 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
     def _write_batch_provenance_map(self) -> None:
-        """Dump the dataset_index -> source folder map once, next to the log."""
+        """Build the dataset_index -> source folder map and dump it once."""
         if self._batch_provenance_map_written or self.batch_provenance_path is None:
             return
         self._batch_provenance_map_written = True
@@ -832,29 +837,44 @@ class WrappedLightningModule(pl.LightningModule):
             mapping[int(getattr(sub, "dataset_index", -1))] = str(
                 getattr(sub, "root", "")
             )
-        path = self.batch_provenance_path.with_name("batch_provenance_index.json")
+        self._batch_provenance_map = mapping
+        path = self.batch_provenance_path / "batch_provenance_index.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(mapping, indent=2))
 
     def _log_batch_provenance(self, batch: dict, batch_idx: int) -> None:
-        """Append one JSONL line with the source dataset id of every sample."""
+        """Append one human-readable CSV row per sample to the epoch's file."""
         if self.batch_provenance_path is None or "dataset_index" not in batch:
             return
         if int(getattr(self.trainer, "global_rank", 0)) != 0:
             return
         self._write_batch_provenance_map()
-        record = {
-            "epoch": int(self.current_epoch),
-            "global_step": int(self.global_step),
-            "batch_idx": int(batch_idx),
-            "dataset_index": batch["dataset_index"].detach().cpu().tolist(),
-            "seg_index": batch["seg_index"].detach().cpu().tolist(),
-            "window_index": batch["window_index"].detach().cpu().tolist(),
-            "window_start": batch["window_start"].detach().cpu().tolist(),
-        }
-        self.batch_provenance_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.batch_provenance_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        epoch = int(self.current_epoch)
+        dataset_index = batch["dataset_index"].detach().cpu().tolist()
+        seg_index = batch["seg_index"].detach().cpu().tolist()
+        window_index = batch["window_index"].detach().cpu().tolist()
+        window_start = batch["window_start"].detach().cpu().tolist()
+
+        df = pd.DataFrame(
+            {
+                "global_step": int(self.global_step),
+                "batch_idx": int(batch_idx),
+                "sample": range(len(dataset_index)),
+                "dataset_index": dataset_index,
+                "dataset_name": [
+                    self._batch_provenance_map.get(i, "") for i in dataset_index
+                ],
+                "window_index": window_index,
+                "seg_index": seg_index,
+                "window_start": window_start,
+            }
+        )
+
+        path = self.batch_provenance_path / f"batch_provenance_epoch{epoch}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = epoch not in self._batch_provenance_epochs_started
+        self._batch_provenance_epochs_started.add(epoch)
+        df.to_csv(path, mode="a", header=write_header, index=False)
 
     def training_step(self, batch, batch_idx):
         self._log_batch_provenance(batch, batch_idx)
@@ -983,7 +1003,7 @@ class WrappedLightningModule(pl.LightningModule):
                     features=self.tracking_features,
                     mode=self.tracking_mode,
                     max_distance=self.model.config["max_distance"],
-                    scale_target_diameter=self.tracking_scale_target_diameter,
+                    normalize_diameter=self.tracking_normalize_diameter,
                 )
                 values = _summarize_tracking_metrics(metrics)
                 msg = (
@@ -1398,7 +1418,7 @@ def train(args):
         max_detections=args.max_detections,
         features=args.features,
         detect_drop_fraction=args.detect_drop_fraction,
-        scale_target_diameter=args.scale_target_diameter,
+        normalize_diameter=args.normalize_diameter,
     )
     sampler_kwargs = dict(
         batch_size=args.batch_size,
@@ -1512,7 +1532,7 @@ def train(args):
         tracking_detection_folder=args.detection_folders[0],
         tracking_features=args.features,
         tracking_mode=args.tracking_mode,
-        tracking_scale_target_diameter=args.scale_target_diameter,
+        tracking_normalize_diameter=args.normalize_diameter,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
         grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1538,7 +1558,7 @@ def train(args):
                 tracking_detection_folder=args.detection_folders[0],
                 tracking_features=args.features,
                 tracking_mode=args.tracking_mode,
-                tracking_scale_target_diameter=args.scale_target_diameter,
+                tracking_normalize_diameter=args.normalize_diameter,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1550,7 +1570,7 @@ def train(args):
         # Gather spike dumps and per-batch provenance under <logdir>/debug.
         debug_root = (Path(logdir) if logdir is not None else Path(".")) / "debug"
         model_lightning.loss_spike_debug_dir = debug_root / "debug_loss_spikes"
-        model_lightning.batch_provenance_path = debug_root / "batch_provenance.jsonl"
+        model_lightning.batch_provenance_path = debug_root
     else:
         model_lightning.loss_spike_debug_dir = None
         model_lightning.batch_provenance_path = None
@@ -1656,7 +1676,7 @@ def parse_train_args():
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--max_distance", type=int, default=256)
-    parser.add_argument("--scale_target_diameter", type=float, default=None)
+    parser.add_argument("--normalize_diameter", type=float, default=None)
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)

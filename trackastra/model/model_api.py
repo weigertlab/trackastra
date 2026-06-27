@@ -12,7 +12,7 @@ import yaml
 from tqdm import tqdm
 
 from ..data import build_windows, get_features, load_tiff_timeseries
-from ..data.wrfeat import scale_to_target_diameter
+from ..data.wrfeat import normalize_to_diameter
 from ..tracking import apply_solution_graph_to_masks, build_graph, track_greedy
 from ..utils import normalize
 from .model import TrackingTransformer
@@ -212,7 +212,7 @@ class Trackastra:
         normalize_imgs: bool = True,
         progbar_class=tqdm,
         batch_size: int | None = None,
-        scale_target_diameter: float | None = None,
+        normalize_diameter: float | None = None,
     ):
         logger.info("Predicting weights for candidate graph")
         if normalize_imgs:
@@ -232,9 +232,9 @@ class Trackastra:
             n_workers=n_workers,
             progbar_class=progbar_class,
         )
-        if scale_target_diameter is None:
-            scale_target_diameter = self.train_args.get("scale_target_diameter")
-        features = scale_to_target_diameter(features, scale_target_diameter)
+        if normalize_diameter is None:
+            normalize_diameter = self.train_args.get("normalize_diameter")
+        features = normalize_to_diameter(features, normalize_diameter)
         logger.info("Building windows")
         windows = build_windows(
             features,
@@ -320,7 +320,7 @@ class Trackastra:
         progbar_class=tqdm,
         n_workers: int = 0,
         batch_size: int | None = None,
-        scale_target_diameter: float | None = None,
+        normalize_diameter: float | None = None,
         return_details: bool = False,
         **kwargs,
     ) -> tuple[nx.DiGraph, np.ndarray] | tuple[nx.DiGraph, np.ndarray, dict]:
@@ -340,7 +340,7 @@ class Trackastra:
             n_workers: Number of worker processes for feature extraction.
             normalize_imgs: Whether to normalize the images.
             batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
-            scale_target_diameter: If set, scale spatial WR features so the movie's
+            normalize_diameter: If set, scale spatial WR features so the movie's
                 median equivalent diameter equals this value. If None, uses the value
                 stored in the model's train config when present.
             return_details: If True, additionally return a diagnostics dict with the
@@ -389,7 +389,7 @@ class Trackastra:
             progbar_class=progbar_class,
             n_workers=n_workers,
             batch_size=batch_size or self.batch_size,
-            scale_target_diameter=scale_target_diameter,
+            normalize_diameter=normalize_diameter,
         )
 
         if return_details:

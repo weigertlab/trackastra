@@ -97,10 +97,10 @@ def test_wrfeat2_is_derived_after_scale_augmentation():
     assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
 
 
-def test_scale_to_target_diameter_scales_feature_geometry_only():
+def test_normalize_to_diameter_scales_feature_geometry_only():
     raw = _wrfeat2_example()
     raw.coords = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
-    scaled = wrfeat.scale_to_target_diameter([raw], target_diameter=4)[0]
+    scaled = wrfeat.normalize_to_diameter([raw], normalize_diameter=4)[0]
 
     assert scaled is not raw
     np.testing.assert_allclose(scaled.coords, raw.coords * 2)

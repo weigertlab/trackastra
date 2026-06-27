@@ -105,7 +105,7 @@ def test_tracking_data_uses_lineage_relation_and_excludes_unmatched():
         assert not association[:, 1].any()
 
 
-def test_tracking_data_scale_target_diameter_scales_window_geometry_only():
+def test_tracking_data_normalize_diameter_scales_window_geometry_only():
     features = {
         "equivalent_diameter_area": np.full((4, 1), 2, np.float32),
         "intensity_mean": np.full((4, 1), 0.5, np.float32),
@@ -131,7 +131,7 @@ def test_tracking_data_scale_target_diameter_scales_window_geometry_only():
     )
 
     sample = TrackingDataset(
-        sequence, window_size=2, features="wrfeat", scale_target_diameter=4
+        sequence, window_size=2, features="wrfeat", normalize_diameter=4
     )[0]
 
     np.testing.assert_allclose(sample["coords0"][:, 1:].numpy(), coords * 2)

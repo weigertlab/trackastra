@@ -46,9 +46,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-distance", type=int, default=None)
     parser.add_argument(
-        "--scale-target-diameter",
-        "--scale_target_diameter",
-        dest="scale_target_diameter",
+        "--normalize-diameter",
+        "--normalize_diameter",
+        dest="normalize_diameter",
         type=float,
         default=None,
         help=(
@@ -226,7 +226,7 @@ def predict_and_evaluate(
     model_name: str,
     mode: str = "greedy",
     max_distance: int | None = None,
-    scale_target_diameter: float | None = None,
+    normalize_diameter: float | None = None,
     overwrite: bool = False,
     print_results: bool = True,
     errormovie: bool = False,
@@ -267,7 +267,7 @@ def predict_and_evaluate(
             mode=mode,
             max_distance=max_distance,
             normalize_imgs=False,
-            scale_target_diameter=scale_target_diameter,
+            normalize_diameter=normalize_diameter,
         )
         if error_report:
             track_kwargs["return_details"] = True
@@ -345,7 +345,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         model_name=model_name,
         mode=args.mode,
         max_distance=args.max_distance,
-        scale_target_diameter=args.scale_target_diameter,
+        normalize_diameter=args.normalize_diameter,
         overwrite=args.overwrite,
         errormovie=args.errormovie,
         error_report=getattr(args, "error_report", False),
