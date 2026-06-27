@@ -3,6 +3,7 @@
 import torch
 
 from trackastra.utils.utils import (
+    blockwise_causal_log_prob_batched,
     blockwise_causal_norm,
     blockwise_causal_norm_batched,
     blockwise_sum,
@@ -77,3 +78,51 @@ def test_blockwise_causal_norm_batched_matches_loop():
             mode,
             (ref - bat).abs().nan_to_num().max(),
         )
+
+
+def test_log_prob_matches_probability_bce_on_benign_inputs():
+    # on well-conditioned logits the log-space loss must equal the old
+    # `BCELoss(blockwise_causal_norm_batched(...))` path elementwise.
+    A, tp = _make_batch(seed=7)
+    pad = tp < 0
+    mask_invalid = pad.unsqueeze(1) | pad.unsqueeze(2)
+    target = (torch.rand_like(A) > 0.5).float()
+
+    for mode in ("quiet_softmax", "softmax", "linear"):
+        prob = blockwise_causal_norm_batched(A, tp, mode=mode, mask_invalid=mask_invalid)
+        ref = torch.nn.functional.binary_cross_entropy(
+            prob.clamp(1e-7, 1 - 1e-7), target, reduction="none"
+        )
+        log_p, log_1mp = blockwise_causal_log_prob_batched(
+            A, tp, mode=mode, mask_invalid=mask_invalid
+        )
+        bce = -(target * log_p + (1 - target) * log_1mp)
+        # compare valid, non-saturated edges; the log-space path deliberately
+        # caps the negative term in the saturated tail (the stability fix), so
+        # only assert agreement where p is away from 0/1.
+        well = (~mask_invalid) & (prob > 1e-3) & (prob < 1 - 1e-3)
+        assert torch.allclose(ref[well], bce[well], atol=1e-4), (
+            mode,
+            (ref[well] - bce[well]).abs().max(),
+        )
+
+
+def test_log_prob_finite_and_bounded_grad_on_saturated_logits():
+    # the failure mode that produced the loss spikes: confident-wrong saturated
+    # logits. The log-space loss must stay finite with a bounded gradient where
+    # the materialized-probability BCE underflowed to log(0).
+    A, tp = _make_batch(seed=11)
+    A = (A * 200.0).requires_grad_(True)  # drive softmax to hard 0/1 in fp32
+    pad = tp < 0
+    mask_invalid = pad.unsqueeze(1) | pad.unsqueeze(2)
+    target = (torch.rand(A.shape) > 0.5).float()
+
+    log_p, log_1mp = blockwise_causal_log_prob_batched(
+        A, tp, mode="quiet_softmax", mask_invalid=mask_invalid
+    )
+    valid = ~mask_invalid
+    bce = -(target * log_p + (1 - target) * log_1mp)
+    loss = bce[valid].mean()
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(A.grad).all()

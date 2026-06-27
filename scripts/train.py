@@ -40,6 +40,7 @@ from trackastra.data import (
 from trackastra.data.distributed import BalancedDataModule
 from trackastra.model import TrackingTransformer
 from trackastra.utils import (
+    blockwise_causal_log_prob_batched,
     blockwise_causal_norm,
     blockwise_causal_norm_batched,
     blockwise_sum,
@@ -418,7 +419,6 @@ class WrappedLightningModule(pl.LightningModule):
         self.focal_loss_gamma = focal_loss_gamma
         self.delta_cutoff = delta_cutoff
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
-        self.criterion_softmax = torch.nn.BCELoss(reduction="none")
         # self.train_loss = []
         # self.val_loss = []
         self.batch_val_tb_idx = batch_val_tb_idx
@@ -505,23 +505,20 @@ class WrappedLightningModule(pl.LightningModule):
 
         if self.causal_norm != "none":
             # BF16 rounds confident probabilities to exactly 0 or 1 before BCE,
-            # which can produce incorrect or non-finite gradients. Normalize and
-            # evaluate the probability-space loss entirely in float32.
+            # which can produce incorrect or non-finite gradients. Evaluate the
+            # probability-space loss in log-space and entirely in float32: the
+            # log-softmax / log(1 - p) are computed without ever materializing p,
+            # so a saturated edge can no longer underflow to log(0) and spike.
             with torch.autocast(device_type=A_pred.device.type, enabled=False):
-                A_pred_soft = blockwise_causal_norm_batched(
+                log_p, log_1mp = blockwise_causal_log_prob_batched(
                     A_pred.float(),
                     timepoints,
                     mode=self.causal_norm,
                     mask_invalid=mask_invalid,
                 )
-                if len(A) > 0:
-                    # debug
-                    if torch.any(torch.isnan(A_pred_soft)):
-                        print(A_pred)
-
-                # Keep the non-softmaxed loss for numerical stability
+                At = A.float()
                 soft_loss = _apply_focal_weight(
-                    self.criterion_softmax(A_pred_soft, A.float()),
+                    -(At * log_p + (1.0 - At) * log_1mp),
                     self.focal_loss_gamma,
                 )
                 loss = 0.01 * loss + soft_loss

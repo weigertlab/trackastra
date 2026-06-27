@@ -1,6 +1,7 @@
 import colorsys
 import itertools
 import logging
+import math
 import random
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from timeit import default_timer
 import dask.array as da
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +404,87 @@ def blockwise_causal_norm_batched(
 
     res = mask0 * u0 / u0_sum + mask1 * u1 / u1_sum
     return torch.clamp(res, 0, 1)
+
+
+def log1mexp(x: torch.Tensor) -> torch.Tensor:
+    """Numerically stable ``log(1 - exp(x))`` for ``x <= 0`` (Maechler, 2012)."""
+    return torch.where(
+        x > -math.log(2),
+        torch.log(-torch.expm1(x)),
+        torch.log1p(-torch.exp(x)),
+    )
+
+
+def blockwise_causal_log_prob_batched(
+    A: torch.Tensor,
+    timepoints: torch.Tensor,
+    mode: str = "quiet_softmax",
+    mask_invalid: torch.BoolTensor = None,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Log-space causal normalization for a numerically stable BCE loss.
+
+    Returns ``(log_p, log_1mp)`` for the same probabilities ``p`` as
+    ``blockwise_causal_norm_batched``, but computed in log-space so confident
+    predictions (``p`` near 0 or 1) never underflow to ``log(0)`` under bf16/fp16
+    and explode the gradient. ``p`` is never materialized, so the positive term
+    ``-log_p`` keeps the bounded cross-entropy gradient. Use for the training
+    loss; inference should keep ``blockwise_causal_norm_batched``.
+
+    Args:
+        A: (B, N, N) logits.
+        timepoints: (B, N); -1 marks padded tokens.
+        mode: "linear", "softmax" or "quiet_softmax".
+        mask_invalid: (B, N, N) bool, entries excluded from the normalization;
+            their ``log_p``/``log_1mp`` are returned as 0 so a masked BCE term is 0.
+        eps: denominator floor, matching ``blockwise_causal_norm_batched``; also
+            caps the negative term ``-log_1mp`` at ``~-log(eps)`` for a saturated
+            edge instead of diverging.
+    """
+    if mode == "linear":
+        # normalize sigmoids by their block sum: p_i = sigmoid(A_i) / sum_k sigmoid(A_k)
+        s = torch.sigmoid(A)
+        if mask_invalid is not None:
+            s = s.masked_fill(mask_invalid, 0.0)
+        log_u = F.logsigmoid(A)
+        u0_sum = blockwise_sum_batched(s, timepoints, dim=0, reduce="sum") + eps
+        u1_sum = blockwise_sum_batched(s, timepoints, dim=1, reduce="sum") + eps
+        log_p0 = log_u - torch.log(u0_sum)
+        log_p1 = log_u - torch.log(u1_sum)
+    elif mode in ("softmax", "quiet_softmax"):
+        A = A.clone()
+        if mask_invalid is not None:
+            A[mask_invalid] = -torch.inf
+        with torch.no_grad():
+            ma0 = blockwise_sum_batched(A, timepoints, dim=0, reduce="amax")
+            ma1 = blockwise_sum_batched(A, timepoints, dim=1, reduce="amax")
+        u0_sum = (
+            blockwise_sum_batched(torch.exp(A - ma0), timepoints, dim=0, reduce="sum")
+            + eps
+        )
+        u1_sum = (
+            blockwise_sum_batched(torch.exp(A - ma1), timepoints, dim=1, reduce="sum")
+            + eps
+        )
+        if mode == "quiet_softmax":
+            u0_sum = u0_sum + torch.exp(-ma0)
+            u1_sum = u1_sum + torch.exp(-ma1)
+        # log-softmax per direction: log(exp(A - ma) / u_sum) = (A - ma) - log(u_sum)
+        log_p0 = (A - ma0) - torch.log(u0_sum)
+        log_p1 = (A - ma1) - torch.log(u1_sum)
+    else:
+        raise NotImplementedError(f"Mode {mode} not implemented")
+
+    mask0 = timepoints.unsqueeze(1) > timepoints.unsqueeze(2)
+    log_p = torch.where(mask0, log_p0, log_p1)
+    # clamp just below 0 so a fully saturated edge yields a finite log(1 - p)
+    log_1mp = log1mexp(log_p.clamp(max=-eps))
+
+    if mask_invalid is not None:
+        zero = torch.zeros_like(log_p)
+        log_p = torch.where(mask_invalid, zero, log_p)
+        log_1mp = torch.where(mask_invalid, zero, log_1mp)
+    return log_p, log_1mp
 
 
 def normalize_tensor(x: torch.Tensor, dim: int | None = None, eps: float = 1e-8):

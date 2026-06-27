@@ -1,6 +1,7 @@
 # ruff: noqa: F401
 
 from .utils import (
+    blockwise_causal_log_prob_batched,
     blockwise_causal_norm,
     blockwise_causal_norm_batched,
     blockwise_sum,
