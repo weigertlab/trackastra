@@ -115,17 +115,18 @@ def resolve_ctc_paths(root: Path, detection_folder: str) -> tuple[Path, Path, Pa
     return image_path, mask_path, gt_path
 
 
-def evaluate_ctc(
-    gt_path: Path, pred_path: Path, return_matched: bool = False
+def ctc_metrics_from_data(
+    gt_data, pred_data, return_matched: bool = False
 ) -> dict[str, float] | tuple[dict[str, float], object]:
-    """Compute CTC-weighted TRA and AOGM with traccuracy."""
+    """Run CTC TRA/AOGM on already-loaded traccuracy graphs.
+
+    ``traccuracy`` annotates input graphs in place during scoring, so callers that
+    run this repeatedly must pass freshly loaded or otherwise unannotated graphs.
+    """
     from traccuracy import run_metrics
-    from traccuracy.loaders import load_ctc_data
     from traccuracy.matchers import CTCMatcher
     from traccuracy.metrics import CTCMetrics
 
-    gt_data = load_ctc_data(str(gt_path), run_checks=False)
-    pred_data = load_ctc_data(str(pred_path), run_checks=False)
     results, matched = run_metrics(
         gt_data=gt_data,
         pred_data=pred_data,
@@ -147,6 +148,17 @@ def evaluate_ctc(
     )
     values = {name: float(values[name]) for name in metric_names}
     return (values, matched) if return_matched else values
+
+
+def evaluate_ctc(
+    gt_path: Path, pred_path: Path, return_matched: bool = False
+) -> dict[str, float] | tuple[dict[str, float], object]:
+    """Compute CTC-weighted TRA and AOGM with traccuracy."""
+    from traccuracy.loaders import load_ctc_data
+
+    gt_data = load_ctc_data(str(gt_path), run_checks=False)
+    pred_data = load_ctc_data(str(pred_path), run_checks=False)
+    return ctc_metrics_from_data(gt_data, pred_data, return_matched=return_matched)
 
 
 def link_type_breakdown(matched) -> dict[str, float]:

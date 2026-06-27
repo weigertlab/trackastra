@@ -238,25 +238,58 @@ class Trackastra:
         # download zip from github to location/name, then unzip
         return cls.from_folder(folder, device=device, **kwargs)
 
-    def _predict(
+    def _maybe_setup_pretrained_extractor(self, imgs, batch_size: int | None = None):
+        """Set up the pretrained feature extractor when the contract requires it.
+
+        No-op for the standard wrfeat path. Called by every entry that extracts
+        features (``track`` and the cached validation path) so they behave the same.
+        """
+        feat_type = self.inference_config["features"]
+        if feat_type not in ("pretrained_feats", "pretrained_feats_aug"):
+            return
+        if not PRETRAINED_FEATS_INSTALLED:
+            raise ImportError(
+                "The trackastra_pretrained_feats package is required for pretrained "
+                "feature extraction. Please install it with: "
+                "pip install trackastra[etultra]"
+            )
+        save_path = "./embeddings" if self.imgs_path is None else self.imgs_path / "embeddings"
+        self.feature_extractor = FeatureExtractor.from_model_name(
+            self.inference_config["pretrained_feats_model"],
+            imgs.shape[-2:],
+            save_path=save_path,
+            mode=self.inference_config["pretrained_feats_mode"],
+            device=self.device,
+            additional_features=self.inference_config.get(
+                "pretrained_feats_additional_props", None
+            ),
+            batch_size=batch_size or self.batch_size,
+        )
+        self.feature_extractor.force_recompute = True
+
+    def _extract_features_windows(
         self,
         imgs: np.ndarray | da.Array,
         masks: np.ndarray | da.Array,
-        edge_threshold: float = 0.05,
         n_workers: int = 0,
         normalize_imgs: bool = True,
         progbar_class=tqdm,
-        batch_size: int | None = None,
         normalize_diameter: float | None = None,
+        batch_size: int | None = None,
     ):
-        logger.info("Predicting weights for candidate graph")
+        """Weight-independent prefix of :meth:`_predict`.
+
+        Image normalisation, feature extraction, diameter normalisation, and window
+        construction depend only on the inputs, not the transformer weights. Callers
+        that predict repeatedly on the same movie (e.g. per-epoch validation
+        tracking) can build this once and reuse it across weight updates.
+        """
+        self._maybe_setup_pretrained_extractor(imgs, batch_size=batch_size)
         if normalize_imgs:
             if isinstance(imgs, da.Array):
                 imgs = imgs.map_blocks(normalize)
             else:
                 imgs = normalize(imgs)
-
-        self.transformer.eval()
 
         features = get_features(
             detections=masks,
@@ -283,20 +316,65 @@ class Trackastra:
                 else "wrfeat"
             ),
         )
+        return features, windows
 
+    def _predict_from_windows(
+        self,
+        features,
+        windows,
+        spatial_dim: int,
+        edge_threshold: float = 0.05,
+        batch_size: int | None = None,
+        progbar_class=tqdm,
+    ):
+        """Weight-dependent half of :meth:`_predict`.
+
+        Runs the transformer over pre-built ``windows`` from
+        :meth:`_extract_features_windows`. This is the only part that must re-run
+        when the weights change.
+        """
+        self.transformer.eval()
         batch_size = batch_size or self.batch_size
         logger.info(f"Predicting windows with batch size {batch_size}")
-        predictions = predict_windows(
+        return predict_windows(
             windows=windows,
             features=features,
             model=self.transformer,
             edge_threshold=edge_threshold,
-            spatial_dim=masks.ndim - 1,
+            spatial_dim=spatial_dim,
             progbar_class=progbar_class,
             batch_size=batch_size,
         )
 
-        return predictions
+    def _predict(
+        self,
+        imgs: np.ndarray | da.Array,
+        masks: np.ndarray | da.Array,
+        edge_threshold: float = 0.05,
+        n_workers: int = 0,
+        normalize_imgs: bool = True,
+        progbar_class=tqdm,
+        batch_size: int | None = None,
+        normalize_diameter: float | None = None,
+    ):
+        logger.info("Predicting weights for candidate graph")
+        features, windows = self._extract_features_windows(
+            imgs,
+            masks,
+            n_workers=n_workers,
+            normalize_imgs=normalize_imgs,
+            progbar_class=progbar_class,
+            normalize_diameter=normalize_diameter,
+            batch_size=batch_size,
+        )
+        return self._predict_from_windows(
+            features,
+            windows,
+            spatial_dim=masks.ndim - 1,
+            edge_threshold=edge_threshold,
+            batch_size=batch_size,
+            progbar_class=progbar_class,
+        )
 
     def _track_from_predictions(
         self,
@@ -390,33 +468,8 @@ class Trackastra:
             (only if ``return_details``) dict with keys ``candidate_graph`` and
             ``predictions``.
         """
-        # Pretrained feature extraction requires the trackastra_pretrained_feats package
-        feat_type = self.inference_config["features"]
-        if feat_type == "pretrained_feats" or feat_type == "pretrained_feats_aug":
-            if not PRETRAINED_FEATS_INSTALLED:
-                raise ImportError(
-                    "The trackastra_pretrained_feats package is required for pretrained feature extraction."
-                    "Please install it with :"
-                    "pip install trackastra[etultra]"
-                )
-            additional_features = self.inference_config.get(
-                "pretrained_feats_additional_props", None
-            )
-            if self.imgs_path is None:
-                save_path = "./embeddings"
-            else:
-                save_path = self.imgs_path / "embeddings"
-            self.feature_extractor = FeatureExtractor.from_model_name(
-                self.inference_config["pretrained_feats_model"],
-                imgs.shape[-2:],
-                save_path=save_path,
-                mode=self.inference_config["pretrained_feats_mode"],
-                device=self.device,
-                additional_features=additional_features,
-                batch_size=batch_size or self.batch_size,
-            )
-            self.feature_extractor.force_recompute = True
-
+        # Pretrained-feature setup (no-op for wrfeat) now happens inside
+        # _extract_features_windows, shared with the cached validation path.
         predictions = self._predict(
             imgs,
             masks,

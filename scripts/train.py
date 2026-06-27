@@ -323,48 +323,6 @@ class WarmupCosineLRScheduler(LRScheduler):
         return [factor * base_lr for base_lr in self.base_lrs]
 
 
-def log_tracking_metrics(
-    model,
-    input_paths: list[str],
-    detection_folder: str,
-    features: str,
-    mode: str,
-    max_distance: int,
-    normalize_diameter: float | None = None,
-):
-    """Run full-movie CTC validation with the current transformer weights."""
-    try:
-        from scripts.predict import predict_and_evaluate
-    except ImportError:
-        from predict import predict_and_evaluate
-
-    from trackastra.model import Trackastra
-
-    device = next(model.parameters()).device.type
-    tracking_model = Trackastra(
-        transformer=model,
-        inference_config={
-            "features": features,
-            "normalize_diameter": normalize_diameter,
-        },
-        device=device,
-    )
-    with TemporaryDirectory() as tmpdir:
-        return predict_and_evaluate(
-            model=tracking_model,
-            input_paths=input_paths,
-            detection_folder=detection_folder,
-            outdir=Path(tmpdir),
-            model_name="validation",
-            mode=mode,
-            max_distance=max_distance,
-            normalize_diameter=normalize_diameter,
-            overwrite=True,
-            print_results=False,
-            link_breakdown=True,
-        )
-
-
 def _is_tracking_epoch(current_epoch: int, frequency: int) -> bool:
     """Use human-readable epoch numbers: frequency 10 runs at 10, 20, ..."""
     return frequency > 0 and (current_epoch + 1) % frequency == 0
@@ -400,9 +358,11 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
         tracking_input_paths: list[str] | None = None,
         tracking_detection_folder: str = "TRA",
-        tracking_features: str = "wrfeat",
         tracking_mode: str = "greedy",
-        tracking_normalize_diameter: float | None = None,
+        # The inference contract (features, normalize_diameter, pretrained_feats_*)
+        # used for the in-training tracking eval. Same dict written to
+        # inference_config.yaml, so validation matches the shipped model exactly.
+        inference_config: dict | None = None,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
         grad_log_every_n_epochs: int = 10,
@@ -436,9 +396,13 @@ class WrappedLightningModule(pl.LightningModule):
         self.tracking_frequency = tracking_frequency
         self.tracking_input_paths = tracking_input_paths or []
         self.tracking_detection_folder = tracking_detection_folder
-        self.tracking_features = tracking_features
         self.tracking_mode = tracking_mode
-        self.tracking_normalize_diameter = tracking_normalize_diameter
+        self.inference_config = inference_config or {}
+        # Lazily built (rank 0, first tracking epoch) cache of weight-independent
+        # per-movie validation data: features, windows, masks, and the GT graph.
+        # Reused every tracking epoch so only prediction + tracking + scoring re-run.
+        self._tracking_model = None
+        self._tracking_cache: list[dict] | None = None
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
@@ -453,6 +417,101 @@ class WrappedLightningModule(pl.LightningModule):
         self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
         self._batch_provenance_epochs_started: set[int] = set()
+
+    def _build_tracking_cache(self):
+        """Build the per-movie validation-tracking cache once (rank 0).
+
+        Everything here is weight-independent (disk reads, feature extraction,
+        window construction, GT graph), so it is computed a single time and reused
+        every tracking epoch; only prediction + tracking + scoring re-run.
+        """
+        from trackastra.data import load_ctc_images_masks
+        from trackastra.model import Trackastra
+
+        device = next(self.model.parameters()).device.type
+        # Built lazily at first eval, so the model is already on its device. Uses
+        # the full inference contract (same dict as inference_config.yaml), so the
+        # eval matches the shipped model - including any pretrained-feature keys.
+        self._tracking_model = Trackastra(
+            transformer=self.model,
+            inference_config=self.inference_config,
+            device=device,
+        )
+        ndim = int(self.model.config.get("coord_dim", 2))
+        cache: list[dict] = []
+        used_names: set[str] = set()
+        for index, root in enumerate(self.tracking_input_paths, start=1):
+            root = Path(root)
+            imgs, masks, _image_path, gt_path = load_ctc_images_masks(
+                root, detection_folder=self.tracking_detection_folder, ndim=ndim
+            )
+            # normalize_imgs=False mirrors the original predict_and_evaluate call;
+            # normalize_diameter falls through to inference_config inside _predict.
+            features, windows = self._tracking_model._extract_features_windows(
+                imgs,
+                masks,
+                normalize_imgs=False,
+            )
+            seq_dir = root.parent if root.name == "TRA" else root
+            seq_name = seq_dir.name.removesuffix("_GT")
+            dataset = seq_dir.parent.name.removesuffix("_GT")
+            name = f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
+            if name in used_names:
+                name = f"{name}_{index}"
+            used_names.add(name)
+            cache.append({
+                "name": name,
+                "features": features,
+                "windows": windows,
+                "masks": masks,
+                "spatial_dim": masks.ndim - 1,
+                # Store the path, not the loaded graph: traccuracy annotates the GT
+                # graph in place during CTC scoring (ctc_node_errors/ctc_edge_errors),
+                # so a cached graph is poisoned after the first eval. Reload per epoch
+                # (cheap relative to feature extraction).
+                "gt_path": gt_path,
+            })
+        self._tracking_cache = cache
+
+    def _run_tracking_eval(self):
+        """Per-epoch CTC validation: re-run only the weight-dependent prediction,
+        tracking, and scoring against the cached movies (see _build_tracking_cache).
+        """
+        try:
+            from scripts.predict import ctc_metrics_from_data, link_type_breakdown
+        except ImportError:
+            from predict import ctc_metrics_from_data, link_type_breakdown
+
+        from traccuracy.loaders import load_ctc_data
+        from trackastra.tracking import graph_to_ctc
+
+        if self._tracking_cache is None:
+            self._build_tracking_cache()
+
+        tm = self._tracking_model
+        max_distance = self.model.config["max_distance"]
+        rows = []
+        with TemporaryDirectory() as tmpdir:
+            for movie in self._tracking_cache:
+                predictions = tm._predict_from_windows(
+                    movie["features"], movie["windows"], spatial_dim=movie["spatial_dim"]
+                )
+                graph = tm._track_from_predictions(
+                    predictions, mode=self.tracking_mode, max_distance=max_distance
+                )
+                out = Path(tmpdir) / movie["name"]
+                graph_to_ctc(graph, movie["masks"], outdir=out)
+                # Both graphs loaded fresh each epoch: traccuracy mutates them
+                # in place during scoring, so neither may be cached/reused.
+                gt_data = load_ctc_data(str(movie["gt_path"]), run_checks=False)
+                pred_data = load_ctc_data(str(out), run_checks=False)
+                values, matched = ctc_metrics_from_data(
+                    gt_data, pred_data, return_matched=True
+                )
+                rows.append({
+                    "movie": movie["name"], **values, **link_type_breakdown(matched)
+                })
+        return pd.DataFrame(rows)
 
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
@@ -1004,15 +1063,7 @@ class WrappedLightningModule(pl.LightningModule):
             and self.trainer.is_global_zero
         ):
             try:
-                metrics = log_tracking_metrics(
-                    model=self.model,
-                    input_paths=self.tracking_input_paths,
-                    detection_folder=self.tracking_detection_folder,
-                    features=self.tracking_features,
-                    mode=self.tracking_mode,
-                    max_distance=self.model.config["max_distance"],
-                    normalize_diameter=self.tracking_normalize_diameter,
-                )
+                metrics = self._run_tracking_eval()
                 values = _summarize_tracking_metrics(metrics)
                 msg = (
                     f"[epoch {self.current_epoch}] "
@@ -1236,7 +1287,9 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
             self._logdir.mkdir(parents=True, exist_ok=True)
             with open(self._logdir / "train_config.yaml", "w") as f:
                 yaml.safe_dump(self._training_args, f)
-            inference_config = {
+            # Write the exact dict the in-training tracking eval uses, so the
+            # shipped inference_config.yaml and the validation contract cannot drift.
+            inference_config = getattr(pl_module, "inference_config", None) or {
                 k: self._training_args.get(k) for k in INFERENCE_CONFIG_KEYS
             }
             with open(self._logdir / "inference_config.yaml", "w") as f:
@@ -1531,6 +1584,11 @@ def train(args):
             disable_input_norm=args.disable_input_norm,
         )
 
+    # Single source of truth for the inference contract: the same keys written to
+    # inference_config.yaml (see _write_configs), so the in-training tracking eval
+    # matches the shipped model exactly.
+    inference_config = {k: getattr(args, k, None) for k in INFERENCE_CONFIG_KEYS}
+
     model_lightning = WrappedLightningModule(
         model=model,
         warmup_epochs=args.warmup_epochs,
@@ -1543,9 +1601,8 @@ def train(args):
         tracking_frequency=args.tracking_frequency,
         tracking_input_paths=args.input_val,
         tracking_detection_folder=args.detection_folders[0],
-        tracking_features=args.features,
         tracking_mode=args.tracking_mode,
-        tracking_normalize_diameter=args.normalize_diameter,
+        inference_config=inference_config,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
         grad_log_every_n_epochs=args.grad_log_every_n_epochs,
@@ -1569,9 +1626,8 @@ def train(args):
                 tracking_frequency=args.tracking_frequency,
                 tracking_input_paths=args.input_val,
                 tracking_detection_folder=args.detection_folders[0],
-                tracking_features=args.features,
                 tracking_mode=args.tracking_mode,
-                tracking_normalize_diameter=args.normalize_diameter,
+                inference_config=inference_config,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
