@@ -397,9 +397,10 @@ class BalancedDataModule(LightningDataModule):
             self.datasets[split] = torch.utils.data.ConcatDataset(
                 TrackingDataset(
                     self._load_sequence(loader, inp, split),
+                    dataset_index=i,
                     **self._tracking_data_kwargs_for_split(split),
                 )
-                for inp in inps
+                for i, inp in enumerate(inps)
             )
             for dataset in self.datasets[split].datasets:
                 self._warn_association_distances(dataset, split)

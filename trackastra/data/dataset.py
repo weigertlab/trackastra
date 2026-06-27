@@ -87,6 +87,21 @@ def _subset_features(feature: wrfeat.WRFeatures, keep: np.ndarray) -> wrfeat.WRF
     )
 
 
+def _diameter_scale_factor(
+    sequence: TrackingSequence, target_diameter: float | None
+) -> float:
+    features = tuple(
+        wrfeat.WRFeatures(
+            coords=seg.coords,
+            labels=seg.labels,
+            timepoints=seg.timepoints.astype(np.int32, copy=False),
+            features=OrderedDict(seg.features),
+        )
+        for seg in sequence.segmentations
+    )
+    return wrfeat.diameter_scale_factor(features, target_diameter)
+
+
 def _wr_augmenter(level: int):
     common = [
         wrfeat.WRRandomFlip(p=0.5),
@@ -138,6 +153,8 @@ class TrackingDataset(Dataset):
         max_detections: int | None = None,
         detect_drop: float = 0.0,
         detect_drop_fraction: float = 0.1,
+        scale_target_diameter: float | None = None,
+        dataset_index: int = 0,
     ) -> None:
         if window_size <= 1:
             raise ValueError("window_size must be greater than one")
@@ -155,6 +172,9 @@ class TrackingDataset(Dataset):
             raise ValueError("Detection dropout values must be in [0, 1]")
         self.sequence = sequence
         self.root = sequence.root
+        # Position of this dataset within the concatenated training set, so a
+        # collated batch can be traced back to its source folder (self.root).
+        self.dataset_index = dataset_index
         self.window_size = window_size
         self.features = features
         self.ndim = sequence.ndim
@@ -163,6 +183,7 @@ class TrackingDataset(Dataset):
         self.max_detections = max_detections
         self.detect_drop = detect_drop
         self.detect_drop_fraction = detect_drop_fraction
+        self.scale_factor = _diameter_scale_factor(sequence, scale_target_diameter)
         self.augmenter = _wr_augmenter(augment)
         self.windows = tuple(
             (seg_index, start)
@@ -223,6 +244,7 @@ class TrackingDataset(Dataset):
         return 0
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        seg_index, window_start = self.windows[index]
         coords, labels, timepoints, features, association = self._window_arrays(index)
         feature = wrfeat.WRFeatures(
             coords=coords,
@@ -230,6 +252,7 @@ class TrackingDataset(Dataset):
             timepoints=timepoints.astype(np.int32, copy=False),
             features=features,
         )
+        feature = wrfeat.scale_feature_geometry(feature, self.scale_factor)
         if self.max_detections is not None:
             keep = _sample_neighborhood_indices(
                 feature.coords,
@@ -268,6 +291,10 @@ class TrackingDataset(Dataset):
             "assoc_matrix": torch.from_numpy(association.astype(np.float32)),
             "timepoints": torch.from_numpy(feature.timepoints).long(),
             "labels": torch.from_numpy(feature.labels).long(),
+            "window_index": torch.tensor(index, dtype=torch.long),
+            "seg_index": torch.tensor(seg_index, dtype=torch.long),
+            "window_start": torch.tensor(window_start, dtype=torch.long),
+            "dataset_index": torch.tensor(self.dataset_index, dtype=torch.long),
         }
         return result
 
@@ -380,6 +407,10 @@ def collate_sequence_padding(batch):
         )
         for k, v in set_keys.items()
     }
+    scalar_keys = ("window_index", "seg_index", "window_start", "dataset_index")
+    for k in scalar_keys:
+        if k in batch[0]:
+            batch_new[k] = torch.stack([x[k] for x in batch], dim=0)
     for k in none_keys:
         batch_new[k] = None
     if "assoc_matrix" in batch[0]:

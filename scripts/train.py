@@ -1,7 +1,7 @@
+import json
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-from types import SimpleNamespace
 
 import torch
 import torch.multiprocessing
@@ -77,6 +77,145 @@ def _apply_focal_weight(loss: torch.Tensor, gamma: float) -> torch.Tensor:
     if gamma == 0:
         return loss
     return (1 - torch.exp(-loss)).pow(gamma) * loss
+
+
+_LOSS_SPIKE_DEBUG_THRESHOLD = 1.0
+_LOSS_SPIKE_DEBUG_MIN_EPOCH = 10
+_LOSS_SPIKE_DEBUG_TOPK = 64
+_LOSS_SPIKE_DEBUG_MAX_PER_EPOCH = 8
+_LOSS_SPIKE_DEBUG_MAX_TOTAL = 64
+_GRAD_SPIKE_DEBUG_THRESHOLD = 100.0
+
+
+def _debug_cpu(x):
+    if torch.is_tensor(x):
+        return x.detach().cpu()
+    return x
+
+
+def _gather_edge_values(
+    x: torch.Tensor, b: torch.Tensor, i: torch.Tensor, j: torch.Tensor
+):
+    return x[b, i, j].detach().cpu()
+
+
+def _loss_spike_debug_payload(
+    batch: dict,
+    out: dict,
+    *,
+    loss_value: float,
+    epoch: int,
+    global_step: int,
+    batch_idx: int,
+    stage: str,
+    rank: int,
+    causal_norm: str,
+    delta_cutoff: int,
+    max_distance: float,
+    grad_norm_value: float | None = None,
+    trigger: str = "loss",
+) -> dict:
+    with torch.no_grad():
+        coords = batch["coords"]
+        timepoints = batch["timepoints"]
+        loss_matrix = out["loss_before_reduce"].detach().float()
+        A_pred = out["A_pred"].detach().float()
+        mask_valid = out["mask_valid"].bool()
+        bsz, n, _ = loss_matrix.shape
+        A = densify_assoc(batch["assoc_coo"], bsz, n, device=loss_matrix.device)
+
+        if causal_norm != "none":
+            prob = blockwise_causal_norm_batched(
+                A_pred, timepoints, mode=causal_norm, mask_invalid=~mask_valid
+            )
+        else:
+            prob = torch.sigmoid(A_pred)
+
+        dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+        spatial_dist = torch.cdist(coords[:, :, 1:].float(), coords[:, :, 1:].float())
+        positive_forward = (A > 0.5) & (dt > 0) & (dt <= delta_cutoff) & mask_valid
+        impossible = positive_forward & (spatial_dist > max_distance)
+
+        entries_per_sample = out["mask"].sum(dim=(1, 2)).float()
+        sample_loss = loss_matrix.sum(dim=(1, 2)) / entries_per_sample.clamp_min(1)
+
+        flat = loss_matrix.reshape(-1)
+        k = min(_LOSS_SPIKE_DEBUG_TOPK, flat.numel())
+        top_values, top_indices = torch.topk(flat, k=k)
+        keep = top_values > 0
+        top_values = top_values[keep]
+        top_indices = top_indices[keep]
+        top_b = top_indices // (n * n)
+        rem = top_indices % (n * n)
+        top_i = rem // n
+        top_j = rem % n
+
+        def edge_table(b, i, j):
+            table = {
+                "batch": b.detach().cpu(),
+                "row": i.detach().cpu(),
+                "col": j.detach().cpu(),
+                "loss": _gather_edge_values(loss_matrix, b, i, j),
+                "target": _gather_edge_values(A, b, i, j),
+                "logit": _gather_edge_values(A_pred, b, i, j),
+                "prob": _gather_edge_values(prob, b, i, j),
+                "distance": _gather_edge_values(spatial_dist, b, i, j),
+                "dt": _gather_edge_values(dt, b, i, j),
+                "time_source": timepoints[b, i].detach().cpu(),
+                "time_target": timepoints[b, j].detach().cpu(),
+                "label_source": batch["labels"][b, i].detach().cpu(),
+                "label_target": batch["labels"][b, j].detach().cpu(),
+            }
+            for key in ("window_index", "seg_index", "window_start"):
+                if key in batch:
+                    table[key] = batch[key][b].detach().cpu()
+            return table
+
+        impossible_idx = torch.nonzero(impossible, as_tuple=False)
+        impossible_idx = impossible_idx[:_LOSS_SPIKE_DEBUG_TOPK]
+
+        payload = {
+            "meta": {
+                "stage": stage,
+                "epoch": epoch,
+                "global_step": global_step,
+                "batch_idx": batch_idx,
+                "rank": rank,
+                "loss": loss_value,
+                "threshold": _LOSS_SPIKE_DEBUG_THRESHOLD,
+                "grad_norm": grad_norm_value,
+                "grad_threshold": _GRAD_SPIKE_DEBUG_THRESHOLD,
+                "trigger": trigger,
+                "max_distance": max_distance,
+                "delta_cutoff": delta_cutoff,
+                "causal_norm": causal_norm,
+            },
+            "summary": {
+                "batch_size": int(bsz),
+                "seq_len": int(n),
+                "valid_edges": int(out["mask"].sum().item()),
+                "positive_forward_edges": int(positive_forward.sum().item()),
+                "impossible_positive_edges": int(impossible.sum().item()),
+                "max_edge_loss": float(flat.max().item()),
+                "min_prob": float(prob[mask_valid].min().item()),
+                "max_prob": float(prob[mask_valid].max().item()),
+                "positive_prob_lt_1e-6": int(
+                    (positive_forward & (prob < 1e-6)).sum().item()
+                ),
+                "negative_prob_gt_1m1e-6": int(
+                    ((A <= 0.5) & mask_valid & (prob > 1 - 1e-6)).sum().item()
+                ),
+            },
+            "sample_loss": sample_loss.detach().cpu(),
+            "batch": {k: _debug_cpu(v) for k, v in batch.items()},
+            "top_edges": edge_table(top_b, top_i, top_j),
+            "impossible_edges": edge_table(
+                impossible_idx[:, 0], impossible_idx[:, 1], impossible_idx[:, 2]
+            )
+            if len(impossible_idx)
+            else {},
+        }
+    return payload
 
 
 def _reduce_decision_loss(
@@ -184,6 +323,7 @@ def log_tracking_metrics(
     features: str,
     mode: str,
     max_distance: int,
+    scale_target_diameter: float | None = None,
 ):
     """Run full-movie CTC validation with the current transformer weights."""
     try:
@@ -196,7 +336,10 @@ def log_tracking_metrics(
     device = next(model.parameters()).device.type
     tracking_model = Trackastra(
         transformer=model,
-        train_args={"features": features},
+        train_args={
+            "features": features,
+            "scale_target_diameter": scale_target_diameter,
+        },
         device=device,
     )
     with TemporaryDirectory() as tmpdir:
@@ -208,6 +351,7 @@ def log_tracking_metrics(
             model_name="validation",
             mode=mode,
             max_distance=max_distance,
+            scale_target_diameter=scale_target_diameter,
             overwrite=True,
             print_results=False,
             link_breakdown=True,
@@ -251,9 +395,9 @@ class WrappedLightningModule(pl.LightningModule):
         tracking_detection_folder: str = "TRA",
         tracking_features: str = "wrfeat",
         tracking_mode: str = "greedy",
+        tracking_scale_target_diameter: float | None = None,
         batch_val_tb_idx: int = 0,  # the batch index to visualize in tensorboard
         div_upweight: float = 20,
-        debug_dir: str | None = None,
         grad_log_every_n_epochs: int = 10,
         log_edge_rates: bool = True,
     ):
@@ -288,14 +432,18 @@ class WrappedLightningModule(pl.LightningModule):
         self.tracking_detection_folder = tracking_detection_folder
         self.tracking_features = tracking_features
         self.tracking_mode = tracking_mode
+        self.tracking_scale_target_diameter = tracking_scale_target_diameter
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
-        if debug_dir is not None:
-            self.debug = SimpleNamespace(dir=Path(debug_dir), values_per_epoch=dict())
-            self.debug.dir.mkdir(parents=True, exist_ok=True)
-        else:
-            self.debug = None
+        self.loss_spike_debug_dir: Path | None = None
+        self._loss_spike_debug_counts: dict[tuple[str, str, int], int] = {}
+        self._loss_spike_debug_total = 0
+        self._last_train_debug_context = None
+        # Per-batch provenance log (which dataset each sample came from). Set by
+        # the trainer to a JSONL path; the index->root map is dumped on first use.
+        self.batch_provenance_path: Path | None = None
+        self._batch_provenance_map_written = False
 
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
@@ -495,6 +643,115 @@ class WrappedLightningModule(pl.LightningModule):
             return 0.0
         return float("nan")
 
+    def _spike_debug_dir(self) -> Path:
+        if self.loss_spike_debug_dir is not None:
+            return Path(self.loss_spike_debug_dir)
+        root = getattr(self.trainer, "default_root_dir", None) or "."
+        return Path(root) / "debug_loss_spikes"
+
+    @staticmethod
+    def _loss_tag(value: float) -> str:
+        if not np.isfinite(value):
+            return "nonfinite"
+        return f"{value:.3g}".replace("+", "").replace("-", "m").replace(".", "p")
+
+    def _save_spike_debug_batch(
+        self,
+        *,
+        stage: str,
+        batch: dict,
+        batch_idx: int,
+        out: dict,
+        loss_value: float,
+        trigger: str,
+        grad_norm_value: float | None = None,
+    ) -> None:
+        key = (trigger, stage, int(self.current_epoch))
+        count = self._loss_spike_debug_counts.get(key, 0)
+        if (
+            count >= _LOSS_SPIKE_DEBUG_MAX_PER_EPOCH
+            or self._loss_spike_debug_total >= _LOSS_SPIKE_DEBUG_MAX_TOTAL
+        ):
+            return
+
+        self._loss_spike_debug_counts[key] = count + 1
+        self._loss_spike_debug_total += 1
+
+        rank = int(getattr(self.trainer, "global_rank", 0))
+        spike_dir = self._spike_debug_dir()
+        spike_dir.mkdir(parents=True, exist_ok=True)
+        path = spike_dir / (
+            f"{trigger}_{stage}_ep{self.current_epoch:04d}_"
+            f"gs{self.global_step:08d}_batch{batch_idx:05d}_rank{rank}_"
+            f"loss{self._loss_tag(loss_value)}.pt"
+        )
+        payload = _loss_spike_debug_payload(
+            batch,
+            out,
+            loss_value=loss_value,
+            epoch=int(self.current_epoch),
+            global_step=int(self.global_step),
+            batch_idx=int(batch_idx),
+            stage=stage,
+            rank=rank,
+            causal_norm=self.causal_norm,
+            delta_cutoff=self.delta_cutoff,
+            max_distance=float(self.model.config["max_distance"]),
+            grad_norm_value=grad_norm_value,
+            trigger=trigger,
+        )
+        torch.save(payload, path)
+        msg = (
+            f"Saved {trigger} spike debug batch to {path} "
+            f"(loss={loss_value:.6g}"
+        )
+        if grad_norm_value is not None:
+            msg += f", grad_norm={grad_norm_value:.6g}"
+        msg += ")"
+        logger.warning(msg)
+        print(msg, flush=True)
+
+    def _maybe_save_loss_spike_debug(
+        self, stage: str, batch: dict, batch_idx: int, out: dict
+    ) -> float:
+        loss_value = float(out["loss"].detach().float().cpu())
+        if self.loss_spike_debug_dir is None:
+            return loss_value
+        if np.isfinite(loss_value):
+            if self.current_epoch < _LOSS_SPIKE_DEBUG_MIN_EPOCH:
+                return loss_value
+            if loss_value < _LOSS_SPIKE_DEBUG_THRESHOLD:
+                return loss_value
+        self._save_spike_debug_batch(
+            stage=stage,
+            batch=batch,
+            batch_idx=batch_idx,
+            out=out,
+            loss_value=loss_value,
+            trigger="loss",
+        )
+        return loss_value
+
+    def _maybe_save_grad_spike_debug(self, grad_norm_value: float) -> None:
+        if self.loss_spike_debug_dir is None:
+            return
+        if self.current_epoch < _LOSS_SPIKE_DEBUG_MIN_EPOCH:
+            return
+        if np.isfinite(grad_norm_value) and grad_norm_value < _GRAD_SPIKE_DEBUG_THRESHOLD:
+            return
+        if self._last_train_debug_context is None:
+            return
+        batch, batch_idx, out, loss_value = self._last_train_debug_context
+        self._save_spike_debug_batch(
+            stage="train",
+            batch=batch,
+            batch_idx=batch_idx,
+            out=out,
+            loss_value=loss_value,
+            trigger="grad_norm",
+            grad_norm_value=grad_norm_value,
+        )
+
     def on_train_epoch_start(self):
         self._edge_counts["train"] = {}
 
@@ -510,14 +767,20 @@ class WrappedLightningModule(pl.LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         # Log the (pre-clip) gradient norm here, where gradients actually exist:
-        # the backward pass has run by this hook. Computing it in training_step
-        # ran before backward, so .grad was None and grad_norm logged 0. The
-        # per-parameter sweep is a sync, so throttle to every Nth epoch.
+        # the backward pass has run by this hook. Compute it every step while the
+        # temporary spike debugger is active so grad_norm_max > 100 can save the
+        # offending batch before clipping; throttle only the W&B scalar logging.
+        _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
+        _norm_value = (
+            float(_norm.detach().float().cpu())
+            if torch.is_tensor(_norm)
+            else float(_norm)
+        )
+        self._maybe_save_grad_spike_debug(_norm_value)
         if (
             self.grad_log_every_n_epochs > 0
             and self.current_epoch % self.grad_log_every_n_epochs == 0
         ):
-            _norm = grad_norm(self.model, 2).get("grad_2.0_norm_total", 0)
             # Reduce per-epoch instead of logging every step: the raw per-step
             # (pre-clip) norm is very jagged. "grad_norm" is the epoch mean
             # (typical magnitude / trend), "grad_norm_max" the epoch max (spike
@@ -542,6 +805,7 @@ class WrappedLightningModule(pl.LightningModule):
                 sync_dist=True,
                 batch_size=1,
             )
+        self._last_train_debug_context = None
 
     def configure_optimizers(self):
         # eps=1e-6 (vs the 1e-8 default) damps AdamW's adaptive step lr/(sqrt(v)+eps)
@@ -557,26 +821,55 @@ class WrappedLightningModule(pl.LightningModule):
             ),
         )
 
+    def _write_batch_provenance_map(self) -> None:
+        """Dump the dataset_index -> source folder map once, next to the log."""
+        if self._batch_provenance_map_written or self.batch_provenance_path is None:
+            return
+        self._batch_provenance_map_written = True
+        if int(getattr(self.trainer, "global_rank", 0)) != 0:
+            return
+        mapping: dict[int, str] = {}
+        dm = getattr(self.trainer, "datamodule", None)
+        train_ds = getattr(dm, "datasets", {}).get("train") if dm is not None else None
+        for sub in getattr(train_ds, "datasets", []) or []:
+            mapping[int(getattr(sub, "dataset_index", -1))] = str(
+                getattr(sub, "root", "")
+            )
+        path = self.batch_provenance_path.with_name("batch_provenance_index.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(mapping, indent=2))
+
+    def _log_batch_provenance(self, batch: dict, batch_idx: int) -> None:
+        """Append one JSONL line with the source dataset id of every sample."""
+        if self.batch_provenance_path is None or "dataset_index" not in batch:
+            return
+        if int(getattr(self.trainer, "global_rank", 0)) != 0:
+            return
+        self._write_batch_provenance_map()
+        record = {
+            "epoch": int(self.current_epoch),
+            "global_step": int(self.global_step),
+            "batch_idx": int(batch_idx),
+            "dataset_index": batch["dataset_index"].detach().cpu().tolist(),
+            "seg_index": batch["seg_index"].detach().cpu().tolist(),
+            "window_index": batch["window_index"].detach().cpu().tolist(),
+            "window_start": batch["window_start"].detach().cpu().tolist(),
+        }
+        self.batch_provenance_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.batch_provenance_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
     def training_step(self, batch, batch_idx):
+        self._log_batch_provenance(batch, batch_idx)
         out = self._common_step(batch)
         loss = out["loss"]
+        loss_value = self._maybe_save_loss_spike_debug("train", batch, batch_idx, out)
+        self._last_train_debug_context = (batch, batch_idx, out, loss_value)
         if torch.isnan(loss):
             print("NaN loss, skipping")
             return None
 
         self._accumulate_edge_counts("train", out["edge_counts"])
-
-        if self.debug is not None and loss.item() > 0.1 and self.current_epoch > 10:
-            ep = self.current_epoch
-
-            cur = self.debug.values_per_epoch.get(ep, -1)
-            if cur < loss.item():
-                self.debug.values_per_epoch[ep] = loss.item()
-                _out = self.debug.dir / f"bad_batch_{ep:04d}.pt"
-                logger.info(f"Debug saving bad batch to {_out}")
-                _batch = batch.copy()
-                _batch["loss"] = loss.item()
-                torch.save(_batch, _out)
 
         self.log(
             "train_loss",
@@ -640,6 +933,7 @@ class WrappedLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         out = self._common_step(batch)
         loss = out["loss"]
+        self._maybe_save_loss_spike_debug("val", batch, batch_idx, out)
         if torch.isnan(loss):
             print("NaN loss, skipping")
             return None
@@ -692,6 +986,7 @@ class WrappedLightningModule(pl.LightningModule):
                     features=self.tracking_features,
                     mode=self.tracking_mode,
                     max_distance=self.model.config["max_distance"],
+                    scale_target_diameter=self.tracking_scale_target_diameter,
                 )
                 values = _summarize_tracking_metrics(metrics)
                 msg = (
@@ -959,6 +1254,32 @@ def _resolve_feature_embed_mode(features: str, requested: str | None) -> str:
     return "mlp" if features in ("wrfeat2", "wrfeat2_no_intensity") else "fourier"
 
 
+def _skip_missing_input_folders(split: str, input_paths: list[str]) -> list[str]:
+    """Warn about missing input folders and return existing paths."""
+    existing = []
+    missing = []
+    for p in input_paths:
+        if Path(p).exists():
+            existing.append(p)
+        else:
+            missing.append(p)
+
+    if missing:
+        logger.warning(
+            "could not find %d %s folders: %s",
+            len(missing),
+            split,
+            ", ".join(missing),
+        )
+
+    if not existing:
+        raise FileNotFoundError(
+            f"No existing {split} input folders found after skipping missing inputs"
+        )
+
+    return existing
+
+
 def find_val_batch(loader_val, n_gpus):
     # find the val batch with most divisions for vizualisation, which runs on GPU 0
     batches_val = tuple(
@@ -1066,9 +1387,8 @@ def train(args):
         torch.cuda.device_count() if args.distributed and accelerator == "cuda" else 1
     )
 
-    for p in args.input_train + args.input_val:
-        if not Path(p).exists():
-            raise FileNotFoundError(f"Input folder {p} does not exist")
+    args.input_train = _skip_missing_input_folders("training", args.input_train)
+    args.input_val = _skip_missing_input_folders("validation", args.input_val)
 
     sequence_kwargs = dict(
         ndim=args.ndim,
@@ -1081,6 +1401,7 @@ def train(args):
         max_detections=args.max_detections,
         features=args.features,
         detect_drop_fraction=args.detect_drop_fraction,
+        scale_target_diameter=args.scale_target_diameter,
     )
     sampler_kwargs = dict(
         batch_size=args.batch_size,
@@ -1195,10 +1516,10 @@ def train(args):
         tracking_detection_folder=args.detection_folders[0],
         tracking_features=args.features,
         tracking_mode=args.tracking_mode,
+        tracking_scale_target_diameter=args.scale_target_diameter,
         batch_val_tb_idx=batch_val_tb_idx,
         div_upweight=args.div_upweight,
         grad_log_every_n_epochs=args.grad_log_every_n_epochs,
-        debug_dir=args.debug_dir,
     )
 
     # if logdir already exists and --resume option is set, load the last checkpoint (eg when continuing training after crash)
@@ -1221,12 +1542,22 @@ def train(args):
                 tracking_detection_folder=args.detection_folders[0],
                 tracking_features=args.features,
                 tracking_mode=args.tracking_mode,
+                tracking_scale_target_diameter=args.scale_target_diameter,
                 batch_val_tb_idx=batch_val_tb_idx,
                 div_upweight=args.div_upweight,
                 grad_log_every_n_epochs=args.grad_log_every_n_epochs,
             )
         else:
             logging.warning(f"No checkpoint found in {logdir}")
+
+    if args.debug:
+        # Gather spike dumps and per-batch provenance under <logdir>/debug.
+        debug_root = (Path(logdir) if logdir is not None else Path(".")) / "debug"
+        model_lightning.loss_spike_debug_dir = debug_root / "debug_loss_spikes"
+        model_lightning.batch_provenance_path = debug_root / "batch_provenance.jsonl"
+    else:
+        model_lightning.loss_spike_debug_dir = None
+        model_lightning.batch_provenance_path = None
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"Model has {num_params / 1e6:.1f}M parameters")
@@ -1329,6 +1660,7 @@ def parse_train_args():
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
     parser.add_argument("--max_distance", type=int, default=256)
+    parser.add_argument("--scale_target_diameter", type=float, default=None)
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
     parser.add_argument("--num_decoder_layers", type=int, default=6)
@@ -1352,7 +1684,12 @@ def parse_train_args():
         choices=["rope", "none"],
         default="rope",
     )
-    parser.add_argument("--debug_dir", type=str, default=None)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable loss/grad spike dumps and per-batch dataset provenance "
+        "logging under <logdir>/debug.",
+    )
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)
     parser.add_argument("--attn_dist_mode", type=str, default="v1")
     parser.add_argument(
