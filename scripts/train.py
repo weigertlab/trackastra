@@ -256,11 +256,15 @@ def _reduce_matrix_loss(
     mask: torch.Tensor,
     eps: float = torch.finfo(torch.float16).eps,
 ) -> torch.Tensor:
-    """Original reduction over all valid association-matrix entries."""
+    """Reduction over all valid association-matrix entries.
+
+    Each sample is normalised by its number of valid pairs, then samples with at
+    least one valid pair are averaged with equal weight (no size reweighting).
+    """
     entries_per_sample = mask.sum(dim=(1, 2))
+    sample_valid = entries_per_sample > 0
     loss_per_sample = loss.sum(dim=(1, 2)) / (entries_per_sample + eps)
-    prefactor = torch.pow(entries_per_sample, 0.2)
-    return (loss_per_sample * prefactor / (prefactor.sum() + eps)).sum()
+    return (loss_per_sample * sample_valid).sum() / sample_valid.sum().clamp_min(1)
 
 
 def _git_commit():

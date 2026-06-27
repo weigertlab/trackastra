@@ -288,7 +288,7 @@ def test_decision_loss_averages_samples_equally():
     assert loss.item() == pytest.approx(3)
 
 
-def test_matrix_loss_preserves_original_reduction():
+def test_matrix_loss_averages_valid_samples_equally():
     timepoints = torch.tensor([[0, 1, -1], [0, 1, 1]])
     _, mask = _decision_mask(timepoints)
     pair_loss = torch.zeros((2, 3, 3))
@@ -297,8 +297,8 @@ def test_matrix_loss_preserves_original_reduction():
     eps = torch.finfo(torch.float16).eps
     counts = mask.sum(dim=(1, 2))
     per_sample = pair_loss.sum(dim=(1, 2)) / (counts + eps)
-    weights = counts.pow(0.2)
-    expected = (per_sample * weights / (weights.sum() + eps)).sum()
+    sample_valid = counts > 0
+    expected = (per_sample * sample_valid).sum() / sample_valid.sum().clamp_min(1)
 
     loss = _reduce_matrix_loss(pair_loss, mask)
 
