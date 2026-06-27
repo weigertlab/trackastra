@@ -38,6 +38,24 @@ def _load_sparse_attn():
     return sparse_attention, sparse_attention_gather
 
 
+def sparse_bilinear_scores(
+    x: torch.Tensor, y: torch.Tensor, nbr_idx: torch.Tensor
+) -> torch.Tensor:
+    """Neighbour-gathered bilinear scores ``x[n] . y[nbr_idx[n, k]]`` -> (B, N, K).
+
+    Sparse counterpart of ``einsum("bnd,bmd->bnm")`` that never forms the dense
+    ``(N, N)`` matrix: Triton kernel on CUDA, gather fallback on CPU/MPS, ``-1``
+    slots yield ``0``.
+    """
+    try:
+        from sparse_attn import sparse_einsum, sparse_einsum_gather
+    except ImportError as e:
+        raise ImportError(_IMPORT_ERROR_MSG) from e
+    if x.is_cuda:
+        return sparse_einsum(x, y, nbr_idx, bwd="atomics")
+    return sparse_einsum_gather(x, y, nbr_idx)
+
+
 def build_knn_index(
     coords: torch.Tensor,
     padding_mask: torch.Tensor | None,

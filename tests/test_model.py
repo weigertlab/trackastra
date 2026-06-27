@@ -152,6 +152,28 @@ def test_sparse_model_forward_backward_cpu_fallback():
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
+def test_sparse_head_matches_dense_on_neighbours():
+    from trackastra.model.heads import HeadBilinear, HeadSparseBilinear
+
+    torch.manual_seed(0)
+    for logit_norm in (True, False):
+        dense = HeadBilinear(32, logit_norm=logit_norm).eval()
+        sparse = HeadSparseBilinear(32, logit_norm=logit_norm).eval()
+        sparse.load_state_dict(dense.state_dict())  # identical weights
+
+        x = torch.randn(2, 30, 32)
+        y = torch.randn(2, 30, 32)
+        coords = torch.rand(2, 30, 3) * 50
+        nbr = build_knn_index(coords, None, cutoff_spatial=20.0, max_neighbors=8)
+
+        A_dense = dense(x, y)
+        A_sparse = sparse(x, y, nbr)
+        real = A_sparse > HeadSparseBilinear.NO_EDGE_LOGIT + 1
+        # neighbour entries agree with the dense head; the rest are the fill
+        assert torch.allclose(A_dense[real], A_sparse[real], atol=1e-4)
+        assert (real.sum(-1) <= 8).all()
+
+
 def test_dense_and_sparse_share_state_dict():
     common = dict(
         coord_dim=2,

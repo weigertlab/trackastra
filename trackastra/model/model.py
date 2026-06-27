@@ -15,7 +15,7 @@ from torch import nn
 # NoPositionalEncoding,
 from trackastra.utils import blockwise_causal_norm
 
-from .heads import HeadBilinear
+from .heads import HeadBilinear, HeadSparseBilinear
 from .model_parts import (
     FeatureMLP,
     FeedForward,
@@ -426,12 +426,14 @@ class TrackingTransformer(torch.nn.Module):
         ])
 
         # association readout. "bilinear" (currently the only option) is kept as
-        # a Literal so further heads can be added later.
+        # a Literal so further heads can be added later. In sparse mode the same
+        # head is computed over the kNN neighbour list (identical parameters, so a
+        # dense checkpoint runs sparse and vice versa).
         self.assoc_head = assoc_head
-        if assoc_head == "bilinear":
-            self.head = HeadBilinear(d_model, logit_norm=logit_norm, dropout=dropout)
-        else:
+        if assoc_head != "bilinear":
             raise ValueError(f"unknown assoc_head: {assoc_head!r}")
+        head_cls = HeadSparseBilinear if attn_mode == "sparse" else HeadBilinear
+        self.head = head_cls(d_model, logit_norm=logit_norm, dropout=dropout)
 
         if feature_embed_mode == "fourier":
             if feat_embed_per_dim > 1:
@@ -536,7 +538,7 @@ class TrackingTransformer(torch.nn.Module):
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
         # outer product is the association matrix (logits), (B, N, N)
-        A = self.head(x, y)
+        A = self.head(x, y, nbr_idx) if self.attn_mode == "sparse" else self.head(x, y)
 
         return A
 
