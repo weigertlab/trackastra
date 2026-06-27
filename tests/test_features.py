@@ -97,6 +97,28 @@ def test_wrfeat2_is_derived_after_scale_augmentation():
     assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
 
 
+def test_scale_to_target_diameter_scales_feature_geometry_only():
+    raw = _wrfeat2_example()
+    raw.coords = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
+    scaled = wrfeat.scale_to_target_diameter([raw], target_diameter=4)[0]
+
+    assert scaled is not raw
+    np.testing.assert_allclose(scaled.coords, raw.coords * 2)
+    np.testing.assert_allclose(
+        scaled.features["equivalent_diameter_area"],
+        raw.features["equivalent_diameter_area"] * 2,
+    )
+    np.testing.assert_allclose(
+        scaled.features["inertia_tensor"], raw.features["inertia_tensor"] * 4
+    )
+    np.testing.assert_allclose(
+        scaled.features["border_dist"], raw.features["border_dist"] * 2
+    )
+    np.testing.assert_allclose(
+        scaled.features["intensity_mean"], raw.features["intensity_mean"]
+    )
+
+
 def test_build_windows_uses_requested_wrfeat_mode():
     first = _wrfeat2_example()
     second = _wrfeat2_example()

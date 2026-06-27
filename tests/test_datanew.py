@@ -105,6 +105,47 @@ def test_tracking_data_uses_lineage_relation_and_excludes_unmatched():
         assert not association[:, 1].any()
 
 
+def test_tracking_data_scale_target_diameter_scales_window_geometry_only():
+    features = {
+        "equivalent_diameter_area": np.full((4, 1), 2, np.float32),
+        "intensity_mean": np.full((4, 1), 0.5, np.float32),
+        "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (4, 1)),
+        "border_dist": np.full((4, 1), 3, np.float32),
+    }
+    coords = np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.float32)
+    seg = Segmentation(
+        name="TRA",
+        n_frames=2,
+        coords=coords,
+        labels=np.array([1, 2, 1, 2]),
+        timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
+        features=features,
+        track_indices=np.array([0, 1, 0, 1]),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        segmentations=(seg,),
+        lineage_relation=np.eye(2, dtype=bool),
+        lineage_parents=np.full(2, -1),
+    )
+
+    sample = TrackingDataset(
+        sequence, window_size=2, features="wrfeat", scale_target_diameter=4
+    )[0]
+
+    np.testing.assert_allclose(sample["coords0"][:, 1:].numpy(), coords * 2)
+    values = sample["features"].numpy()
+    np.testing.assert_allclose(values[:, 0], 4)
+    np.testing.assert_allclose(values[:, 1], 0.5)
+    np.testing.assert_allclose(
+        values[:, 2:6], np.tile(4 * np.eye(2).ravel(), (4, 1))
+    )
+    np.testing.assert_allclose(values[:, 6], 6)
+    np.testing.assert_allclose(seg.coords, coords)
+    np.testing.assert_allclose(seg.features["equivalent_diameter_area"], 2)
+
+
 def _write_ctc_fixture(base: Path, layout: str) -> Path:
     if layout == "standard":
         root = base / "Fluo-C2DL-Huh7" / "01"

@@ -89,6 +89,53 @@ def _border_dist(mask: np.ndarray, cutoff: float = 5):
     return tuple(r.intensity_max for r in regionprops(mask, intensity_image=dist))
 
 
+def diameter_scale_factor(
+    features: Sequence["WRFeatures"], target_diameter: float | None
+) -> float:
+    if target_diameter is None:
+        return 1.0
+    if target_diameter <= 0:
+        raise ValueError("scale_target_diameter must be positive")
+    diameters = []
+    for feature in features:
+        values = feature.features.get("equivalent_diameter_area")
+        if values is not None:
+            diameters.append(values[:, 0])
+    if not diameters:
+        raise ValueError(
+            "scale_target_diameter requires equivalent_diameter_area features"
+        )
+    diameters = np.concatenate(diameters)
+    valid = diameters[np.isfinite(diameters) & (diameters > 0)]
+    if len(valid) == 0:
+        raise ValueError("scale_target_diameter found no positive diameters")
+    return float(target_diameter) / float(np.median(valid))
+
+
+def scale_feature_geometry(feature: "WRFeatures", scale: float) -> "WRFeatures":
+    if scale == 1.0:
+        return feature
+    features = OrderedDict(feature.features)
+    for name in ("equivalent_diameter_area", "border_dist"):
+        if name in features:
+            features[name] = features[name] * scale
+    if "inertia_tensor" in features:
+        features["inertia_tensor"] = features["inertia_tensor"] * scale**2
+    return WRFeatures(
+        coords=feature.coords * scale,
+        labels=feature.labels,
+        timepoints=feature.timepoints,
+        features=features,
+    )
+
+
+def scale_to_target_diameter(
+    features: Sequence["WRFeatures"], target_diameter: float | None
+) -> list["WRFeatures"]:
+    scale = diameter_scale_factor(features, target_diameter)
+    return [scale_feature_geometry(feature, scale) for feature in features]
+
+
 def _border_dist_fast(mask: np.ndarray, cutoff: float = 5):
     cutoff = int(cutoff)
     border = np.ones(mask.shape, dtype=np.float32)

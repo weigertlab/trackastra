@@ -45,6 +45,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mode", choices=("greedy", "greedy_nodiv", "ilp"), default="greedy"
     )
     parser.add_argument("--max-distance", type=int, default=None)
+    parser.add_argument(
+        "--scale-target-diameter",
+        "--scale_target_diameter",
+        dest="scale_target_diameter",
+        type=float,
+        default=None,
+        help=(
+            "Scale WR feature geometry so each movie's median equivalent diameter "
+            "matches this value. Defaults to the model train config when present."
+        ),
+    )
     parser.add_argument("-f", "--overwrite", action="store_true")
     parser.add_argument(
         "--errormovie",
@@ -215,6 +226,7 @@ def predict_and_evaluate(
     model_name: str,
     mode: str = "greedy",
     max_distance: int | None = None,
+    scale_target_diameter: float | None = None,
     overwrite: bool = False,
     print_results: bool = True,
     errormovie: bool = False,
@@ -251,7 +263,12 @@ def predict_and_evaluate(
         output_path = outdir / model_name / name
         _prepare_output(output_path, overwrite)
 
-        track_kwargs = dict(mode=mode, max_distance=max_distance, normalize_imgs=False)
+        track_kwargs = dict(
+            mode=mode,
+            max_distance=max_distance,
+            normalize_imgs=False,
+            scale_target_diameter=scale_target_diameter,
+        )
         if error_report:
             track_kwargs["return_details"] = True
         tracked = model.track(imgs, masks, **track_kwargs)
@@ -328,6 +345,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         model_name=model_name,
         mode=args.mode,
         max_distance=args.max_distance,
+        scale_target_diameter=args.scale_target_diameter,
         overwrite=args.overwrite,
         errormovie=args.errormovie,
         error_report=getattr(args, "error_report", False),

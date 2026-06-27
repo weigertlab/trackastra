@@ -1692,7 +1692,7 @@ def parse_train_args():
         "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
     )
     parser.add_argument("--max_neighbors", type=int, nargs="+", default=[16])
-    parser.add_argument("--logit_norm", type=str2bool, default=False)
+    parser.add_argument("--logit_norm", type=str2bool, default=True)
     parser.add_argument("--assoc_head", choices=["bilinear"], default="bilinear")
     parser.add_argument(
         "--architecture_version",
