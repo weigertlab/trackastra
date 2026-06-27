@@ -1,14 +1,12 @@
 """Transformer class."""
 
 import logging
-import math
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 
 # from torch_geometric.nn import GATv2Conv
 import yaml
@@ -17,10 +15,10 @@ from torch import nn
 # NoPositionalEncoding,
 from trackastra.utils import blockwise_causal_norm
 
+from .heads import HeadBilinear
 from .model_parts import (
     FeatureMLP,
     FeedForward,
-    MultiChannelPairHead,
     PositionalEncoding,
     RelativePositionalAttention,
 )
@@ -325,8 +323,7 @@ class TrackingTransformer(torch.nn.Module):
         attn_mode: Literal["dense", "sparse"] = "dense",
         max_neighbors: int | Sequence[int] = 16,
         logit_norm: bool = True,
-        assoc_head: Literal["bilinear", "multichannel"] = "bilinear",
-        assoc_channels: int = 8,
+        assoc_head: Literal["bilinear"] = "bilinear",
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
@@ -372,7 +369,6 @@ class TrackingTransformer(torch.nn.Module):
             max_neighbors=max_neighbors,
             logit_norm=logit_norm,
             assoc_head=assoc_head,
-            assoc_channels=assoc_channels,
             architecture_version=architecture_version,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
@@ -429,24 +425,11 @@ class TrackingTransformer(torch.nn.Module):
             for _ in range(num_decoder_layers)
         ])
 
-        # association readout. "bilinear" (default): per-side FeedForward then a
-        # single (optionally temperature-scaled, L2-normalized) dot product.
-        # "multichannel": a learned multi-subspace pairwise head (see below).
+        # association readout. "bilinear" (currently the only option) is kept as
+        # a Literal so further heads can be added later.
         self.assoc_head = assoc_head
         if assoc_head == "bilinear":
-            self.head_x = FeedForward(d_model, dropout=dropout)
-            self.head_y = FeedForward(d_model, dropout=dropout)
-            # L2-normalize the head embeddings and scale the cosine-similarity
-            # logits by a learned temperature (CLIP-style). This decouples logit
-            # magnitude from d_model, giving better-calibrated and more stable
-            # associations than a raw, unscaled dot product.
-            self.logit_norm = logit_norm
-            if logit_norm:
-                self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
-        elif assoc_head == "multichannel":
-            self.pair_head = MultiChannelPairHead(
-                d_model, channels=assoc_channels, dropout=dropout
-            )
+            self.head = HeadBilinear(d_model, logit_norm=logit_norm, dropout=dropout)
         else:
             raise ValueError(f"unknown assoc_head: {assoc_head!r}")
 
@@ -552,25 +535,8 @@ class TrackingTransformer(torch.nn.Module):
             )
             # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
-        if self.assoc_head == "multichannel":
-            A = self.pair_head(x, y)
-        else:
-            x = self.head_x(x)
-            y = self.head_y(y)
-            # outer product is the association matrix (logits)
-            if self.logit_norm:
-                x = F.normalize(x, dim=-1)
-                y = F.normalize(y, dim=-1)
-                # clamp the learned temperature just above its init (1/0.07 =
-                # 14.3): BCE always rewards more sharpening, so if left free this
-                # climbs until the softmax becomes a cliff and training diverges
-                # (loss creeps up over epochs, then NaNs). T~14 already saturates
-                # both BCE and the blockwise softmax, so 15 gives a hair of room
-                # without the runaway.
-                scale = self.logit_scale.exp().clamp(max=15.0)
-                A = scale * torch.einsum("bnd,bmd->bnm", x, y)
-            else:
-                A = torch.einsum("bnd,bmd->bnm", x, y)
+        # outer product is the association matrix (logits), (B, N, N)
+        A = self.head(x, y)
 
         return A
 

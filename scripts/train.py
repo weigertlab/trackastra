@@ -1492,7 +1492,6 @@ def train(args):
             max_neighbors=args.max_neighbors,
             logit_norm=args.logit_norm,
             assoc_head=args.assoc_head,
-            assoc_channels=args.assoc_channels,
             causal_norm=args.causal_norm,
             architecture_version=args.architecture_version,
             disable_abs_pos=args.disable_abs_pos,
@@ -1694,10 +1693,7 @@ def parse_train_args():
     )
     parser.add_argument("--max_neighbors", type=int, nargs="+", default=[16])
     parser.add_argument("--logit_norm", type=str2bool, default=False)
-    parser.add_argument(
-        "--assoc_head", choices=["bilinear", "multichannel"], default="bilinear"
-    )
-    parser.add_argument("--assoc_channels", type=int, default=8)
+    parser.add_argument("--assoc_head", choices=["bilinear"], default="bilinear")
     parser.add_argument(
         "--architecture_version",
         type=int,
