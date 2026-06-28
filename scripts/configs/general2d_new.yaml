@@ -1,0 +1,133 @@
+name: general2d
+epochs: 500
+warmup_epochs: 2
+augment: 3
+window: 4
+features: wrfeat2
+attn_dist_mode: none
+delta_cutoff: 1
+num_encoder_layers: 6
+num_decoder_layers: 6
+causal_norm: quiet_softmax
+cache: true
+cachedir: runs/.cache
+d_model: 320
+dropout: 0.05
+detect_drop: 0.2
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+focal_loss_gamma: 0.0
+train_samples: 32000
+tracking_frequency: 5
+tracking_mode: greedy
+max_detections: 1024
+batch_size: 32
+weight_by_dataset: true
+weight_by_ndivs: false
+detection_folders:
+- TRA
+- RES
+# detection_noise: add
+input_train:
+# - data/YIT/TestSet1  # missing
+# - data/YIT/TestSet2  # missing
+# - data/YIT/TestSet3  # missing
+# - data/YIT/TestSet5  # missing
+- data/ker_phasecontrast/dataset1/sub_5/exp1_F0008
+# - data/ker_phasecontrast/dataset1/sub_5/exp1_F0016  # missing
+- data/ker_phasecontrast/dataset1/sub_5/exp1_F0003
+# - data/ker_phasecontrast/dataset1/sub_5/exp1_F0015  # missing
+- data/synthetic_cells/01
+- data/synthetic_cells/02
+- data/synthetic_cells/03
+- data/synthetic_cells/04
+- data/synthetic_cells/06
+- data/synthetic_cells/07
+- data/synthetic_cells/08
+# - data/vanvliet/cib/140408-02  # missing
+# - data/vanvliet/cib/140408-04  # missing
+# - data/vanvliet/cib/140408-10  # missing
+# - data/vanvliet/rpsM/151101_E4-19  # missing
+# - data/vanvliet/rpsM/151101_E4-20  # missing
+- data/vanvliet/metA/150317-07
+- data/vanvliet/metA/150318-06
+- data/vanvliet/recA/151027-05
+- data/vanvliet/pheA/150324-03
+- data/vanvliet/pheA/150324-05
+- data/vanvliet/pheA/150325-04
+- data/vanvliet/pheA/160112-04
+- data/vanvliet/trpL/150303-01
+# - data/vanvliet/trpL/150303-08  # missing
+
+- data/deepcell/train/00
+- data/deepcell/train/01
+- data/deepcell/train/02
+- data/deepcell/train/03
+- data/deepcell/train/04
+- data/deepcell/train/05
+- data/deepcell/train/06
+- data/deepcell/train/07
+- data/deepcell/train/08
+- data/deepcell/train/09
+- data/deepcell/train/10
+- data/deepcell/train/11
+- data/deepcell/train/12
+- data/deepcell/train/13
+- data/deepcell/train/14
+- data/deepcell/train/15
+- data/deepcell/train/16
+- data/deepcell/train/17
+- data/deepcell/train/18
+- data/deepcell/train/19
+- data/deepcell/train/20
+- data/deepcell/train/21
+
+- data/ctc_2026/2d/BF-C2DL-HSC/01
+- data/ctc_2026/2d/BF-C2DL-HSC/02
+- data/ctc_2026/2d/BF-C2DL-MuSC/01
+- data/ctc_2026/2d/BF-C2DL-MuSC/02
+- data/ctc_2026/2d/DIC-C2DH-HeLa/01
+# - data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-C2DL-Huh7/01
+- data/ctc_2026/2d/Fluo-C2DL-Huh7/02
+- data/ctc_2026/2d/Fluo-C2DL-MSC/01
+- data/ctc_2026/2d/Fluo-C2DL-MSC/02
+- data/ctc_2026/2d/Fluo-N2DH-GOWT1/01
+- data/ctc_2026/2d/Fluo-N2DH-GOWT1/02
+- data/ctc_2026/2d/Fluo-N2DH-SIM+/01
+- data/ctc_2026/2d/Fluo-N2DH-SIM+/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/01
+# - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DH-U373/01
+- data/ctc_2026/2d/PhC-C2DH-U373/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/01
+# - data/ctc_2026/2d/PhC-C2DL-PSC/02
+
+- data/ctc_2024_train_ds2/DIC-C2DH-HeLa/01
+- data/ctc_2024_train_ds2/DIC-C2DH-HeLa/02
+- data/ctc_2024_train_ds2/Fluo-C2DL-MSC/01
+- data/ctc_2024_train_ds2/Fluo-C2DL-MSC/02
+- data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/01
+- data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/02
+- data/ctc_2024_train_ds2/PhC-C2DH-U373/01
+- data/ctc_2024_train_ds2/PhC-C2DH-U373/02
+- data/ctc_2024_train_ds2/PhC-C2DL-PSC/01
+- data/ctc_2024_train_ds2/PhC-C2DL-PSC/02
+
+# - data/isbi_tracking/train/microtubule/MICROTUBULE_snr_1_density_mid  # missing
+# - data/isbi_tracking/train/microtubule/MICROTUBULE_snr_2_density_mid  # missing
+# - data/isbi_tracking/train/microtubule/MICROTUBULE_snr_4_density_low  # missing
+# - data/isbi_tracking/train/receptor/RECEPTOR_snr_1_density_low  # missing
+# - data/isbi_tracking/train/receptor/RECEPTOR_snr_1_density_high  # missing
+# - data/isbi_tracking/train/vesicle/VESICLE_snr_1_density_low  # missing
+# - data/isbi_tracking/train/vesicle/VESICLE_snr_1_density_high  # missing
+
+input_val:
+- data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/02
+input_test:
+- data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- data/ctc_2026/2d/PhC-C2DL-PSC/02
