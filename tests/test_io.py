@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import pytest
 import torch
-from tifffile import imwrite
+from tifffile import imread, imwrite
 from trackastra.data.dataset import TrackingDataset
 from trackastra.data.io import Segmentation, TrackingSequence, load_ctc_images_masks
 from trackastra.utils import normalize
@@ -194,6 +194,32 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     assert sample["assoc_matrix"][0, 1]
     assert sample["assoc_matrix"][0, 2]
     assert not sample["assoc_matrix"][1, 2]
+
+
+def test_from_ctc_tolerates_partial_detection_folders(tmp_path):
+    # simple layout writes masks under root/TRA; mirror them into root/RES
+    root = _write_ctc_fixture(tmp_path, "simple")
+    res = root / "RES"
+    res.mkdir()
+    for f in sorted((root / "TRA").glob("*.tif")):
+        imwrite(res / f.name, imread(f))
+
+    # a requested folder that is missing is skipped, the available one still loads
+    only_tra = _write_ctc_fixture(tmp_path / "tra_only", "simple")
+    seq = TrackingSequence.from_ctc(
+        only_tra, detection_folders=("TRA", "RES"), n_workers=1
+    )
+    assert [s.name for s in seq.segmentations] == ["TRA"]
+
+    # when both are present, each contributes its own segmentation (~twice the windows)
+    seq_both = TrackingSequence.from_ctc(
+        root, detection_folders=("TRA", "RES"), n_workers=1
+    )
+    assert sorted(s.name for s in seq_both.segmentations) == ["RES", "TRA"]
+
+    # none of the requested folders present -> fatal
+    with pytest.raises(FileNotFoundError):
+        TrackingSequence.from_ctc(only_tra, detection_folders=("RES",), n_workers=1)
 
 
 def test_load_ctc_images_masks_refines_tra_with_st(tmp_path):

@@ -432,11 +432,27 @@ def _load_ctc_sequence(
     root, image_path, gt_path, track_path = _resolve_paths(
         Path(root), image_folder, gt_folder, track_file, use_gt
     )
-    detection_paths = [
-        _resolve_detection_folder(root, folder) for folder in detection_folders
-    ]
-    if not detection_paths:
+    if not detection_folders:
         raise ValueError("At least one detection folder is required")
+    detection_paths, resolved_folders, missing = [], [], []
+    for folder in detection_folders:
+        try:
+            detection_paths.append(_resolve_detection_folder(root, folder))
+            resolved_folders.append(folder)
+        except FileNotFoundError:
+            missing.append(str(folder))
+    if not detection_paths:
+        raise FileNotFoundError(
+            f"None of the detection folders {[str(f) for f in detection_folders]} "
+            f"found for {root}"
+        )
+    if missing:
+        logger.warning(
+            "%s: skipping missing detection folders %s; using %s",
+            root,
+            missing,
+            resolved_folders,
+        )
     reference_mask_path = gt_path if use_gt else detection_paths[0]
     n_frames = len(tuple(reference_mask_path.glob("*.tif")))
     start, stop = int(n_frames * slice_pct[0]), int(n_frames * slice_pct[1])
@@ -476,7 +492,7 @@ def _load_ctc_sequence(
         lineage_parents = np.full(next_index, -1, dtype=np.int64)
 
     segmentations = []
-    for folder, detection_path in zip(detection_folders, detection_paths):
+    for folder, detection_path in zip(resolved_folders, detection_paths):
         detection_masks = _load_refined_masks(
             detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
         )

@@ -1468,6 +1468,39 @@ def _skip_missing_input_folders(split: str, input_paths: list[str]) -> list[str]
     return existing
 
 
+def _check_detection_folders(
+    split: str, input_paths: list[str], detection_folders: list[str]
+) -> None:
+    """Error once, listing every input that has none of the requested detection folders.
+
+    A partial subset is fine (e.g. ``["TRA", "RES"]`` on a TRA-only dataset loads the
+    available folder); only inputs where none of the requested folders resolve are fatal.
+    """
+    from trackastra.data.io import _resolve_detection_folder
+
+    unusable = []
+    for p in input_paths:
+        root = Path(p).expanduser()
+        # mirror _resolve_paths: a folder named "TRA" points back at its sequence root
+        if root.name == "TRA":
+            root = root.parent.parent / root.parent.name.split("_")[0]
+        found = []
+        for folder in detection_folders:
+            try:
+                _resolve_detection_folder(root, folder)
+                found.append(folder)
+            except FileNotFoundError:
+                pass
+        if not found:
+            unusable.append(p)
+
+    if unusable:
+        raise FileNotFoundError(
+            f"{len(unusable)} {split} input(s) have none of the detection folders "
+            f"{detection_folders}:\n  " + "\n  ".join(unusable)
+        )
+
+
 def find_val_batch(loader_val, n_gpus):
     # find the val batch with most divisions for vizualisation, which runs on GPU 0
     batches_val = tuple(
@@ -1577,6 +1610,8 @@ def train(args):
 
     args.input_train = _skip_missing_input_folders("training", args.input_train)
     args.input_val = _skip_missing_input_folders("validation", args.input_val)
+    _check_detection_folders("training", args.input_train, args.detection_folders)
+    _check_detection_folders("validation", args.input_val, args.detection_folders)
 
     sequence_kwargs = dict(
         ndim=args.ndim,
