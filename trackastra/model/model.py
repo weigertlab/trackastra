@@ -22,7 +22,12 @@ from .model_parts import (
     PositionalEncoding,
     RelativePositionalAttention,
 )
-from .sparse_attn import SparseRelativePositionalAttention, build_knn_index
+from .sparse_attn import (
+    SparseRelativePositionalAttention,
+    build_knn_index,
+    build_knn_index_next_frame,
+    build_knn_index_per_frame,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +349,7 @@ class TrackingTransformer(torch.nn.Module):
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
         max_neighbors: int | Sequence[int] = 16,
+        sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "global",
         logit_norm: bool = True,
         head_mode: Literal["bilinear", "sparse_bilinear"] | None = None,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
@@ -406,6 +412,7 @@ class TrackingTransformer(torch.nn.Module):
             attn_dist_mode=attn_dist_mode,
             attn_mode=attn_mode,
             max_neighbors=max_neighbors,
+            sparse_knn_mode=sparse_knn_mode,
             logit_norm=logit_norm,
             head_mode=head_mode,
             architecture_version=architecture_version,
@@ -415,6 +422,7 @@ class TrackingTransformer(torch.nn.Module):
         self.architecture_version = architecture_version
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
+        self.sparse_knn_mode = sparse_knn_mode
         self.max_distance = max_distance
         self.attn_dist_mode = attn_dist_mode
         self.disable_abs_pos = disable_abs_pos
@@ -545,7 +553,11 @@ class TrackingTransformer(torch.nn.Module):
         if self.attn_mode == "sparse":
             lo, hi = self.max_neighbors
             K = int(torch.randint(lo, hi + 1, (1,)).item()) if self.training else hi
-            nbr_idx = build_knn_index(
+            build = {
+                "per_frame": build_knn_index_per_frame,
+                "next_frame": build_knn_index_next_frame,
+            }.get(self.sparse_knn_mode, build_knn_index)
+            nbr_idx = build(
                 coords,
                 padding_mask,
                 self.max_distance,

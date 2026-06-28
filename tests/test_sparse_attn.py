@@ -10,7 +10,11 @@ kNN graph construction and that the model runs end to end in sparse mode.
 import pytest
 import torch
 from trackastra.model.model import TrackingTransformer
-from trackastra.model.sparse_attn import build_knn_index
+from trackastra.model.sparse_attn import (
+    build_knn_index,
+    build_knn_index_next_frame,
+    build_knn_index_per_frame,
+)
 
 
 def _sparse_inputs(B=2, N=40, coord_dim=2, seed=0):
@@ -42,6 +46,84 @@ def test_build_knn_index_sentinels():
     assert 3 not in row[valid].tolist()  # padded key
     # invalid slots are encoded as the -1 sentinel
     assert torch.all(row[~valid] == -1)
+
+
+def test_per_frame_knn_keeps_self_and_covers_every_frame():
+    # 3 frames x 3 detections; spatial layout irrelevant beyond ordering.
+    t = torch.repeat_interleave(torch.arange(3), 3).float().view(1, 9, 1)
+    yx = 5 * torch.rand(1, 9, 2)
+    coords = torch.cat([t, yx], dim=-1)
+
+    nbr_idx = build_knn_index_per_frame(
+        coords, None, cutoff_spatial=256.0, max_neighbors=1
+    )
+    # K=1 over 3 frames -> exactly F*K = 3 slots per query
+    assert nbr_idx.shape == (1, 9, 3)
+    # query 0 lives in frame 0: it must include itself (self distance 0) and land
+    # exactly one neighbour in each of the three frames.
+    row = nbr_idx[0, 0].tolist()
+    assert 0 in row  # diagonal preserved
+    frames = t[0, :, 0].long()
+    assert {int(frames[j]) for j in row} == {0, 1, 2}
+
+
+def test_per_frame_knn_sentinels_for_empty_frame():
+    # frame 1 has no detections -> its bucket must be all -1 sentinels.
+    coords = torch.tensor([[
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [2.0, 0.0, 0.0],
+    ]])
+    nbr_idx = build_knn_index_per_frame(
+        coords, None, cutoff_spatial=10.0, max_neighbors=1
+    )
+    # 3 frame buckets (t in {0,1,2}); the t=1 bucket is empty for every query.
+    assert nbr_idx.shape == (1, 3, 3)
+    assert torch.all(nbr_idx[:, :, 1] == -1)
+
+
+def test_next_frame_knn_covers_only_same_and_next_frame():
+    # 3 frames x 3 detections.
+    t = torch.repeat_interleave(torch.arange(3), 3).float().view(1, 9, 1)
+    yx = 5 * torch.rand(1, 9, 2)
+    coords = torch.cat([t, yx], dim=-1)
+
+    nbr_idx = build_knn_index_next_frame(
+        coords, None, cutoff_spatial=256.0, max_neighbors=1
+    )
+    # K=1 over 2 offsets -> 2*K = 2 slots per query
+    assert nbr_idx.shape == (1, 9, 2)
+    frames = t[0, :, 0].long()
+
+    # query 0 (frame 0): same-frame slot keeps self (dt=0), next slot lands in frame 1
+    same, nxt = nbr_idx[0, 0].tolist()
+    assert same == 0  # diagonal preserved in the dt=0 block
+    assert int(frames[nxt]) == 1
+
+    # a query in the last frame has no next frame -> next-frame slot is a sentinel
+    same_last, nxt_last = nbr_idx[0, 8].tolist()
+    assert int(frames[same_last]) == 2
+    assert nxt_last == -1
+
+
+def test_sparse_model_runs_finite_per_frame():
+    coords, padding_mask = _sparse_inputs()
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=2,
+        num_decoder_layers=2,
+        dropout=0.0,
+        window=6,
+        max_distance=40,
+        attn_mode="sparse",
+        max_neighbors=1,
+        sparse_knn_mode="per_frame",
+    ).eval()
+    with torch.no_grad():
+        a, _ = model(coords, padding_mask=padding_mask)
+    assert torch.isfinite(a).all()
 
 
 def test_sparse_model_runs_finite():

@@ -267,6 +267,71 @@ def _reduce_matrix_loss(
     return (loss_per_sample * sample_valid).sum() / sample_valid.sum().clamp_min(1)
 
 
+def _child_ce_loss_matrix(
+    log_p: torch.Tensor,
+    log_p_null: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    dt: torch.Tensor,
+    delta_cutoff: int,
+    focal_loss_gamma: float = 0.0,
+) -> torch.Tensor:
+    """Matrix-shaped child parent-or-null CE loss."""
+    mask = mask.bool()
+    target = (target > 0.5) & mask
+    loss = torch.zeros_like(log_p)
+
+    for delta in range(1, delta_cutoff + 1):
+        candidate_mask = mask & (dt == delta)
+        target_delta = target & (dt == delta)
+
+        true_edge_loss = (-log_p).masked_fill(~target_delta, 0.0)
+        loss = loss + _apply_focal_weight(true_edge_loss, focal_loss_gamma)
+
+        candidate_count = candidate_mask.sum(dim=1)
+        target_count = target_delta.sum(dim=1)
+        null_decision = (candidate_count > 0) & (target_count == 0)
+        null_logp = log_p_null.masked_fill(~candidate_mask, -torch.inf)
+        null_loss = torch.where(
+            candidate_count > 0,
+            -null_logp.amax(dim=1),
+            torch.zeros_like(candidate_count, dtype=log_p.dtype),
+        )
+        null_loss = _apply_focal_weight(null_loss, focal_loss_gamma)
+        null_per_candidate = null_loss / candidate_count.clamp_min(1)
+        loss = loss + (
+            candidate_mask.float()
+            * null_decision.unsqueeze(1)
+            * null_per_candidate.unsqueeze(1)
+        )
+
+    return loss
+
+
+def _quiet_softmax_child_log_null(
+    logits: torch.Tensor,
+    timepoints: torch.Tensor,
+    mask_invalid: torch.BoolTensor | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Log-probability of the quiet-softmax child null class."""
+    logits = logits.clone()
+    if mask_invalid is not None:
+        logits[mask_invalid] = -torch.inf
+
+    with torch.no_grad():
+        max_parent = blockwise_sum_batched(logits, timepoints, dim=0, reduce="amax")
+    exp_parent = torch.exp(logits - max_parent)
+    denom = blockwise_sum_batched(exp_parent, timepoints, dim=0, reduce="sum") + eps
+    denom = denom + torch.exp(-max_parent)
+    log_p_null = -max_parent - torch.log(denom)
+    return torch.where(
+        torch.isfinite(log_p_null),
+        log_p_null,
+        torch.zeros_like(log_p_null),
+    )
+
+
 def _git_commit():
     """Returns the git commit hash of the current repository if it exists, otherwise None (for debugging purposes)."""
     logging.debug(f"Trackastra path: {Path(trackastra.__path__[0]).resolve()}")
@@ -352,6 +417,7 @@ class WrappedLightningModule(pl.LightningModule):
         max_epochs: int = 100,
         learning_rate: float = 1e-5,
         causal_norm: str = "none",
+        assoc_loss: str = "bce",
         loss_norm: str = "matrix",
         focal_loss_gamma: float = 0.0,
         delta_cutoff: int = 2,
@@ -377,8 +443,15 @@ class WrappedLightningModule(pl.LightningModule):
 
         self.model = model
         self.causal_norm = causal_norm
+        if assoc_loss not in ("bce", "child_ce"):
+            raise ValueError(f"Unknown assoc_loss {assoc_loss!r}")
+        if assoc_loss == "child_ce" and causal_norm != "quiet_softmax":
+            raise ValueError("assoc_loss='child_ce' requires causal_norm='quiet_softmax'")
         if loss_norm not in ("matrix", "decision"):
             raise ValueError(f"Unknown loss_norm {loss_norm!r}")
+        if assoc_loss == "child_ce" and loss_norm != "decision":
+            raise ValueError("assoc_loss='child_ce' requires loss_norm='decision'")
+        self.assoc_loss = assoc_loss
         if focal_loss_gamma < 0:
             raise ValueError("focal_loss_gamma must be non-negative")
         self.loss_norm = loss_norm
@@ -414,6 +487,7 @@ class WrappedLightningModule(pl.LightningModule):
         # the trainer to a directory; one human-readable CSV is written per epoch
         # and the index->root map is dumped once on first use.
         self.batch_provenance_path: Path | None = None
+        self.tracking_metrics_path: Path | None = None
         self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
         self._batch_provenance_epochs_started: set[int] = set()
@@ -494,7 +568,10 @@ class WrappedLightningModule(pl.LightningModule):
         with TemporaryDirectory() as tmpdir:
             for movie in self._tracking_cache:
                 predictions = tm._predict_from_windows(
-                    movie["features"], movie["windows"], spatial_dim=movie["spatial_dim"]
+                    movie["features"],
+                    movie["windows"],
+                    spatial_dim=movie["spatial_dim"],
+                    batch_size=1,
                 )
                 graph = tm._track_from_predictions(
                     predictions, mode=self.tracking_mode, max_distance=max_distance
@@ -512,6 +589,17 @@ class WrappedLightningModule(pl.LightningModule):
                     "movie": movie["name"], **values, **link_type_breakdown(matched)
                 })
         return pd.DataFrame(rows)
+
+    def _write_tracking_metrics(self, metrics: pd.DataFrame, epoch: int) -> None:
+        """Write per-movie tracking metrics for one validation epoch."""
+        if self.tracking_metrics_path is None:
+            return
+        path = self.tracking_metrics_path / f"tracking_metrics_epoch{epoch:04d}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = metrics.copy()
+        out.insert(0, "epoch", int(epoch))
+        out.insert(1, "global_step", int(self.global_step))
+        out.to_csv(path, index=False)
 
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
@@ -569,6 +657,17 @@ class WrappedLightningModule(pl.LightningModule):
         )
 
         A_pred[mask_invalid] = 0
+        mask_valid = ~mask_invalid
+        if scored_mask is not None:
+            # Sparse head: only the kNN pairs carry a real logit; every other pair
+            # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
+            # those from the loss (numerator and the normalisation count) so an
+            # unrecoverable positive outside the neighbourhood cannot spike it.
+            mask_valid = mask_valid & scored_mask
+        dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+        mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
+        mask = (mask_time & mask_valid).float()
+
         loss = _apply_focal_weight(self.criterion(A_pred, A), self.focal_loss_gamma)
 
         if self.causal_norm != "none":
@@ -585,10 +684,26 @@ class WrappedLightningModule(pl.LightningModule):
                     mask_invalid=mask_invalid,
                 )
                 At = A.float()
-                soft_loss = _apply_focal_weight(
-                    -(At * log_p + (1.0 - At) * log_1mp),
-                    self.focal_loss_gamma,
-                )
+                if self.assoc_loss == "child_ce":
+                    log_p_null = _quiet_softmax_child_log_null(
+                        A_pred.float(),
+                        timepoints,
+                        mask_invalid=mask_invalid,
+                    )
+                    soft_loss = _child_ce_loss_matrix(
+                        log_p,
+                        log_p_null,
+                        At,
+                        mask,
+                        dt,
+                        delta_cutoff=self.delta_cutoff,
+                        focal_loss_gamma=self.focal_loss_gamma,
+                    )
+                else:
+                    soft_loss = _apply_focal_weight(
+                        -(At * log_p + (1.0 - At) * log_1mp),
+                        self.focal_loss_gamma,
+                    )
                 loss = 0.01 * loss + soft_loss
 
         # Reweighting does not need gradients
@@ -604,19 +719,6 @@ class WrappedLightningModule(pl.LightningModule):
             loss_weight = 1 + 1.0 * normal_tracks + self.div_upweight * division_tracks
 
         loss = loss * loss_weight
-
-        mask_valid = ~mask_invalid
-        if scored_mask is not None:
-            # Sparse head: only the kNN pairs carry a real logit; every other pair
-            # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
-            # those from the loss (numerator and the normalisation count) so an
-            # unrecoverable positive outside the neighbourhood cannot spike it.
-            mask_valid = mask_valid & scored_mask
-        dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
-        mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
-
-        mask = mask_time * mask_valid
-        mask = mask.float()
 
         loss_before_reduce = loss * mask
         if self.loss_norm == "decision":
@@ -1064,6 +1166,9 @@ class WrappedLightningModule(pl.LightningModule):
         ):
             try:
                 metrics = self._run_tracking_eval()
+                self._write_tracking_metrics(metrics, epoch=int(self.current_epoch))
+                print(f"[epoch {self.current_epoch}] per-movie tracking metrics:")
+                print(metrics.to_markdown(index=False))
                 values = _summarize_tracking_metrics(metrics)
                 msg = (
                     f"[epoch {self.current_epoch}] "
@@ -1576,6 +1681,7 @@ def train(args):
             attn_dist_mode=args.attn_dist_mode,
             attn_mode=args.attn_mode,
             max_neighbors=args.max_neighbors,
+            sparse_knn_mode=args.sparse_knn_mode,
             logit_norm=args.logit_norm,
             head_mode=args.head_mode,
             causal_norm=args.causal_norm,
@@ -1596,6 +1702,7 @@ def train(args):
         learning_rate=args.lr,
         delta_cutoff=args.delta_cutoff,
         causal_norm=args.causal_norm,
+        assoc_loss=args.assoc_loss,
         loss_norm=args.loss_norm,
         focal_loss_gamma=args.focal_loss_gamma,
         tracking_frequency=args.tracking_frequency,
@@ -1621,6 +1728,7 @@ def train(args):
                 learning_rate=args.lr,
                 delta_cutoff=args.delta_cutoff,
                 causal_norm=args.causal_norm,
+                assoc_loss=args.assoc_loss,
                 loss_norm=args.loss_norm,
                 focal_loss_gamma=args.focal_loss_gamma,
                 tracking_frequency=args.tracking_frequency,
@@ -1643,6 +1751,9 @@ def train(args):
     else:
         model_lightning.loss_spike_debug_dir = None
         model_lightning.batch_provenance_path = None
+    model_lightning.tracking_metrics_path = (
+        Path(logdir) / "metrics" if logdir is not None else None
+    )
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"Model has {num_params / 1e6:.1f}M parameters")
@@ -1727,7 +1838,7 @@ def parse_train_args():
     parser.add_argument("-d", "--d_model", type=int, default=256)
     parser.add_argument("-w", "--window", type=int, default=10)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--warmup_epochs", type=int, default=10)
+    parser.add_argument("--warmup_epochs", type=int, default=2)
     parser.add_argument(
         "--detection_folders",
         type=str,
@@ -1781,6 +1892,15 @@ def parse_train_args():
         "--attn_mode", type=str, choices=["dense", "sparse"], default="dense"
     )
     parser.add_argument("--max_neighbors", type=int, nargs="+", default=[16])
+    parser.add_argument(
+        "--sparse_knn_mode",
+        type=str,
+        choices=["global", "per_frame", "next_frame"],
+        default="global",
+        help="sparse kNN budget: 'global' = K nearest over the whole window; "
+        "'per_frame' = K nearest within each frame (-> F*K slots, keeps the diagonal); "
+        "'next_frame' = K nearest in the same and next frame (-> 2*K slots)",
+    )
     parser.add_argument("--logit_norm", type=str2bool, default=True)
     parser.add_argument(
         "--head_mode",
@@ -1819,6 +1939,15 @@ def parse_train_args():
         type=str,
         choices=["none", "linear", "softmax", "quiet_softmax"],
         default="quiet_softmax",
+    )
+    parser.add_argument(
+        "--assoc_loss",
+        choices=["bce", "child_ce"],
+        default="bce",
+        help=(
+            "association loss: per-edge BCE or child parent-or-null CE; "
+            "child_ce requires --loss_norm decision"
+        ),
     )
     parser.add_argument(
         "--loss_norm",

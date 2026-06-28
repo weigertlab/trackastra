@@ -10,7 +10,9 @@ import torch
 from scripts.train import (
     WrappedLightningModule,
     _apply_focal_weight,
+    _child_ce_loss_matrix,
     _feature_dim,
+    _quiet_softmax_child_log_null,
     _reduce_decision_loss,
     _reduce_matrix_loss,
     _resolve_feature_embed_mode,
@@ -165,6 +167,23 @@ def test_parse_disable_input_norm(monkeypatch):
     assert args.disable_input_norm is True
 
 
+def test_parse_assoc_loss(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--assoc_loss",
+            "child_ce",
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.assoc_loss == "child_ce"
+
+
 def test_summarize_tracking_metrics_includes_linking_and_detection():
     metrics = pd.DataFrame(
         {
@@ -303,6 +322,55 @@ def test_matrix_loss_averages_valid_samples_equally():
     loss = _reduce_matrix_loss(pair_loss, mask)
 
     assert loss.item() == pytest.approx(expected.item())
+
+
+def test_child_ce_loss_uses_true_parent_or_null_decision():
+    timepoints = torch.tensor([[0, 0, 1]])
+    dt, mask = _decision_mask(timepoints)
+    log_p = torch.full((1, 3, 3), -20.0)
+    log_p[0, 0, 2] = torch.log(torch.tensor(0.8))
+    log_p[0, 1, 2] = torch.log(torch.tensor(0.1))
+    log_p_null = torch.full_like(log_p, -20.0)
+    log_p_null[0, 0, 2] = torch.log(torch.tensor(0.1))
+    log_p_null[0, 1, 2] = torch.log(torch.tensor(0.1))
+
+    target = torch.zeros((1, 3, 3))
+    target[0, 0, 2] = 1
+    positive_loss = _child_ce_loss_matrix(
+        log_p, log_p_null, target, mask, dt, delta_cutoff=1
+    )
+    null_loss = _child_ce_loss_matrix(
+        log_p, log_p_null, torch.zeros_like(target), mask, dt, delta_cutoff=1
+    )
+
+    assert positive_loss.sum().item() == pytest.approx(-np.log(0.8))
+    assert null_loss.sum().item() == pytest.approx(-np.log(0.1))
+
+
+def test_quiet_softmax_child_null_log_prob_uses_denominator_directly():
+    logits = torch.full((1, 3, 3), -20.0)
+    logits[0, 0, 2] = 0.0
+    logits[0, 1, 2] = np.log(2.0)
+    timepoints = torch.tensor([[0, 0, 1]])
+
+    log_p_null = _quiet_softmax_child_log_null(logits, timepoints)
+
+    assert log_p_null[0, 0, 2].item() == pytest.approx(-np.log(4.0), rel=1e-5)
+    assert log_p_null[0, 1, 2].item() == pytest.approx(-np.log(4.0), rel=1e-5)
+
+
+def test_child_ce_requires_quiet_softmax_and_decision_norm():
+    model = torch.nn.Identity()
+
+    with pytest.raises(ValueError, match="causal_norm='quiet_softmax'"):
+        WrappedLightningModule(model, assoc_loss="child_ce", causal_norm="none")
+    with pytest.raises(ValueError, match="loss_norm='decision'"):
+        WrappedLightningModule(
+            model,
+            assoc_loss="child_ce",
+            causal_norm="quiet_softmax",
+            loss_norm="matrix",
+        )
 
 
 def test_focal_weight_preserves_gamma_zero_and_focuses_hard_examples():

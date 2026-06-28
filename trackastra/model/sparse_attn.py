@@ -99,6 +99,112 @@ def build_knn_index(
     return idx.masked_fill(~valid, -1)
 
 
+def build_knn_index_per_frame(
+    coords: torch.Tensor,
+    padding_mask: torch.Tensor | None,
+    cutoff_spatial: float,
+    max_neighbors: int,
+) -> torch.Tensor:
+    """Time-aware kNN: K nearest spatial neighbours *within each frame*.
+
+    Unlike :func:`build_knn_index` (a single global budget of K nearest over the
+    whole window), this allocates K neighbour slots *per frame*, so a query always
+    sees its K spatially-closest detections in every frame of the window instead of
+    spending the budget on whichever frame happens to be densest. The query's own
+    frame contributes self (spatial distance 0) plus its K-1 nearest same-frame
+    detections, so the diagonal is always present. ``K=1`` therefore means "self in
+    the own frame, nearest neighbour in every other frame".
+
+    Args:
+        coords: (B, N, 1 + coord_dim), column 0 is the (integer) frame time.
+        padding_mask: (B, N) bool, True for padded tokens (ignored as keys).
+        cutoff_spatial: maximum spatial distance for a valid neighbour (= max_dist).
+        max_neighbors: K, the number of neighbour slots *per frame*.
+
+    Returns:
+        nbr_idx: (B, N, F * K) int64 neighbour indices, F = number of frames in the
+            window. Slots beyond ``cutoff_spatial``, pointing at padded keys, or in
+            a frame with fewer than K valid keys are encoded as -1 (sentinel), which
+            the ``sparse_attn`` kernels skip.
+    """
+    N = coords.shape[1]
+    t = coords[..., 0]  # (B, N) frame time
+    yx = coords[..., 1:]
+    spatial_dist = torch.cdist(yx, yx)  # (B, N, N)
+
+    invalid = spatial_dist > cutoff_spatial
+    if padding_mask is not None:
+        invalid = invalid | padding_mask.unsqueeze(1)  # padded keys
+
+    # Relative integer frame index in [0, F-1] per batch element. Padded tokens are
+    # pushed out of the min/max so they cannot shift the frame origin or count.
+    if padding_mask is not None:
+        t_lo = t.masked_fill(padding_mask, float("inf")).amin(dim=1, keepdim=True)
+        t_hi = t.masked_fill(padding_mask, float("-inf")).amax(dim=1, keepdim=True)
+    else:
+        t_lo = t.amin(dim=1, keepdim=True)
+        t_hi = t.amax(dim=1, keepdim=True)
+    frame_idx = (t - t_lo).round().long()  # (B, N); garbage for padded (unused)
+    n_frames = int((t_hi - t_lo).amax().item()) + 1
+
+    K = min(max_neighbors, N)
+    key_frame = frame_idx.unsqueeze(1)  # (B, 1, N): frame of each key
+    out = []
+    for f in range(n_frames):
+        # restrict candidate keys to frame f, then K nearest by spatial distance
+        dist_f = spatial_dist.masked_fill(invalid | (key_frame != f), float("inf"))
+        vals, idx = torch.topk(dist_f, K, dim=-1, largest=False)  # (B, N, K)
+        out.append(idx.masked_fill(torch.isinf(vals), -1))
+    return torch.cat(out, dim=-1)  # (B, N, F * K)
+
+
+def build_knn_index_next_frame(
+    coords: torch.Tensor,
+    padding_mask: torch.Tensor | None,
+    cutoff_spatial: float,
+    max_neighbors: int,
+) -> torch.Tensor:
+    """Time-local kNN: K nearest in the same frame (dt=0) and the next frame (dt=1).
+
+    A causal-style restriction of :func:`build_knn_index_per_frame`: instead of all
+    frames, a query only sees its K spatially-closest detections in its own frame
+    (``dt=0``, which always includes self at distance 0, so the diagonal is kept) and
+    in the immediately following frame (``dt=1``). This matches the forward
+    associations the loss actually scores (``0 < dt <= delta_cutoff``) when
+    ``delta_cutoff=1`` and keeps the slot count fixed at ``2 * K`` regardless of
+    window length.
+
+    Args:
+        coords: (B, N, 1 + coord_dim), column 0 is the (integer) frame time.
+        padding_mask: (B, N) bool, True for padded tokens (ignored as keys).
+        cutoff_spatial: maximum spatial distance for a valid neighbour (= max_dist).
+        max_neighbors: K, the number of neighbour slots *per frame offset*.
+
+    Returns:
+        nbr_idx: (B, N, 2 * K) int64 neighbour indices (same-frame block then
+            next-frame block); empty/under-filled slots are -1 sentinels.
+    """
+    N = coords.shape[1]
+    t = coords[..., 0]  # (B, N) frame time
+    yx = coords[..., 1:]
+    spatial_dist = torch.cdist(yx, yx)  # (B, N, N)
+
+    invalid = spatial_dist > cutoff_spatial
+    if padding_mask is not None:
+        invalid = invalid | padding_mask.unsqueeze(1)  # padded keys
+
+    # relative frame offset of each key w.r.t. each query: dt[b, i, j] = t_j - t_i
+    dt = (t.unsqueeze(1) - t.unsqueeze(2)).round()  # (B, N, N)
+
+    K = min(max_neighbors, N)
+    out = []
+    for offset in (0, 1):
+        dist_o = spatial_dist.masked_fill(invalid | (dt != offset), float("inf"))
+        vals, idx = torch.topk(dist_o, K, dim=-1, largest=False)  # (B, N, K)
+        out.append(idx.masked_fill(torch.isinf(vals), -1))
+    return torch.cat(out, dim=-1)  # (B, N, 2 * K)
+
+
 class SparseRelativePositionalAttention(RelativePositionalAttention):
     """kNN-sparse variant of RelativePositionalAttention.
 
