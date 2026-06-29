@@ -155,7 +155,13 @@ class HeadEdgeMLP(nn.Module):
     node level, closing most of that throughput gap.
     """
 
-    def __init__(self, d_model: int, edge_mlp_dim: int = 64, dropout: float = 0.0):
+    def __init__(
+        self,
+        d_model: int,
+        edge_mlp_dim: int = 64,
+        logit_norm: bool = True,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         # lazy import: edge_mlp ships with the optional 'sparse_attn' package.
         from .sparse_attn import _IMPORT_ERROR_MSG
@@ -164,6 +170,10 @@ class HeadEdgeMLP(nn.Module):
             from sparse_attn import EdgeMLPClassifier
         except ImportError as e:
             raise ImportError(_IMPORT_ERROR_MSG) from e
+        # L2-normalize the node features before the edge MLP (CLIP-style, as in
+        # HeadBilinear). No learned temperature: the edge MLP's first linear layer
+        # absorbs any rescaling, so a logit_scale would be redundant here.
+        self.logit_norm = logit_norm
         self.block = EdgeMLPClassifier(
             dim_in=d_model, dim_edge=edge_mlp_dim, c_out=1, edge_feats="affine"
         )
@@ -178,5 +188,8 @@ class HeadEdgeMLP(nn.Module):
 
     def forward(self, x, y, nbr_idx):
         # x, y: (B, N, D); nbr_idx: (B, N, K) into y -> A: (B, N, N)
+        if self.logit_norm:
+            x = F.normalize(x, dim=-1)
+            y = F.normalize(y, dim=-1)
         logits = self.block(x, y, nbr_idx)  # (B, N, K, 1)
         return _scatter_neighbours_to_dense(logits[..., 0], nbr_idx, y.shape[1])

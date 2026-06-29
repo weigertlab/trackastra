@@ -498,7 +498,7 @@ class TrackingTransformer(torch.nn.Module):
         elif head_mode == "edge_mlp":
             # edge_mlp_dim fixed at the head default (64); reuses the model dropout,
             # so it adds no new TrackingTransformer hyperparameter.
-            self.head = HeadEdgeMLP(d_model, dropout=dropout)
+            self.head = HeadEdgeMLP(d_model, logit_norm=logit_norm, dropout=dropout)
         else:
             head_cls = (
                 HeadSparseBilinear if head_mode == "sparse_bilinear" else HeadBilinear
