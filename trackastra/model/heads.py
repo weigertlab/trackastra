@@ -171,9 +171,13 @@ class HeadEdgeMLP(nn.Module):
         except ImportError as e:
             raise ImportError(_IMPORT_ERROR_MSG) from e
         # L2-normalize the node features before the edge MLP (CLIP-style, as in
-        # HeadBilinear). No learned temperature: the edge MLP's first linear layer
-        # absorbs any rescaling, so a logit_scale would be redundant here.
+        # HeadBilinear), then rescale by sqrt(d_model) to restore the ~sqrt(d) input
+        # magnitude that normalization strips. Without this the MLP starts with
+        # near-zero logits (weak BCE gradients) and converges slowly; the fixed
+        # scale plays the role HeadBilinear's learned logit_scale temperature does,
+        # but parameter-free since the MLP can absorb any further rescaling.
         self.logit_norm = logit_norm
+        self.logit_scale = float(d_model) ** 0.5
         self.block = EdgeMLPClassifier(
             dim_in=d_model, dim_edge=edge_mlp_dim, c_out=1, edge_feats="affine"
         )
@@ -189,7 +193,7 @@ class HeadEdgeMLP(nn.Module):
     def forward(self, x, y, nbr_idx):
         # x, y: (B, N, D); nbr_idx: (B, N, K) into y -> A: (B, N, N)
         if self.logit_norm:
-            x = F.normalize(x, dim=-1)
-            y = F.normalize(y, dim=-1)
+            x = F.normalize(x, dim=-1) * self.logit_scale
+            y = F.normalize(y, dim=-1) * self.logit_scale
         logits = self.block(x, y, nbr_idx)  # (B, N, K, 1)
         return _scatter_neighbours_to_dense(logits[..., 0], nbr_idx, y.shape[1])
