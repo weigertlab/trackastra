@@ -1977,7 +1977,7 @@ def parse_train_args():
         "--sparse_knn_mode",
         type=str,
         choices=["global", "per_frame", "next_frame"],
-        default="global",
+        default="per_frame",
         help="sparse kNN budget: 'global' = K nearest over the whole window; "
         "'per_frame' = K nearest within each frame (-> F*K slots, keeps the diagonal); "
         "'next_frame' = K nearest in the same and next frame (-> 2*K slots)",
@@ -1985,7 +1985,7 @@ def parse_train_args():
     parser.add_argument("--logit_norm", type=str2bool, default=True)
     parser.add_argument(
         "--head_mode",
-        choices=["bilinear", "sparse_bilinear"],
+        choices=["bilinear", "sparse_bilinear", "edge_star", "edge_mlp"],
         default=None,
         help="Association head; None auto-selects from --attn_mode.",
     )

@@ -15,7 +15,7 @@ from torch import nn
 # NoPositionalEncoding,
 from trackastra.utils import blockwise_causal_norm
 
-from .heads import HeadBilinear, HeadSparseBilinear
+from .heads import HeadBilinear, HeadEdgeMLP, HeadEdgeStar, HeadSparseBilinear
 from .model_parts import (
     FeatureMLP,
     FeedForward,
@@ -349,9 +349,14 @@ class TrackingTransformer(torch.nn.Module):
         attn_dist_mode: str = "v0",
         attn_mode: Literal["dense", "sparse"] = "dense",
         max_neighbors: int | Sequence[int] = 16,
-        sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "global",
+        sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "per_frame",
         logit_norm: bool = True,
-        head_mode: Literal["bilinear", "sparse_bilinear"] | None = None,
+        head_mode: (
+            Literal["bilinear", "sparse_bilinear", "edge_star", "edge_mlp"] | None
+        ) = None,
+        edge_star_dim: int = 128,
+        edge_star_n_heads: int = 4,
+        edge_star_n_blocks: int = 1,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
@@ -378,19 +383,21 @@ class TrackingTransformer(torch.nn.Module):
 
         # head_mode selects the association readout. None auto-follows attn_mode
         # ("sparse_bilinear" for sparse attention, else "bilinear"). The sparse
-        # head scores only against the kNN neighbour list that sparse attention
-        # builds, so "sparse_bilinear" under dense attention is rejected.
+        # readouts ("sparse_bilinear", "edge_star", "edge_mlp") score only against
+        # the kNN neighbour list that sparse attention builds, so they are rejected
+        # under dense attention. "edge_star"/"edge_mlp" are opt-in (never auto-selected).
+        _sparse_heads = ("sparse_bilinear", "edge_star", "edge_mlp")
         if head_mode is None:
             head_mode = "sparse_bilinear" if attn_mode == "sparse" else "bilinear"
-        if head_mode not in ("bilinear", "sparse_bilinear"):
+        if head_mode not in ("bilinear",) + _sparse_heads:
             raise ValueError(
-                "head_mode must be None, 'bilinear' or 'sparse_bilinear', "
-                f"got {head_mode!r}"
+                "head_mode must be None, 'bilinear', 'sparse_bilinear', 'edge_star' "
+                f"or 'edge_mlp', got {head_mode!r}"
             )
-        if head_mode == "sparse_bilinear" and attn_mode != "sparse":
+        if head_mode in _sparse_heads and attn_mode != "sparse":
             raise ValueError(
-                "head_mode='sparse_bilinear' requires attn_mode='sparse' "
-                "(the sparse head needs the kNN neighbour list)"
+                f"head_mode={head_mode!r} requires attn_mode='sparse' "
+                "(the sparse heads need the kNN neighbour list)"
             )
 
         self.config = dict(
@@ -415,6 +422,9 @@ class TrackingTransformer(torch.nn.Module):
             sparse_knn_mode=sparse_knn_mode,
             logit_norm=logit_norm,
             head_mode=head_mode,
+            edge_star_dim=edge_star_dim,
+            edge_star_n_heads=edge_star_n_heads,
+            edge_star_n_blocks=edge_star_n_blocks,
             architecture_version=architecture_version,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
@@ -477,8 +487,23 @@ class TrackingTransformer(torch.nn.Module):
         # head is computed over the kNN neighbour list (identical parameters, so a
         # dense checkpoint runs sparse and vice versa).
         self.head_mode = head_mode
-        head_cls = HeadSparseBilinear if head_mode == "sparse_bilinear" else HeadBilinear
-        self.head = head_cls(d_model, logit_norm=logit_norm, dropout=dropout)
+        if head_mode == "edge_star":
+            self.head = HeadEdgeStar(
+                d_model,
+                edge_star_dim=edge_star_dim,
+                edge_star_n_heads=edge_star_n_heads,
+                edge_star_n_blocks=edge_star_n_blocks,
+                dropout=dropout,
+            )
+        elif head_mode == "edge_mlp":
+            # edge_mlp_dim fixed at the head default (64); reuses the model dropout,
+            # so it adds no new TrackingTransformer hyperparameter.
+            self.head = HeadEdgeMLP(d_model, dropout=dropout)
+        else:
+            head_cls = (
+                HeadSparseBilinear if head_mode == "sparse_bilinear" else HeadBilinear
+            )
+            self.head = head_cls(d_model, logit_norm=logit_norm, dropout=dropout)
 
         if feature_embed_mode == "fourier":
             if feat_embed_per_dim > 1:
@@ -589,7 +614,7 @@ class TrackingTransformer(torch.nn.Module):
         # outer product is the association matrix (logits), (B, N, N)
         A = (
             self.head(x, y, nbr_idx)
-            if self.head_mode == "sparse_bilinear"
+            if self.head_mode in ("sparse_bilinear", "edge_star", "edge_mlp")
             else self.head(x, y)
         )
 

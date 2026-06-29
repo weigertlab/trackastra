@@ -152,6 +152,35 @@ def test_sparse_model_runs_finite():
     assert torch.isfinite(a).all()
 
 
+@pytest.mark.parametrize("head_mode", ["edge_star", "edge_mlp"])
+def test_edge_head_runs_and_requires_sparse(head_mode):
+    coords, padding_mask = _sparse_inputs()
+    model = TrackingTransformer(
+        coord_dim=2,
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0.0,
+        window=6,
+        max_distance=40,
+        attn_mode="sparse",
+        max_neighbors=8,
+        head_mode=head_mode,
+        edge_star_dim=32,
+    ).eval()
+    with torch.no_grad():
+        a, scored_mask = model(coords, padding_mask=padding_mask)
+    assert a.shape == (coords.shape[0], coords.shape[1], coords.shape[1])
+    assert torch.isfinite(a).all()
+    # sparse head: only kNN pairs carry a real logit (the rest are pinned)
+    assert scored_mask is not None and scored_mask.any()
+
+    # the edge heads need the kNN neighbour list, so dense attention is rejected
+    with pytest.raises(ValueError):
+        TrackingTransformer(coord_dim=2, attn_mode="dense", head_mode=head_mode)
+
+
 def test_max_neighbors_normalized_to_pair():
     # a scalar k becomes the fixed pair (k, k)
     m = TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=8)
