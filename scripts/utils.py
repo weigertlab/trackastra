@@ -201,6 +201,205 @@ def viz_error(
     return out_path
 
 
+# --------------------------------------------------------------------------- #
+# Window debug visualisation (training --debug)
+# --------------------------------------------------------------------------- #
+# Reconstruct each detection's geometry from the *consumed* feature vector and
+# draw it as an ellipse, so a sampled training window can be checked for
+# augmentation correctness in feature space (post-augmentation there is no
+# image; only coords + geometric features exist, and they must stay mutually
+# consistent under flip/rotate/scale/crop).
+
+
+def _inertia_from_feature_row(feat_row: np.ndarray, mode: str) -> np.ndarray:
+    """Inverse of ``WRFeatures.features_stacked_for`` for the wrfeat2 family.
+
+    Returns the 2x2 skimage-convention inertia tensor (area-normalised second
+    moments, in pixel**2). See ``trackastra/data/wrfeat.py`` (``features_stacked_for``);
+    channels are ``[log1p(diam), (intensity), log1p(compactness), q1, q2,
+    log1p(border)]`` with ``intensity`` absent for ``wrfeat2_no_intensity``.
+    """
+    if mode == "wrfeat2":
+        diam, comp, q1, q2 = feat_row[0], feat_row[2], feat_row[3], feat_row[4]
+    elif mode == "wrfeat2_no_intensity":
+        diam, comp, q1, q2 = feat_row[0], feat_row[1], feat_row[2], feat_row[3]
+    else:
+        raise NotImplementedError(
+            f"window debug viz only supports the wrfeat2 family, got {mode!r}"
+        )
+    diameter = np.expm1(float(diam))
+    area = np.pi * (diameter / 2) ** 2
+    trace = np.expm1(float(comp)) * area
+    i00 = trace * (1 + float(q1)) / 2
+    i11 = trace * (1 - float(q1)) / 2
+    i01 = float(q2) * trace / 2
+    return np.array([[i00, i01], [i01, i11]], dtype=float)
+
+
+def _ellipse_axes(inertia: np.ndarray) -> tuple[float, float, float]:
+    """Major/minor pixel radii and orientation (rad) of the equivalent ellipse.
+
+    Eigen-decomposes the covariance ``[[I00,-I01],[-I01,I11]]`` (skimage's inertia
+    tensor carries the off-diagonal with a flipped sign). Radii are ``2*sqrt(lambda)``
+    (matching skimage's ``axis_length = 4*sqrt(lambda)``); orientation is the angle
+    of the major eigenvector, passed to ``skimage.draw.ellipse_perimeter``.
+    """
+    cov = np.array(
+        [[inertia[0, 0], -inertia[0, 1]], [-inertia[0, 1], inertia[1, 1]]], dtype=float
+    )
+    eigvals, eigvecs = np.linalg.eigh(cov)  # ascending
+    eigvals = np.clip(eigvals, 0, None)
+    r_major = 2.0 * np.sqrt(eigvals[1])
+    r_minor = 2.0 * np.sqrt(eigvals[0])
+    v_row, v_col = eigvecs[0, 1], eigvecs[1, 1]  # major eigenvector (row, col)
+    orientation = float(np.arctan2(v_row, v_col))
+    return float(r_major), float(r_minor), orientation
+
+
+def _densify_assoc_np(assoc_coo, batch_size: int, n: int) -> np.ndarray:
+    """Rebuild a dense ``(B, N, N)`` 0/1 association matrix from COO triples."""
+    out = np.zeros((batch_size, n, n), dtype=np.float32)
+    coo = np.asarray(assoc_coo.detach().cpu().numpy() if hasattr(assoc_coo, "detach")
+                     else assoc_coo)
+    if coo.size:
+        b, r, c = coo[:, 0].astype(int), coo[:, 1].astype(int), coo[:, 2].astype(int)
+        out[b, r, c] = 1.0
+    return out
+
+
+def _render_window(
+    coords: np.ndarray,
+    feats: np.ndarray,
+    timepoints: np.ndarray,
+    assoc: np.ndarray,
+    *,
+    mode: str,
+    delta_cutoff: int,
+    size: int,
+    title: str | None,
+) -> "Image.Image":
+    """Draw one window: timepoint-coloured ellipses + GT forward-association lines."""
+    from matplotlib import colormaps
+    from skimage.draw import ellipse_perimeter, line
+
+    # (row, col) centres, translated so the bounding-box centre of the window
+    # sits at the image centre (no scaling; geometry stays in true pixels).
+    yx = coords[:, 1:3].astype(float)
+    if len(yx):
+        yx = yx - (yx.min(0) + yx.max(0)) / 2 + size / 2
+    canvas = np.zeros((size, size, 3), dtype=np.uint8)
+
+    # colour by timepoint with 'turbo' (high contrast between adjacent frames, so
+    # consecutive detections of the same track stay visually distinguishable):
+    # earliest -> dark blue, latest -> red.
+    cmap = colormaps["turbo"]
+    uniq = np.unique(timepoints)
+    color_of = {}
+    for i, t in enumerate(uniq):
+        frac = i / (len(uniq) - 1) if len(uniq) > 1 else 0.0
+        color_of[int(t)] = (np.array(cmap(frac)[:3]) * 255).astype(np.uint8)
+
+    def _clip(rr, cc):
+        keep = (rr >= 0) & (rr < size) & (cc >= 0) & (cc < size)
+        return rr[keep], cc[keep]
+
+    # GT forward associations first, so detections render on top
+    dt = timepoints[None, :] - timepoints[:, None]
+    fwd = (assoc > 0.5) & (dt > 0) & (dt <= delta_cutoff)
+    for i, j in zip(*np.nonzero(fwd)):
+        rr, cc = line(
+            int(round(yx[i, 0])), int(round(yx[i, 1])),
+            int(round(yx[j, 0])), int(round(yx[j, 1])),
+        )
+        rr, cc = _clip(rr, cc)
+        canvas[rr, cc] = (110, 110, 110)
+
+    for idx in range(len(yx)):
+        r_major, r_minor, orient = _ellipse_axes(
+            _inertia_from_feature_row(feats[idx], mode)
+        )
+        # ellipse_perimeter's orientation runs opposite to skimage's region
+        # orientation (verified by round-trip), so negate the major-axis angle.
+        rr, cc = ellipse_perimeter(
+            int(round(yx[idx, 0])), int(round(yx[idx, 1])),
+            max(1, int(round(r_major))), max(1, int(round(r_minor))),
+            orientation=-orient, shape=(size, size),
+        )
+        canvas[rr, cc] = color_of[int(timepoints[idx])]
+
+    img = Image.fromarray(canvas)
+    if title:
+        ImageDraw.Draw(img).text((4, 4), title, fill=(255, 255, 255))
+    return img
+
+
+def save_window_debug_viz(
+    batch: dict,
+    sample_indices,
+    out_dir: Path | str,
+    *,
+    mode: str = "wrfeat2",
+    delta_cutoff: int = 2,
+    epoch: int = 0,
+    names=None,
+    size: int = 512,
+) -> list[Path]:
+    """Render sampled training windows as feature-space tracking images.
+
+    For each requested sample of a collated batch, every detection is drawn as an
+    ellipse reconstructed from the consumed feature vector (centre + area +
+    inertia tensor), coloured by timepoint ('turbo': dark blue -> red), with
+    ground-truth forward associations drawn as connecting lines. Intended for
+    ``--debug`` to sanity-check augmentation (coords and geometric features must
+    stay consistent). The window's bounding box is centred in the image; geometry
+    is in true pixels (no scaling), so a window wider than ``size`` is clipped.
+
+    Args:
+        batch: collated batch dict (``coords``, ``features``, ``timepoints``,
+            ``assoc_coo``).
+        sample_indices: batch rows to render.
+        out_dir: base viz directory; images go to ``out_dir/epoch{E:04d}``.
+        mode: feature mode; only the ``wrfeat2`` family is supported.
+        delta_cutoff: maximum forward dt for a drawn GT association.
+        epoch: current epoch (sub-folder + filename).
+        names: optional per-sample dataset names for the title.
+        size: square canvas side in pixels.
+
+    Returns:
+        Paths of the written PNGs.
+    """
+    import imageio.v2 as imageio
+
+    out_dir = Path(out_dir) / f"epoch{int(epoch):04d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    coords = batch["coords"].detach().cpu().numpy()
+    feats = batch["features"].detach().cpu().numpy()
+    timepoints = batch["timepoints"].detach().cpu().numpy()
+    bsz, n = timepoints.shape
+    assoc = _densify_assoc_np(batch["assoc_coo"], bsz, n)
+
+    paths = []
+    for k, s in enumerate(sample_indices):
+        valid = timepoints[s] >= 0
+        name = names[k] if names is not None and k < len(names) else ""
+        title = f"{name} sample{k} ep{epoch}".strip()
+        img = _render_window(
+            coords[s][valid],
+            feats[s][valid],
+            timepoints[s][valid],
+            assoc[s][np.ix_(valid, valid)],
+            mode=mode,
+            delta_cutoff=delta_cutoff,
+            size=size,
+            title=title,
+        )
+        path = out_dir / f"sample{k}.png"
+        imageio.imwrite(path, np.asarray(img))
+        paths.append(path)
+    return paths
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,

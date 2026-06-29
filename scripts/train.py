@@ -483,6 +483,11 @@ class WrappedLightningModule(pl.LightningModule):
         self._loss_spike_debug_counts: dict[tuple[str, str, int], int] = {}
         self._loss_spike_debug_total = 0
         self._last_train_debug_context = None
+        # Per-epoch feature-space viz of a few sampled windows (set by the trainer
+        # to a directory under <logdir>/debug when --debug is on).
+        self.viz_debug_dir: Path | None = None
+        self._viz_n_per_epoch = 4
+        self._viz_epoch_count = 0
         # Per-batch provenance log (which dataset each sample came from). Set by
         # the trainer to a directory; one human-readable CSV is written per epoch
         # and the index->root map is dumped once on first use.
@@ -925,6 +930,44 @@ class WrappedLightningModule(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self._edge_counts["train"] = {}
+        self._viz_epoch_count = 0
+
+    def _maybe_save_window_viz(self, batch: dict) -> None:
+        """Render a few sampled windows as feature-space ellipse images (--debug)."""
+        if (
+            self.viz_debug_dir is None
+            or not self.trainer.is_global_zero
+            or self._viz_epoch_count >= self._viz_n_per_epoch
+        ):
+            return
+        try:
+            from scripts.utils import save_window_debug_viz
+        except ImportError:
+            from utils import save_window_debug_viz
+
+        bsz = batch["coords"].shape[0]
+        take = min(self._viz_n_per_epoch - self._viz_epoch_count, bsz)
+        idxs = list(range(take))
+        names = None
+        if "dataset_index" in batch:
+            self._write_batch_provenance_map()
+            ds_idx = batch["dataset_index"].detach().cpu().tolist()
+            names = [
+                Path(self._batch_provenance_map.get(ds_idx[i], "")).name for i in idxs
+            ]
+        try:
+            save_window_debug_viz(
+                batch,
+                idxs,
+                self.viz_debug_dir,
+                mode=self.inference_config.get("features", "wrfeat2"),
+                delta_cutoff=self.delta_cutoff,
+                epoch=int(self.current_epoch),
+                names=names,
+            )
+            self._viz_epoch_count += take
+        except Exception as e:
+            logging.exception(f"Error saving window debug viz: {e}")
 
     def on_validation_epoch_start(self):
         self._edge_counts["val"] = {}
@@ -1047,6 +1090,7 @@ class WrappedLightningModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         self._log_batch_provenance(batch, batch_idx)
+        self._maybe_save_window_viz(batch)
         out = self._common_step(batch)
         loss = out["loss"]
         loss_value = self._maybe_save_loss_spike_debug("train", batch, batch_idx, out)
@@ -1783,9 +1827,11 @@ def train(args):
         debug_root = (Path(logdir) if logdir is not None else Path(".")) / "debug"
         model_lightning.loss_spike_debug_dir = debug_root / "debug_loss_spikes"
         model_lightning.batch_provenance_path = debug_root
+        model_lightning.viz_debug_dir = debug_root / "viz"
     else:
         model_lightning.loss_spike_debug_dir = None
         model_lightning.batch_provenance_path = None
+        model_lightning.viz_debug_dir = None
     model_lightning.tracking_metrics_path = (
         Path(logdir) / "metrics" if logdir is not None else None
     )
