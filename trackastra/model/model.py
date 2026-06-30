@@ -368,6 +368,11 @@ class TrackingTransformer(torch.nn.Module):
             raise ValueError(
                 f"Unsupported architecture_version={architecture_version}; expected 1 or 2"
             )
+        if sparse_knn_mode not in ("global", "per_frame", "next_frame"):
+            raise ValueError(
+                "sparse_knn_mode must be 'global', 'per_frame' or 'next_frame', "
+                f"got {sparse_knn_mode!r}"
+            )
 
         # Normalize max_neighbors to a (lo, hi) pair. A single k becomes (k, k)
         # (fixed K); a (k1, k2) pair samples K~Uniform[k1, k2] per forward during

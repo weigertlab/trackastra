@@ -195,6 +195,11 @@ def test_max_neighbors_normalized_to_pair():
             TrackingTransformer(coord_dim=2, attn_mode="sparse", max_neighbors=bad)
 
 
+def test_sparse_knn_mode_rejects_typos():
+    with pytest.raises(ValueError, match="sparse_knn_mode"):
+        TrackingTransformer(coord_dim=2, attn_mode="sparse", sparse_knn_mode="perframe")
+
+
 def test_sparse_model_runs_with_sampled_k():
     coords, padding_mask = _sparse_inputs()
     model = TrackingTransformer(
