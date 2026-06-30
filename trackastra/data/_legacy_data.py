@@ -1336,11 +1336,9 @@ class CTCData(Dataset):
         crop_size: tuple[int],
         crop_ensure_all_centers: bool,
     ):
-        if features in ("wrfeat2", "wrfeat2_no_intensity") and ndim != 2:
-            raise ValueError(f"{features} currently supports only 2D data")
         feat_dim = {
-            "wrfeat2": 6,
-            "wrfeat2_no_intensity": 5,
+            "wrfeat2": 6 if ndim == 2 else 9,
+            "wrfeat2_no_intensity": 5 if ndim == 2 else 8,
         }.get(features, 7 if ndim == 2 else 12)
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([

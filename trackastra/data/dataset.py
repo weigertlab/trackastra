@@ -160,8 +160,6 @@ class TrackingDataset(Dataset):
             raise ValueError("window_size must be greater than one")
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
-        if features != "wrfeat" and sequence.ndim != 2:
-            raise ValueError(f"{features} currently supports only 2D data")
         if augment not in range(5):
             raise ValueError("augment must be between 0 and 4")
         if position_noise < 0:

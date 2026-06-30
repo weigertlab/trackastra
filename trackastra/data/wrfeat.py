@@ -245,15 +245,13 @@ class WRFeatures:
 
         ``wrfeat2`` is derived after geometric augmentation so its normalized
         inertia components remain consistent with the transformed coordinates.
-        It is intentionally 2D-only until a proper 3D tensor decomposition is
-        defined.
+        In 3D the symmetric traceless inertia tensor contributes its five
+        independent components.
         """
         if mode == "wrfeat":
             return self.features_stacked
         if mode not in ("wrfeat2", "wrfeat2_no_intensity"):
             raise ValueError(f"Unknown WRFeatures mode {mode!r}")
-        if self.ndim != 2:
-            raise ValueError("wrfeat2 currently supports only 2D data")
 
         required = {
             "equivalent_diameter_area",
@@ -267,38 +265,69 @@ class WRFeatures:
 
         diameter = self.features["equivalent_diameter_area"][:, 0]
         intensity = self.features["intensity_mean"][:, 0]
-        inertia = self.features["inertia_tensor"].reshape(-1, 2, 2)
+        inertia = self.features["inertia_tensor"].reshape(-1, self.ndim, self.ndim)
         border_dist = self.features["border_dist"][:, 0]
 
-        trace = inertia[:, 0, 0] + inertia[:, 1, 1]
-        area = np.pi * np.square(diameter / 2)
+        trace = np.trace(inertia, axis1=1, axis2=2)
+        unit_ball = np.pi if self.ndim == 2 else 4 * np.pi / 3
+        ball_measure = unit_ball * (np.maximum(diameter, 0) / 2) ** self.ndim
         eps = np.finfo(np.float32).eps
-        compactness = trace / np.maximum(area, eps)
+        compactness = trace / np.maximum(ball_measure ** (2 / self.ndim), eps)
 
-        q1 = np.divide(
-            inertia[:, 0, 0] - inertia[:, 1, 1],
-            trace,
-            out=np.zeros_like(trace),
-            where=trace > eps,
-        )
-        q2 = np.divide(
-            2 * inertia[:, 0, 1],
-            trace,
-            out=np.zeros_like(trace),
-            where=trace > eps,
-        )
-        # A positive-semidefinite tensor gives ||q|| <= 1. Project small
-        # numerical violations (or malformed inputs) back onto the unit disk.
-        q_norm = np.sqrt(np.square(q1) + np.square(q2))
-        q_scale = np.maximum(q_norm, 1)
-        q1, q2 = q1 / q_scale, q2 / q_scale
+        if self.ndim == 2:
+            q1 = np.divide(
+                inertia[:, 0, 0] - inertia[:, 1, 1],
+                trace,
+                out=np.zeros_like(trace),
+                where=trace > eps,
+            )
+            q2 = np.divide(
+                2 * inertia[:, 0, 1],
+                trace,
+                out=np.zeros_like(trace),
+                where=trace > eps,
+            )
+            # A positive-semidefinite tensor gives ||q|| <= 1. Project small
+            # numerical violations (or malformed inputs) back onto the unit disk.
+            q_norm = np.sqrt(np.square(q1) + np.square(q2))
+            q_scale = np.maximum(q_norm, 1)
+            q_channels = [q1 / q_scale, q2 / q_scale]
+        else:
+            inertia_norm = np.divide(
+                inertia,
+                trace[:, None, None],
+                out=np.zeros_like(inertia),
+                where=trace[:, None, None] > eps,
+            )
+            dev = inertia_norm.copy()
+            valid = trace > eps
+            dev[valid] -= np.eye(self.ndim, dtype=inertia.dtype) / self.ndim
+            q_scale = np.sqrt(3 / 2)
+            q_norm = q_scale * np.sqrt(
+                np.sum(np.square(np.diagonal(dev, axis1=1, axis2=2)), axis=1)
+                + 2
+                * (
+                    np.square(dev[:, 0, 1])
+                    + np.square(dev[:, 0, 2])
+                    + np.square(dev[:, 1, 2])
+                )
+            )
+            dev = dev * q_scale
+            q_project = np.maximum(q_norm, 1)
+            dev = dev / q_project[:, None, None]
+            q_channels = [
+                dev[:, 0, 0],
+                dev[:, 1, 1],
+                np.sqrt(2) * dev[:, 0, 1],
+                np.sqrt(2) * dev[:, 0, 2],
+                np.sqrt(2) * dev[:, 1, 2],
+            ]
 
         channels = [
             np.log1p(np.maximum(diameter, 0)),
             intensity,
             np.log1p(np.maximum(compactness, 0)),
-            q1,
-            q2,
+            *q_channels,
             np.log1p(np.maximum(border_dist, 0)),
         ]
         if mode == "wrfeat2_no_intensity":

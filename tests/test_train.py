@@ -39,13 +39,11 @@ pytestmark = pytest.mark.train
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-def test_wrfeat2_feature_dim_is_2d_only():
+def test_wrfeat2_feature_dim_supports_2d_and_3d():
     assert _feature_dim(2, "wrfeat2") == 6
     assert _feature_dim(2, "wrfeat2_no_intensity") == 5
-    with pytest.raises(ValueError, match="only 2D"):
-        _feature_dim(3, "wrfeat2")
-    with pytest.raises(ValueError, match="only 2D"):
-        _feature_dim(3, "wrfeat2_no_intensity")
+    assert _feature_dim(3, "wrfeat2") == 9
+    assert _feature_dim(3, "wrfeat2_no_intensity") == 8
 
 
 def test_wrfeat2_defaults_to_mlp_feature_embedding():
@@ -85,6 +83,53 @@ def test_tracking_data_cpu_training_smoke(features, width):
     batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(
         coord_dim=2,
+        feat_dim=width,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=4,
+        feat_embed_per_dim=2,
+        feature_embed_mode=_resolve_feature_embed_mode(features, None),
+        dropout=0,
+    )
+
+    loss = WrappedLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss.backward()
+
+    assert torch.isfinite(loss)
+
+
+@pytest.mark.parametrize(
+    ("features", "width"),
+    (("wrfeat2", 9), ("wrfeat2_no_intensity", 8)),
+)
+def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
+    raw_features = {
+        "equivalent_diameter_area": np.ones((2, 1), np.float32),
+        "intensity_mean": np.ones((2, 1), np.float32),
+        "inertia_tensor": np.tile(np.eye(3, dtype=np.float32).ravel(), (2, 1)),
+        "border_dist": np.zeros((2, 1), np.float32),
+    }
+    seg = Segmentation(
+        name="TRA",
+        n_frames=2,
+        coords=np.tile(np.array([[0, 0, 0], [4, 4, 4]], dtype=np.float32), (2, 1)),
+        labels=np.array([1, 2, 1, 2]),
+        timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
+        features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
+        track_indices=np.array([0, 1, 0, 1]),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=3,
+        segmentations=(seg,),
+        lineage_relation=np.eye(2, dtype=bool),
+        lineage_parents=np.full(2, -1),
+    )
+    batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
+    model = TrackingTransformer(
+        coord_dim=3,
         feat_dim=width,
         d_model=16,
         nhead=2,

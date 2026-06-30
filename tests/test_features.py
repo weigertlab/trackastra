@@ -62,6 +62,27 @@ def _wrfeat2_example():
     )
 
 
+def _wrfeat2_3d_example():
+    return WRFeatures(
+        coords=np.zeros((3, 3), dtype=np.float32),
+        labels=np.arange(3),
+        timepoints=np.zeros(3, dtype=int),
+        features={
+            "equivalent_diameter_area": np.full((3, 1), 2, dtype=np.float32),
+            "intensity_mean": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
+            "inertia_tensor": np.array(
+                [
+                    np.eye(3).ravel(),
+                    np.diag([4, 1, 1]).ravel(),
+                    np.array([[2, 1, 0], [1, 2, 0], [0, 0, 2]]).ravel(),
+                ],
+                dtype=np.float32,
+            ),
+            "border_dist": np.array([[0], [0.5], [1]], dtype=np.float32),
+        },
+    )
+
+
 def test_wrfeat2_decomposes_inertia_and_bounds_orientation():
     features = _wrfeat2_example().features_stacked_for("wrfeat2")
 
@@ -93,6 +114,34 @@ def test_wrfeat2_is_derived_after_scale_augmentation():
     before = raw.features_stacked_for("wrfeat2")
     after = augmented.features_stacked_for("wrfeat2")
 
+    assert not np.allclose(before[:, 0], after[:, 0])
+    assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
+
+
+def test_wrfeat2_3d_decomposes_inertia_and_bounds_orientation():
+    features = _wrfeat2_3d_example().features_stacked_for("wrfeat2")
+
+    assert features.shape == (3, 9)
+    assert features.dtype == np.float32
+    assert np.allclose(features[:, 0], np.log1p(2))
+    assert np.allclose(features[:, 1], [0.1, 0.2, 0.3])
+    assert np.all(np.isfinite(features))
+    assert np.allclose(features[0, 3:8], 0)
+    assert np.any(np.abs(features[1:, 3:8]) > 0)
+    assert np.all(np.linalg.norm(features[:, 3:8], axis=1) <= 1)
+    assert np.allclose(features[:, 8], np.log1p([0, 0.5, 1]))
+
+
+def test_wrfeat2_3d_is_derived_after_scale_augmentation():
+    raw = _wrfeat2_3d_example()
+    augmentation = WRRandomAffine(
+        p=1, degrees=0, scale=(1.5, 1.5), shear=(0, 0)
+    )
+    augmented = augmentation(raw)
+    before = raw.features_stacked_for("wrfeat2")
+    after = augmented.features_stacked_for("wrfeat2")
+
+    assert after.shape == (3, 9)
     assert not np.allclose(before[:, 0], after[:, 0])
     assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
 
@@ -134,15 +183,13 @@ def test_build_windows_uses_requested_wrfeat_mode():
     assert np.array_equal(windows[0]["features"], expected)
 
 
-def test_wrfeat2_rejects_3d_data():
-    features = WRFeatures(
-        coords=np.zeros((1, 3)),
-        labels=np.array([1]),
-        timepoints=np.array([0]),
-        features={},
-    )
-    with pytest.raises(ValueError, match="only 2D"):
-        features.features_stacked_for("wrfeat2")
+def test_wrfeat2_3d_no_intensity_removes_only_intensity_channel():
+    raw = _wrfeat2_3d_example()
+    full = raw.features_stacked_for("wrfeat2")
+    without_intensity = raw.features_stacked_for("wrfeat2_no_intensity")
+
+    assert without_intensity.shape == (3, 8)
+    assert np.array_equal(without_intensity, full[:, [0, 2, 3, 4, 5, 6, 7, 8]])
 
 
 def test_random_affine_scale_is_isotropic_and_log_symmetric():

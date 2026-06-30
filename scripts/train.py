@@ -1474,9 +1474,10 @@ def _feature_dim(ndim: int, features: str) -> int:
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
     if features in ("wrfeat2", "wrfeat2_no_intensity"):
-        if ndim != 2:
-            raise ValueError(f"{features} currently supports only 2D data")
-        return 6 if features == "wrfeat2" else 5
+        if ndim == 2:
+            return 6 if features == "wrfeat2" else 5
+        if ndim == 3:
+            return 9 if features == "wrfeat2" else 8
     raise ValueError(f"Unsupported feature mode {features!r} for {ndim}D data")
 
 
