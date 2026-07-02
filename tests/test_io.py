@@ -14,8 +14,8 @@ from trackastra.utils import normalize
 
 
 def _detection_set(frames, name="TRA"):
-    """Build a flat DetectionSet from ``(timepoint, track_indices)`` frame specs."""
-    coords, labels, timepoints, track_indices = [], [], [], []
+    """Build a flat DetectionSet from ``(timepoint, lineage_index)`` frame specs."""
+    coords, labels, timepoints, lineage_index = [], [], [], []
     feats = {
         "equivalent_diameter_area": [],
         "intensity": [],
@@ -27,7 +27,7 @@ def _detection_set(frames, name="TRA"):
         coords.append(np.arange(n * 2, dtype=np.float32).reshape(n, 2))
         labels.append(np.arange(1, n + 1, dtype=np.int32))
         timepoints.append(np.full(n, t, dtype=np.int64))
-        track_indices.append(np.asarray(ti, dtype=np.int64))
+        lineage_index.append(np.asarray(ti, dtype=np.int64))
         feats["equivalent_diameter_area"].append(np.full((n, 1), 2, np.float32))
         feats["intensity"].append(np.full((n, 1), 0.5, np.float32))
         feats["inertia_tensor"].append(
@@ -41,7 +41,7 @@ def _detection_set(frames, name="TRA"):
         labels=np.concatenate(labels),
         timepoints=np.concatenate(timepoints),
         features={k: np.concatenate(v) for k, v in feats.items()},
-        track_indices=np.concatenate(track_indices),
+        lineage_index=np.concatenate(lineage_index),
     )
 
 
@@ -84,7 +84,7 @@ def test_tracking_sequence_from_geff_gt_nodes(monkeypatch, tmp_path):
     )
     assert seg.spacing == (4.0, 1.0, 1.0)
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3, 0.4])
-    assert seg.track_indices.tolist() == [0, 0, 1, 2]
+    assert seg.lineage_index.tolist() == [0, 0, 1, 2]
     assert sequence.lineage_parents.tolist() == [-1, 0, 0]
     assert sequence.lineage_relation.tolist() == [
         [True, True, True],
@@ -167,8 +167,8 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
     assert seg.spacing == (4.0, 1.0, 1.0)
     assert seg.timepoints.tolist() == [0, 1, 1]
     assert seg.labels.tolist() == [1, 1, 2]
-    assert seg.track_indices.tolist() == [0, 0, -1]
-    assert seg.supervised.tolist() == [True, True, True]
+    assert seg.lineage_index.tolist() == [0, 0, -1]
+    assert seg.matched_gt.tolist() == [True, True, True]
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3])
     sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
     np.testing.assert_allclose(sample["features"].numpy(), [[0.1], [0.2], [0.3]])
@@ -180,8 +180,8 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
         match_max_distance=0.5,
         sparse_gt=True,
     )
-    assert sparse.detections[0].track_indices.tolist() == [0, 0, -1]
-    assert sparse.detections[0].supervised.tolist() == [True, True, False]
+    assert sparse.detections[0].lineage_index.tolist() == [0, 0, -1]
+    assert sparse.detections[0].matched_gt.tolist() == [True, True, False]
 
 
 def test_detection_set_is_immutable_and_validates_alignment():
@@ -200,7 +200,7 @@ def test_detection_set_is_immutable_and_validates_alignment():
             labels=np.ones(1),
             timepoints=np.zeros(2),
             features={},
-            track_indices=np.zeros(2),
+            lineage_index=np.zeros(2),
         )
 
 
@@ -261,7 +261,7 @@ def test_tracking_data_normalize_diameter_scales_window_geometry_only():
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features=features,
-        track_indices=np.array([0, 1, 0, 1]),
+        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -499,7 +499,7 @@ def test_tracking_data_augmentation_does_not_mutate_sequence(level):
 
     np.random.seed(4)
     torch.manual_seed(4)
-    sample = TrackingDataset(sequence, window_size=2, augment=level)[0]
+    sample = TrackingDataset(sequence, window_size=2, features="wrfeat", augment=level)[0]
 
     assert sample["features"].shape == (4, 7)
     np.testing.assert_array_equal(seg.features["inertia_tensor"], original)

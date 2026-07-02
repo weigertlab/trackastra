@@ -50,8 +50,8 @@ class DetectionSet:
     recipes query these keys in fixed order and apply any model-specific transforms.
     ``masks`` is optional and only needed for mask-based inference/export.
     ``source_coords`` and ``spacing`` preserve the original coordinate system when
-    loaders scale source coordinates into model space. ``supervised`` marks detections
-    that should contribute loss terms; ``None`` means every detection is supervised.
+    loaders scale source coordinates into model space. ``matched_gt`` marks detections
+    matched to annotated GT; ``None`` means every detection is treated as matched.
     """
 
     name: str
@@ -60,21 +60,21 @@ class DetectionSet:
     labels: np.ndarray
     timepoints: np.ndarray
     features: dict[str, np.ndarray]
-    track_indices: np.ndarray
+    lineage_index: np.ndarray
     masks: np.ndarray | None = None
     source_coords: np.ndarray | None = None
     spacing: tuple[float, ...] | None = None
-    supervised: np.ndarray | None = None
+    matched_gt: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         coords = _immutable_array(self.coords, ndim=2)
         labels = _immutable_array(self.labels, ndim=1)
         timepoints = _immutable_array(self.timepoints, ndim=1)
-        track_indices = _immutable_array(self.track_indices, ndim=1)
+        lineage_index = _immutable_array(self.lineage_index, ndim=1)
         n = len(coords)
-        if len(labels) != n or len(timepoints) != n or len(track_indices) != n:
+        if len(labels) != n or len(timepoints) != n or len(lineage_index) != n:
             raise ValueError(
-                "coords, labels, timepoints, and track_indices must be aligned"
+                "coords, labels, timepoints, and lineage_index must be aligned"
             )
         if coords.shape[1] not in (2, 3):
             raise ValueError("Detection coordinates must be 2D or 3D")
@@ -82,8 +82,8 @@ class DetectionSet:
             raise ValueError("timepoints must be sorted in non-decreasing order")
         if n and (timepoints.min() < 0 or timepoints.max() >= int(self.n_frames)):
             raise ValueError("timepoints must lie within [0, n_frames)")
-        if np.any(track_indices < -1):
-            raise ValueError("track_indices may only use -1 for unmatched detections")
+        if np.any(lineage_index < -1):
+            raise ValueError("lineage_index may only use -1 for unmatched detections")
         features = {}
         for name, values in self.features.items():
             name = wrfeat.canonical_feature_name(name)
@@ -98,7 +98,7 @@ class DetectionSet:
         object.__setattr__(self, "coords", coords)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "timepoints", timepoints)
-        object.__setattr__(self, "track_indices", track_indices)
+        object.__setattr__(self, "lineage_index", lineage_index)
         object.__setattr__(self, "features", features)
         if self.masks is not None:
             masks = _immutable_array(self.masks)
@@ -114,12 +114,12 @@ class DetectionSet:
             object.__setattr__(
                 self, "spacing", validate_spatial_spacing(self.spacing, self.dim)
             )
-        if self.supervised is not None:
-            supervised = _immutable_array(self.supervised, ndim=1).astype(bool)
-            if len(supervised) != n:
-                raise ValueError("supervised must be aligned with detections")
-            supervised.setflags(write=False)
-            object.__setattr__(self, "supervised", supervised)
+        if self.matched_gt is not None:
+            matched_gt = _immutable_array(self.matched_gt, ndim=1).astype(bool)
+            if len(matched_gt) != n:
+                raise ValueError("matched_gt must be aligned with detections")
+            matched_gt.setflags(write=False)
+            object.__setattr__(self, "matched_gt", matched_gt)
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -138,11 +138,11 @@ class DetectionSet:
                 self.labels,
                 self.timepoints,
                 self.features,
-                self.track_indices,
+                self.lineage_index,
                 self.masks,
                 self.source_coords,
                 self.spacing,
-                self.supervised,
+                self.matched_gt,
             ),
         )
 
@@ -180,8 +180,8 @@ class TrackingSequence:
         for det in detections:
             if det.coords.shape[1] != self.ndim:
                 raise ValueError("DetectionSet dimensionality does not match sequence")
-            if np.any(det.track_indices >= len(relation)):
-                raise ValueError("DetectionSet references an unknown track index")
+            if np.any(det.lineage_index >= len(relation)):
+                raise ValueError("DetectionSet references an unknown lineage index")
         relation.setflags(write=False)
         parents.setflags(write=False)
         object.__setattr__(self, "root", Path(self.root))
@@ -509,22 +509,22 @@ def _geff_tracklet_assignments(
     node_times: dict,
 ) -> tuple[dict, np.ndarray, np.ndarray]:
     nodes = sorted(graph.nodes, key=lambda node: (node_times[node], node))
-    track_indices = {}
-    track_parents = []
+    lineage_index = {}
+    lineage_parents = []
 
     for node in nodes:
-        if node in track_indices:
+        if node in lineage_index:
             continue
-        parent_track = -1
+        parent_lineage = -1
         predecessors = list(graph.predecessors(node))
-        if len(predecessors) == 1 and predecessors[0] in track_indices:
-            parent_track = track_indices[predecessors[0]]
-        track_id = len(track_parents)
-        track_parents.append(parent_track)
+        if len(predecessors) == 1 and predecessors[0] in lineage_index:
+            parent_lineage = lineage_index[predecessors[0]]
+        lineage_id = len(lineage_parents)
+        lineage_parents.append(parent_lineage)
 
         current = node
-        while current not in track_indices:
-            track_indices[current] = track_id
+        while current not in lineage_index:
+            lineage_index[current] = lineage_id
             successors = list(graph.successors(current))
             if len(successors) != 1:
                 break
@@ -535,19 +535,19 @@ def _geff_tracklet_assignments(
                 break
             current = successor
 
-    parents = np.asarray(track_parents, dtype=np.int64)
+    parents = np.asarray(lineage_parents, dtype=np.int64)
     lineage = np.eye(len(parents), dtype=bool)
-    track_graph = nx.DiGraph()
-    track_graph.add_nodes_from(range(len(parents)))
-    track_graph.add_edges_from(
+    lineage_graph = nx.DiGraph()
+    lineage_graph.add_nodes_from(range(len(parents)))
+    lineage_graph.add_edges_from(
         (int(parent), i) for i, parent in enumerate(parents) if parent >= 0
     )
-    for track_id in range(len(parents)):
-        relatives = nx.ancestors(track_graph, track_id) | nx.descendants(
-            track_graph, track_id
+    for lineage_id in range(len(parents)):
+        relatives = nx.ancestors(lineage_graph, lineage_id) | nx.descendants(
+            lineage_graph, lineage_id
         )
-        lineage[track_id, list(relatives)] = True
-    return track_indices, lineage, parents
+        lineage[lineage_id, list(relatives)] = True
+    return lineage_index, lineage, parents
 
 
 def _tracking_sequence_from_geff_graph(
@@ -597,10 +597,10 @@ def _tracking_sequence_from_geff_graph(
             labels=np.zeros(0, dtype=np.int32),
             timepoints=np.zeros(0, dtype=np.int64),
             features={},
-            track_indices=np.zeros(0, dtype=np.int64),
+            lineage_index=np.zeros(0, dtype=np.int64),
             source_coords=source_coords,
             spacing=spacing,
-            supervised=np.zeros(0, dtype=bool),
+            matched_gt=np.zeros(0, dtype=bool),
         )
         return sequence_type(
             root=root,
@@ -613,15 +613,15 @@ def _tracking_sequence_from_geff_graph(
     gt_source_coords = np.asarray([node_coords[node] for node in nodes], dtype=np.float32)
     gt_coords = apply_spatial_spacing(gt_source_coords, spacing)
     gt_timepoints = np.asarray([node_times[node] for node in nodes], dtype=np.int64)
-    track_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
+    lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
         graph, node_times
     )
     if detections is None:
         coords = gt_coords
         source_coords = gt_source_coords
         timepoints = gt_timepoints
-        track_indices = np.asarray([track_map[node] for node in nodes], dtype=np.int64)
-        supervised = np.ones(len(coords), dtype=bool)
+        lineage_index = np.asarray([lineage_map[node] for node in nodes], dtype=np.int64)
+        matched_gt = np.ones(len(coords), dtype=bool)
         features = _geff_node_features(graph, nodes, feature_columns)
     else:
         if match_max_distance is None:
@@ -647,7 +647,7 @@ def _tracking_sequence_from_geff_graph(
             time_column=detection_time_column,
             feature_columns=feature_columns,
         )
-        track_indices = np.full(len(coords), -1, dtype=np.int64)
+        lineage_index = np.full(len(coords), -1, dtype=np.int64)
         for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
             prop_idx = np.flatnonzero(timepoints == time)
             gt_idx = np.flatnonzero(gt_timepoints == time)
@@ -657,8 +657,10 @@ def _tracking_sequence_from_geff_graph(
                 max_distance=match_max_distance,
             )
             for prop_local, gt_local, _distance in matches:
-                track_indices[prop_idx[prop_local]] = track_map[nodes[gt_idx[gt_local]]]
-        supervised = track_indices >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
+                lineage_index[prop_idx[prop_local]] = lineage_map[
+                    nodes[gt_idx[gt_local]]
+                ]
+        matched_gt = lineage_index >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
 
     labels = np.empty(len(coords), dtype=np.int32)
     for time in np.unique(timepoints):
@@ -672,10 +674,10 @@ def _tracking_sequence_from_geff_graph(
         labels=labels,
         timepoints=timepoints,
         features=features,
-        track_indices=track_indices,
+        lineage_index=lineage_index,
         source_coords=source_coords,
         spacing=spacing,
-        supervised=supervised,
+        matched_gt=matched_gt,
     )
     return sequence_type(
         root=root,
@@ -866,7 +868,7 @@ def _load_ctc_sequence(
         )
         tracks = _filter_tracks(tracks, start, stop, downscale_temporal)
         _check_ctc(tracks, _get_node_attributes(gt_masks), gt_masks)
-        track_index, lineage_relation, lineage_parents = _lineage_arrays(tracks)
+        lineage_map, lineage_relation, lineage_parents = _lineage_arrays(tracks)
         isolated_indices = None
     else:
         isolated_indices = []
@@ -877,7 +879,7 @@ def _load_ctc_sequence(
                 {label: next_index + i for i, label in enumerate(labels)}
             )
             next_index += len(labels)
-        track_index = {}
+        lineage_map = {}
         lineage_relation = np.eye(next_index, dtype=bool)
         lineage_parents = np.full(next_index, -1, dtype=np.int64)
 
@@ -925,7 +927,7 @@ def _load_ctc_sequence(
             if isolated_indices is None:
                 indices = np.array(
                     [
-                        track_index.get(matches[t].get(int(label), -1), -1)
+                        lineage_map.get(matches[t].get(int(label), -1), -1)
                         for label in feature.labels
                     ],
                     dtype=np.int64,
@@ -948,7 +950,7 @@ def _load_ctc_sequence(
                 for t, feature in enumerate(frame_features)
             ]
         )
-        track_indices = (
+        lineage_index = (
             np.concatenate(indices_per_frame)
             if indices_per_frame
             else np.zeros(0, dtype=np.int64)
@@ -965,7 +967,7 @@ def _load_ctc_sequence(
                 labels=labels,
                 timepoints=timepoints,
                 features=features,
-                track_indices=track_indices,
+                lineage_index=lineage_index,
                 masks=detection_masks if load_images else None,
             )
         )

@@ -26,14 +26,41 @@ FeatureMode = Literal["none", "intensity", "wrfeat", "wrfeat2", "wrfeat2_no_inte
 _FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
 
 
+def _feature_properties_for_sequence(sequence: TrackingSequence) -> set[str]:
+    feature_sets = [set(seg.features) for seg in sequence.detections]
+    if not feature_sets:
+        return set()
+    return set.intersection(*feature_sets)
+
+
+def _compatible_feature_modes(available: set[str]) -> tuple[str, ...]:
+    return tuple(
+        mode
+        for mode in _FEATURE_MODES
+        if set(wrfeat.feature_recipe_keys(mode)).issubset(available)
+    )
+
+
+def _validate_feature_mode(sequence: TrackingSequence, mode: FeatureMode) -> None:
+    available = _feature_properties_for_sequence(sequence)
+    required = set(wrfeat.feature_recipe_keys(mode))
+    if required.issubset(available):
+        return
+    raise ValueError(
+        f"Feature mode {mode!r} requires feature properties {sorted(required)}, "
+        f"but the tracking sequence only has {sorted(available)}. "
+        f"Compatible feature modes: {list(_compatible_feature_modes(available))}"
+    )
+
+
 def _association_target(
-    track_indices: np.ndarray, lineage_relation: np.ndarray
+    lineage_index: np.ndarray, lineage_relation: np.ndarray
 ) -> np.ndarray:
-    target = np.zeros((len(track_indices), len(track_indices)), dtype=bool)
-    valid = np.flatnonzero(track_indices >= 0)
+    target = np.zeros((len(lineage_index), len(lineage_index)), dtype=bool)
+    valid = np.flatnonzero(lineage_index >= 0)
     if len(valid):
         target[np.ix_(valid, valid)] = lineage_relation[
-            np.ix_(track_indices[valid], track_indices[valid])
+            np.ix_(lineage_index[valid], lineage_index[valid])
         ]
     return target
 
@@ -146,8 +173,8 @@ class TrackingDataset(Dataset):
     def __init__(
         self,
         sequence: TrackingSequence,
-        window_size: int = 10,
-        features: FeatureMode = "wrfeat",
+        window_size: int = 4,
+        features: FeatureMode = "wrfeat2",
         augment: int = 0,
         position_noise: float = 0.0,
         max_detections: int | None = None,
@@ -160,6 +187,7 @@ class TrackingDataset(Dataset):
             raise ValueError("window_size must be greater than one")
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
+        _validate_feature_mode(sequence, features)
         if augment not in range(5):
             raise ValueError("augment must be between 0 and 4")
         if position_noise < 0:
@@ -221,18 +249,18 @@ class TrackingDataset(Dataset):
         coords = seg.coords[sl].copy()
         labels = seg.labels[sl].copy()
         timepoints = seg.timepoints[sl].copy()
-        track_indices = seg.track_indices[sl]
+        lineage_index = seg.lineage_index[sl]
         features = OrderedDict(
             (name, values[sl].copy()) for name, values in seg.features.items()
         )
-        association = _association_target(track_indices, self.sequence.lineage_relation)
+        association = _association_target(lineage_index, self.sequence.lineage_relation)
         return coords, labels, timepoints, features, association
 
-    def _window_supervised(self, index: int) -> np.ndarray:
+    def _window_matched_gt(self, index: int) -> np.ndarray:
         seg, sl = self._window_slice(index)
-        if seg.supervised is None:
+        if seg.matched_gt is None:
             return np.ones(sl.stop - sl.start, dtype=bool)
-        return seg.supervised[sl].copy()
+        return seg.matched_gt[sl].copy()
 
     def _window_object_count(self, index: int) -> int:
         _, sl = self._window_slice(index)
@@ -257,7 +285,7 @@ class TrackingDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         seg_index, window_start = self.windows[index]
         coords, labels, timepoints, features, association = self._window_arrays(index)
-        supervised = self._window_supervised(index)
+        matched_gt = self._window_matched_gt(index)
         feature = wrfeat.WRFeatures(
             coords=coords,
             labels=labels,
@@ -275,7 +303,7 @@ class TrackingDataset(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
-                supervised = supervised[keep]
+                matched_gt = matched_gt[keep]
 
         if self.detect_drop and np.random.rand() < self.detect_drop:
             keep = _sample_detection_keep_indices(
@@ -284,7 +312,7 @@ class TrackingDataset(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
-                supervised = supervised[keep]
+                matched_gt = matched_gt[keep]
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
@@ -304,7 +332,7 @@ class TrackingDataset(Dataset):
             "assoc_matrix": torch.from_numpy(association.astype(np.float32)),
             "timepoints": torch.from_numpy(feature.timepoints).long(),
             "labels": torch.from_numpy(feature.labels).long(),
-            "supervised": torch.from_numpy(supervised).bool(),
+            "matched_gt": torch.from_numpy(matched_gt).bool(),
             "window_index": torch.tensor(index, dtype=torch.long),
             "seg_index": torch.tensor(seg_index, dtype=torch.long),
             "window_start": torch.tensor(window_start, dtype=torch.long),
@@ -350,7 +378,7 @@ def warn_association_distances(
     if n_exceeds == 0:
         return
     logger.warning(
-        "%s: %d/%d (%.2f%%) unique supervised forward associations within "
+        "%s: %d/%d (%.2f%%) unique matched GT forward associations within "
         "delta_cutoff=%d exceed %s=%g (p99=%.2f, max=%.2f). These associations "
         "are labeled positive but cannot be recovered with this inference cutoff.",
         dataset_name,
@@ -405,7 +433,7 @@ def collate_sequence_padding(batch):
         "features": 0,
         "pretrained_feats": 0,
         "labels": 0,
-        "supervised": False,
+        "matched_gt": False,
         # There are real timepoints with t=0; pad with -1 to distinguish from those.
         "timepoints": -1,
     }

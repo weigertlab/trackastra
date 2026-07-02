@@ -1,3 +1,4 @@
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,43 @@ from trackastra.data.dataset import (
     warn_association_distances,
 )
 from trackastra.data.io import DetectionSet, TrackingSequence
+
+
+def test_tracking_dataset_default_window_and_features():
+    params = signature(TrackingDataset).parameters
+
+    assert params["window_size"].default == 4
+    assert params["features"].default == "wrfeat2"
+
+
+def test_tracking_dataset_feature_mode_error_lists_available_options():
+    seg = DetectionSet(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={"intensity": np.array([[0.25], [0.75]], dtype=np.float32)},
+        lineage_index=np.array([0, 0], dtype=np.int64),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg,),
+        lineage_relation=np.eye(1, dtype=bool),
+        lineage_parents=np.full(1, -1),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        TrackingDataset(sequence, window_size=2, features="wrfeat")
+
+    message = str(exc_info.value)
+    assert "Feature mode 'wrfeat' requires feature properties" in message
+    assert "border_dist" in message
+    assert "equivalent_diameter_area" in message
+    assert "inertia_tensor" in message
+    assert "tracking sequence only has ['intensity']" in message
+    assert "Compatible feature modes: ['none', 'intensity']" in message
 
 
 def test_apply_spatial_spacing_scales_model_space_distances():
@@ -130,7 +168,7 @@ def test_collate_assoc_coo_densifies_to_dense_padding():
     assert batch["assoc_coo"].shape[1] == 3
 
 
-def test_dataset_and_collate_preserve_sparse_supervision_vector():
+def test_dataset_and_collate_preserve_matched_gt_vector():
     seg = DetectionSet(
         name="points",
         n_frames=2,
@@ -138,8 +176,8 @@ def test_dataset_and_collate_preserve_sparse_supervision_vector():
         labels=np.array([1, 1, 2]),
         timepoints=np.array([0, 1, 1], dtype=np.int64),
         features={"v": np.zeros((3, 1), dtype=np.float32)},
-        track_indices=np.array([0, -1, 0], dtype=np.int64),
-        supervised=np.array([True, False, True]),
+        lineage_index=np.array([0, -1, 0], dtype=np.int64),
+        matched_gt=np.array([True, False, True]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -150,7 +188,7 @@ def test_dataset_and_collate_preserve_sparse_supervision_vector():
     )
     sample = TrackingDataset(sequence, window_size=2, features="none")[0]
 
-    assert sample["supervised"].tolist() == [True, False, True]
+    assert sample["matched_gt"].tolist() == [True, False, True]
     assert sample["assoc_matrix"].bool().tolist() == [
         [True, False, True],
         [False, False, False],
@@ -164,12 +202,12 @@ def test_dataset_and_collate_preserve_sparse_supervision_vector():
         "features": sample["features"][:2],
         "labels": sample["labels"][:2],
         "timepoints": sample["timepoints"][:2],
-        "supervised": sample["supervised"][:2],
+        "matched_gt": sample["matched_gt"][:2],
         "assoc_matrix": sample["assoc_matrix"][:2, :2],
     }
     batch = collate_sequence_padding([sample, short])
 
-    assert batch["supervised"].tolist() == [
+    assert batch["matched_gt"].tolist() == [
         [True, False, True],
         [True, False, False],
     ]
@@ -183,7 +221,7 @@ def test_tracking_dataset_supports_none_and_intensity_features():
         labels=np.array([1, 1]),
         timepoints=np.array([0, 1], dtype=np.int64),
         features={"intensity": np.array([[0.25], [0.75]], dtype=np.float32)},
-        track_indices=np.array([0, 0], dtype=np.int64),
+        lineage_index=np.array([0, 0], dtype=np.int64),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -211,7 +249,7 @@ def test_tracking_dataset_resolves_canonical_intensity_alias():
         labels=np.array([1, 1]),
         timepoints=np.array([0, 1], dtype=np.int64),
         features={"intensity_mean": np.array([[0.25], [0.75]], dtype=np.float32)},
-        track_indices=np.array([0, 0], dtype=np.int64),
+        lineage_index=np.array([0, 0], dtype=np.int64),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -238,7 +276,7 @@ def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
         labels=np.array([10 + t for t in range(n_frames)]),
         timepoints=np.arange(n_frames, dtype=np.int64),
         features={"v": np.zeros((n_frames, 1), dtype=np.float32)},
-        track_indices=np.zeros(n_frames, dtype=np.int64),
+        lineage_index=np.zeros(n_frames, dtype=np.int64),
     )
     return TrackingSequence(
         root=Path("synthetic"),

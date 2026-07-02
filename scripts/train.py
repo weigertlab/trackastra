@@ -663,10 +663,10 @@ class WrappedLightningModule(pl.LightningModule):
 
         A_pred[mask_invalid] = 0
         mask_valid = ~mask_invalid
-        if "supervised" in batch:
-            supervised = batch["supervised"].bool()
-            pair_supervised = supervised.unsqueeze(1) & supervised.unsqueeze(2)
-            mask_valid = mask_valid & pair_supervised
+        if "matched_gt" in batch:
+            matched_gt = batch["matched_gt"].bool()
+            pair_matched_gt = matched_gt.unsqueeze(1) | matched_gt.unsqueeze(2)
+            mask_valid = mask_valid & pair_matched_gt
         if scored_mask is not None:
             # Sparse head: only the kNN pairs carry a real logit; every other pair
             # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
@@ -1929,7 +1929,7 @@ def parse_train_args():
         help="accelerator to train on ('auto' picks cuda when available)",
     )
     parser.add_argument("-d", "--d_model", type=int, default=256)
-    parser.add_argument("-w", "--window", type=int, default=10)
+    parser.add_argument("-w", "--window", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--warmup_epochs", type=int, default=2)
     parser.add_argument(
@@ -2031,7 +2031,7 @@ def parse_train_args():
             "wrfeat2",
             "wrfeat2_no_intensity",
         ],
-        default="wrfeat",
+        default="wrfeat2",
     )
     parser.add_argument(
         "--causal_norm",

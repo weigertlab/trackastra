@@ -73,7 +73,7 @@ def test_tracking_data_cpu_training_smoke(features, width):
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
-        track_indices=np.array([0, 1, 0, 1]),
+        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -120,7 +120,7 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
-        track_indices=np.array([0, 1, 0, 1]),
+        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -180,6 +180,17 @@ def test_parse_max_neighbors_defaults_to_16(monkeypatch):
     args = parse_train_args()
 
     assert args.max_neighbors == [16]
+
+
+def test_parse_tracking_dataset_defaults(monkeypatch, tmp_path):
+    config = tmp_path / "empty.yaml"
+    config.write_text("{}\n")
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    args = parse_train_args()
+
+    assert args.window == 4
+    assert args.features == "wrfeat2"
 
 
 def test_parse_disable_abs_pos(monkeypatch):
@@ -465,29 +476,34 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     assert model.logits.grad[0, 2] > 0.1
 
 
-def test_common_step_masks_unsupervised_pairs():
+def test_common_step_masks_pairs_touching_matched_gt():
     class FixedModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.logits = torch.nn.Parameter(torch.zeros((3, 3)))
+            self.logits = torch.nn.Parameter(torch.zeros((4, 4)))
 
         def forward(self, coords, features, padding_mask=None):
             return self.logits.unsqueeze(0) + 0, None
 
     module = WrappedLightningModule(FixedModel(), causal_norm="none")
     batch = {
-        "features": torch.zeros((1, 3, 1)),
-        "coords": torch.zeros((1, 3, 2)),
+        "features": torch.zeros((1, 4, 1)),
+        "coords": torch.zeros((1, 4, 2)),
         "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
-        "timepoints": torch.tensor([[0, 0, 1]]),
-        "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
-        "supervised": torch.tensor([[True, False, True]]),
+        "timepoints": torch.tensor([[0, 0, 1, 1]]),
+        "padding_mask": torch.zeros((1, 4), dtype=torch.bool),
+        "matched_gt": torch.tensor([[True, False, True, False]]),
     }
 
     out = module._common_step(batch)
 
     assert out["mask"].bool().tolist() == [
-        [[False, False, True], [False, False, False], [False, False, False]]
+        [
+            [False, False, True, True],
+            [False, False, True, False],
+            [False, False, False, False],
+            [False, False, False, False],
+        ]
     ]
 
 
@@ -584,6 +600,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
     assert dataset_calls[0] == (
         Path("train"),
         {
+            "dataset_index": 0,
             "features": "wrfeat",
             "detect_drop": 0.5,
             "augment": 3,
@@ -592,6 +609,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
     assert dataset_calls[1] == (
         Path("val"),
         {
+            "dataset_index": 0,
             "features": "wrfeat",
             "detect_drop": 0.0,
             "augment": 0,
