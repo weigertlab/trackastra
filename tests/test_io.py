@@ -184,6 +184,71 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
     assert sparse.detections[0].matched_gt.tolist() == [True, True, False]
 
 
+def _linear_geff_graph():
+    graph = nx.DiGraph()
+    graph.add_node(10, t=0, z=1, y=0, x=0)
+    graph.add_node(20, t=1, z=2, y=0, x=0)
+    graph.add_edge(10, 20)
+    metadata = SimpleNamespace(
+        axes=[
+            SimpleNamespace(name="t", scale=1.0),
+            SimpleNamespace(name="z", scale=4.0),
+            SimpleNamespace(name="y", scale=1.0),
+            SimpleNamespace(name="x", scale=1.0),
+        ]
+    )
+    return graph, metadata
+
+
+def test_tracking_sequence_from_geff_root_multiple_csvs(monkeypatch, tmp_path):
+    graph, metadata = _linear_geff_graph()
+    import geff
+
+    monkeypatch.setattr(geff, "read", lambda _path: (graph, metadata))
+
+    root = tmp_path / "movie"
+    (root / "track.geff").mkdir(parents=True)
+    (root / "a.csv").write_text("axis-0,axis-1,axis-2,axis-3\n0,1,0,0\n1,2,0,0\n")
+    (root / "b.csv").write_text("axis-0,axis-1,axis-2,axis-3\n0,1,0,0\n")
+
+    sequence = TrackingSequence.from_geff(root, spacing="auto", match_max_distance=0.5)
+
+    # one DetectionSet per csv, discovered by directory scan and sorted by name
+    assert [d.name for d in sequence.detections] == ["a", "b"]
+    a, b = sequence.detections
+    # both index into the single shared GT tracklet
+    assert sequence.lineage_relation.tolist() == [[True]]
+    assert sequence.lineage_parents.tolist() == [-1]
+    assert a.lineage_index.tolist() == [0, 0]
+    assert b.lineage_index.tolist() == [0]
+
+
+def test_tracking_sequence_from_geff_root_without_csv_is_gt_only(monkeypatch, tmp_path):
+    graph, metadata = _linear_geff_graph()
+    import geff
+
+    monkeypatch.setattr(geff, "read", lambda _path: (graph, metadata))
+
+    root = tmp_path / "movie"
+    (root / "track.geff").mkdir(parents=True)
+
+    sequence = TrackingSequence.from_geff(root, spacing="auto")
+
+    # no proposals -> a single DetectionSet built from the GT nodes
+    assert len(sequence.detections) == 1
+    gt = sequence.detections[0]
+    assert gt.lineage_index.tolist() == [0, 0]
+    np.testing.assert_allclose(gt.coords, [[4, 0, 0], [8, 0, 0]])
+
+
+def test_tracking_sequence_from_geff_root_requires_single_store(monkeypatch, tmp_path):
+    root = tmp_path / "movie"
+    (root / "a.geff").mkdir(parents=True)
+    (root / "b.geff").mkdir()
+    with pytest.raises(FileNotFoundError, match=r"exactly one \.geff store"):
+        TrackingSequence.from_geff(root)
+
+
 def test_detection_set_is_immutable_and_validates_alignment():
     seg = _detection_set([(0, (0, 1))])
 

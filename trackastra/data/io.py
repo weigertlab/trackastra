@@ -253,7 +253,11 @@ class TrackingSequence:
     def from_geff(
         cls,
         root_or_geff: str | Path,
-        detections: str | Path | pd.DataFrame | None = None,
+        detections: str
+        | Path
+        | pd.DataFrame
+        | Sequence[str | Path | pd.DataFrame]
+        | None = None,
         spacing: tuple[float, ...] | str | None = None,
         coord_columns: Sequence[str] = ("z", "y", "x"),
         time_column: str = "t",
@@ -265,19 +269,25 @@ class TrackingSequence:
     ) -> TrackingSequence:
         """Load GT point detections and lineage edges from a GEFF graph.
 
+        ``root_or_geff`` may point directly at a ``.geff`` store or at a directory
+        containing exactly one ``.geff`` store. In the directory case any ``*.csv``
+        files found alongside it are loaded as proposal detections (one
+        :class:`DetectionSet` each) unless ``detections`` is given explicitly.
+        Explicit ``detections`` may be a single source or a sequence of sources.
+
         ``spacing=None`` uses unit spacing. ``spacing="auto"`` requires GEFF axis
         scales and uses them.
         """
         import geff
 
-        geff_path = Path(root_or_geff).expanduser()
+        geff_path, detection_sources = _resolve_geff_paths(root_or_geff, detections)
         graph, metadata = geff.read(geff_path)
         return _tracking_sequence_from_geff_graph(
             cls,
             graph,
             metadata,
             geff_path,
-            detections=detections,
+            detection_sources=detection_sources,
             spacing=spacing,
             coord_columns=coord_columns,
             time_column=time_column,
@@ -550,12 +560,83 @@ def _geff_tracklet_assignments(
     return lineage_index, lineage, parents
 
 
+def _normalize_detection_sources(
+    detections: str | Path | pd.DataFrame | Sequence | None,
+) -> list:
+    """Normalize the ``detections`` argument into a flat list of sources."""
+    if detections is None:
+        return []
+    if isinstance(detections, (str, Path, pd.DataFrame)):
+        return [detections]
+    return list(detections)
+
+
+def _resolve_geff_paths(
+    root_or_geff: str | Path,
+    detections: str | Path | pd.DataFrame | Sequence | None,
+) -> tuple[Path, list]:
+    """Resolve a ``.geff`` store and its detection sources from a path.
+
+    ``root_or_geff`` is treated as a store when it ends in ``.geff`` or contains a
+    top-level ``zarr.json``; otherwise, if it is a directory, it must hold exactly
+    one ``.geff`` store, and its ``*.csv`` files become detection sources unless
+    ``detections`` is passed explicitly.
+    """
+    path = Path(root_or_geff).expanduser()
+    is_store = path.suffix == ".geff" or (path / "zarr.json").exists()
+    if is_store or not path.is_dir():
+        return path, _normalize_detection_sources(detections)
+    stores = sorted(path.glob("*.geff"))
+    if len(stores) != 1:
+        raise FileNotFoundError(
+            f"Expected exactly one .geff store in {path}, found {len(stores)}"
+        )
+    if detections is None:
+        return stores[0], sorted(path.glob("*.csv"))
+    return stores[0], _normalize_detection_sources(detections)
+
+
+def _detection_source_name(source: str | Path | pd.DataFrame, index: int) -> str:
+    if isinstance(source, (str, Path)):
+        return Path(source).stem
+    return f"detections_{index}"
+
+
+def _build_geff_detection_set(
+    name: str,
+    coords: np.ndarray,
+    source_coords: np.ndarray,
+    timepoints: np.ndarray,
+    features,
+    lineage_index: np.ndarray,
+    matched_gt: np.ndarray,
+    spacing: tuple[float, ...],
+) -> DetectionSet:
+    labels = np.empty(len(coords), dtype=np.int32)
+    for time in np.unique(timepoints):
+        idx = np.flatnonzero(timepoints == time)
+        labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
+    n_frames = int(timepoints.max()) + 1 if len(timepoints) else 0
+    return DetectionSet(
+        name=name,
+        n_frames=n_frames,
+        coords=coords,
+        labels=labels,
+        timepoints=timepoints,
+        features=features,
+        lineage_index=lineage_index,
+        source_coords=source_coords,
+        spacing=spacing,
+        matched_gt=matched_gt,
+    )
+
+
 def _tracking_sequence_from_geff_graph(
     sequence_type: type[TrackingSequence],
     graph: nx.DiGraph,
     metadata,
     root: Path,
-    detections: str | Path | pd.DataFrame | None,
+    detection_sources: Sequence[str | Path | pd.DataFrame],
     spacing: tuple[float, ...] | str | None,
     coord_columns: Sequence[str],
     time_column: str,
@@ -588,26 +669,22 @@ def _tracking_sequence_from_geff_graph(
     nodes = sorted(graph.nodes, key=lambda node: (node_times[node], node))
     if not nodes:
         source_coords = np.zeros((0, ndim), dtype=np.float32)
-        relation = np.zeros((0, 0), dtype=bool)
-        parents = np.zeros(0, dtype=np.int64)
-        detection_set = DetectionSet(
+        detection_set = _build_geff_detection_set(
             name=Path(root).name,
-            n_frames=0,
             coords=apply_spatial_spacing(source_coords, spacing),
-            labels=np.zeros(0, dtype=np.int32),
+            source_coords=source_coords,
             timepoints=np.zeros(0, dtype=np.int64),
             features={},
             lineage_index=np.zeros(0, dtype=np.int64),
-            source_coords=source_coords,
-            spacing=spacing,
             matched_gt=np.zeros(0, dtype=bool),
+            spacing=spacing,
         )
         return sequence_type(
             root=root,
             ndim=ndim,
             detections=(detection_set,),
-            lineage_relation=relation,
-            lineage_parents=parents,
+            lineage_relation=np.zeros((0, 0), dtype=bool),
+            lineage_parents=np.zeros(0, dtype=np.int64),
         )
 
     gt_source_coords = np.asarray([node_coords[node] for node in nodes], dtype=np.float32)
@@ -616,73 +693,80 @@ def _tracking_sequence_from_geff_graph(
     lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
         graph, node_times
     )
-    if detections is None:
-        coords = gt_coords
-        source_coords = gt_source_coords
-        timepoints = gt_timepoints
+
+    detection_sets = []
+    if not detection_sources:
         lineage_index = np.asarray([lineage_map[node] for node in nodes], dtype=np.int64)
-        matched_gt = np.ones(len(coords), dtype=bool)
-        features = _geff_node_features(graph, nodes, feature_columns)
+        detection_sets.append(
+            _build_geff_detection_set(
+                name=Path(root).name,
+                coords=gt_coords,
+                source_coords=gt_source_coords,
+                timepoints=gt_timepoints,
+                features=_geff_node_features(graph, nodes, feature_columns),
+                lineage_index=lineage_index,
+                matched_gt=np.ones(len(gt_coords), dtype=bool),
+                spacing=spacing,
+            )
+        )
     else:
         if match_max_distance is None:
             raise ValueError(
                 "match_max_distance is required when detections are provided"
             )
-        detections_df = _read_point_detections(detections)
-        detection_time_column, detection_coord_columns = _resolve_point_detection_columns(
-            detections_df,
-            time_column=detection_time_column or time_column,
-            coord_columns=detection_coord_columns or coord_columns,
-            ndim=ndim,
-        )
-        feature_columns = _resolve_point_feature_columns(
-            detections_df,
-            feature_columns,
-            excluded=(detection_time_column, *detection_coord_columns),
-        )
-        coords, source_coords, timepoints, features = _point_detection_arrays(
-            detections_df,
-            spacing=spacing,
-            coord_columns=detection_coord_columns,
-            time_column=detection_time_column,
-            feature_columns=feature_columns,
-        )
-        lineage_index = np.full(len(coords), -1, dtype=np.int64)
-        for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
-            prop_idx = np.flatnonzero(timepoints == time)
-            gt_idx = np.flatnonzero(gt_timepoints == time)
-            matches = match_points(
-                coords[prop_idx],
-                gt_coords[gt_idx],
-                max_distance=match_max_distance,
+        for index, source in enumerate(detection_sources):
+            detections_df = _read_point_detections(source)
+            src_time_column, src_coord_columns = _resolve_point_detection_columns(
+                detections_df,
+                time_column=detection_time_column or time_column,
+                coord_columns=detection_coord_columns or coord_columns,
+                ndim=ndim,
             )
-            for prop_local, gt_local, _distance in matches:
-                lineage_index[prop_idx[prop_local]] = lineage_map[
-                    nodes[gt_idx[gt_local]]
-                ]
-        matched_gt = lineage_index >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
+            src_feature_columns = _resolve_point_feature_columns(
+                detections_df,
+                feature_columns,
+                excluded=(src_time_column, *src_coord_columns),
+            )
+            coords, source_coords, timepoints, features = _point_detection_arrays(
+                detections_df,
+                spacing=spacing,
+                coord_columns=src_coord_columns,
+                time_column=src_time_column,
+                feature_columns=src_feature_columns,
+            )
+            lineage_index = np.full(len(coords), -1, dtype=np.int64)
+            for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
+                prop_idx = np.flatnonzero(timepoints == time)
+                gt_idx = np.flatnonzero(gt_timepoints == time)
+                matches = match_points(
+                    coords[prop_idx],
+                    gt_coords[gt_idx],
+                    max_distance=match_max_distance,
+                )
+                for prop_local, gt_local, _distance in matches:
+                    lineage_index[prop_idx[prop_local]] = lineage_map[
+                        nodes[gt_idx[gt_local]]
+                    ]
+            matched_gt = (
+                lineage_index >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
+            )
+            detection_sets.append(
+                _build_geff_detection_set(
+                    name=_detection_source_name(source, index),
+                    coords=coords,
+                    source_coords=source_coords,
+                    timepoints=timepoints,
+                    features=features,
+                    lineage_index=lineage_index,
+                    matched_gt=matched_gt,
+                    spacing=spacing,
+                )
+            )
 
-    labels = np.empty(len(coords), dtype=np.int32)
-    for time in np.unique(timepoints):
-        idx = np.flatnonzero(timepoints == time)
-        labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
-
-    detection_set = DetectionSet(
-        name=Path(root).name,
-        n_frames=int(timepoints.max()) + 1,
-        coords=coords,
-        labels=labels,
-        timepoints=timepoints,
-        features=features,
-        lineage_index=lineage_index,
-        source_coords=source_coords,
-        spacing=spacing,
-        matched_gt=matched_gt,
-    )
     return sequence_type(
         root=root,
         ndim=ndim,
-        detections=(detection_set,),
+        detections=tuple(detection_sets),
         lineage_relation=lineage_relation,
         lineage_parents=lineage_parents,
     )
