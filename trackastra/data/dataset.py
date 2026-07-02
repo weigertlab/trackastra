@@ -1,7 +1,7 @@
 """Runtime temporal-window dataset and collation over tracking sequences (torch).
 
 Depends on the torch-free data model in ``io.py`` (one-way ``dataset`` -> ``io``). A
-temporal window is a ``timepoints``-range slice of a flat :class:`Segmentation`.
+temporal window is a ``timepoints``-range slice of a flat :class:`DetectionSet`.
 """
 
 from __future__ import annotations
@@ -17,13 +17,13 @@ from scipy.sparse.csgraph import connected_components
 from torch.utils.data import Dataset
 
 from trackastra.data import wrfeat
-from trackastra.data.io import Segmentation, TrackingSequence
+from trackastra.data.io import DetectionSet, TrackingSequence
 from trackastra.utils import blockwise_sum
 
 logger = logging.getLogger(__name__)
 
-FeatureMode = Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
-_FEATURE_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
+FeatureMode = Literal["none", "intensity", "wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
+_FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
 
 
 def _association_target(
@@ -97,7 +97,7 @@ def _normalize_diameter_factor(
             timepoints=seg.timepoints.astype(np.int32, copy=False),
             features=OrderedDict(seg.features),
         )
-        for seg in sequence.segmentations
+        for seg in sequence.detections
     )
     return wrfeat.normalize_diameter_factor(features, normalize_diameter)
 
@@ -192,7 +192,7 @@ class TrackingDataset(Dataset):
         self.augmenter = _wr_augmenter(augment)
         self.windows = tuple(
             (seg_index, start)
-            for seg_index, seg in enumerate(sequence.segmentations)
+            for seg_index, seg in enumerate(sequence.detections)
             for start in range(seg.n_frames - window_size + 1)
         )
         self.n_objects = tuple(
@@ -206,9 +206,9 @@ class TrackingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.windows)
 
-    def _window_slice(self, index: int) -> tuple[Segmentation, slice]:
+    def _window_slice(self, index: int) -> tuple[DetectionSet, slice]:
         seg_index, start = self.windows[index]
-        seg = self.sequence.segmentations[seg_index]
+        seg = self.sequence.detections[seg_index]
         lo = int(np.searchsorted(seg.timepoints, start, side="left"))
         hi = int(np.searchsorted(seg.timepoints, start + self.window_size, side="left"))
         return seg, slice(lo, hi)
@@ -228,6 +228,12 @@ class TrackingDataset(Dataset):
         association = _association_target(track_indices, self.sequence.lineage_relation)
         return coords, labels, timepoints, features, association
 
+    def _window_supervised(self, index: int) -> np.ndarray:
+        seg, sl = self._window_slice(index)
+        if seg.supervised is None:
+            return np.ones(sl.stop - sl.start, dtype=bool)
+        return seg.supervised[sl].copy()
+
     def _window_object_count(self, index: int) -> int:
         _, sl = self._window_slice(index)
         count = sl.stop - sl.start
@@ -238,7 +244,7 @@ class TrackingDataset(Dataset):
         return _division_count(association, timepoints)
 
     def _infer_feature_dim(self) -> int:
-        for seg in self.sequence.segmentations:
+        for seg in self.sequence.detections:
             feature = wrfeat.WRFeatures(
                 coords=seg.coords,
                 labels=seg.labels,
@@ -251,6 +257,7 @@ class TrackingDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         seg_index, window_start = self.windows[index]
         coords, labels, timepoints, features, association = self._window_arrays(index)
+        supervised = self._window_supervised(index)
         feature = wrfeat.WRFeatures(
             coords=coords,
             labels=labels,
@@ -268,6 +275,7 @@ class TrackingDataset(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
+                supervised = supervised[keep]
 
         if self.detect_drop and np.random.rand() < self.detect_drop:
             keep = _sample_detection_keep_indices(
@@ -276,9 +284,11 @@ class TrackingDataset(Dataset):
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
+                supervised = supervised[keep]
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
+        feature_values = feature.features_stacked_for(self.features)
         coords0 = torch.from_numpy(
             np.concatenate((feature.timepoints[:, None], feature.coords), axis=1)
         ).float()
@@ -288,14 +298,13 @@ class TrackingDataset(Dataset):
                 -self.position_noise, self.position_noise
             )
         result = {
-            "features": torch.from_numpy(
-                feature.features_stacked_for(self.features)
-            ).float(),
+            "features": torch.from_numpy(feature_values).float(),
             "coords0": coords0,
             "coords": coords,
             "assoc_matrix": torch.from_numpy(association.astype(np.float32)),
             "timepoints": torch.from_numpy(feature.timepoints).long(),
             "labels": torch.from_numpy(feature.labels).long(),
+            "supervised": torch.from_numpy(supervised).bool(),
             "window_index": torch.tensor(index, dtype=torch.long),
             "seg_index": torch.tensor(seg_index, dtype=torch.long),
             "window_start": torch.tensor(window_start, dtype=torch.long),
@@ -396,6 +405,7 @@ def collate_sequence_padding(batch):
         "features": 0,
         "pretrained_feats": 0,
         "labels": 0,
+        "supervised": False,
         # There are real timepoints with t=0; pad with -1 to distinguish from those.
         "timepoints": -1,
     }

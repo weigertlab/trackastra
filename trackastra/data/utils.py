@@ -10,6 +10,38 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
+def validate_spatial_spacing(
+    spacing: tuple[float, ...] | list[float] | np.ndarray | None,
+    ndim: int,
+) -> tuple[float, ...]:
+    """Validate source-to-model spatial spacing for 2D or 3D coordinates."""
+    if ndim not in (2, 3):
+        raise ValueError(f"Only 2D and 3D spacing is supported, got ndim={ndim}")
+    if spacing is None:
+        return (1.0,) * ndim
+
+    values = np.asarray(spacing, dtype=np.float32)
+    if values.ndim != 1 or len(values) != ndim:
+        raise ValueError(f"spacing must have length {ndim}, got shape {values.shape}")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("spacing values must be finite")
+    if np.any(values <= 0):
+        raise ValueError("spacing values must be positive")
+    return tuple(float(v) for v in values)
+
+
+def apply_spatial_spacing(
+    coords: np.ndarray,
+    spacing: tuple[float, ...] | list[float] | np.ndarray | None,
+) -> np.ndarray:
+    """Convert source coordinates to model-space coordinates."""
+    coords = np.asarray(coords, dtype=np.float32)
+    if coords.ndim != 2:
+        raise ValueError(f"coords must be a 2D array, got shape {coords.shape}")
+    spacing = validate_spatial_spacing(spacing, coords.shape[1])
+    return coords * np.asarray(spacing, dtype=coords.dtype)
+
+
 def load_tiff_timeseries(
     dir: Path,
     dtype: str | type | None = None,

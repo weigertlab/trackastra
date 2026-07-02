@@ -48,7 +48,7 @@ def _wrfeat2_example():
         timepoints=np.zeros(3, dtype=int),
         features={
             "equivalent_diameter_area": np.full((3, 1), 2, dtype=np.float32),
-            "intensity_mean": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
+            "intensity": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
             "inertia_tensor": np.array(
                 [
                     [2, 0, 0, 2],  # isotropic
@@ -69,7 +69,7 @@ def _wrfeat2_3d_example():
         timepoints=np.zeros(3, dtype=int),
         features={
             "equivalent_diameter_area": np.full((3, 1), 2, dtype=np.float32),
-            "intensity_mean": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
+            "intensity": np.array([[0.1], [0.2], [0.3]], dtype=np.float32),
             "inertia_tensor": np.array(
                 [
                     np.eye(3).ravel(),
@@ -164,7 +164,7 @@ def test_normalize_to_diameter_scales_feature_geometry_only():
         scaled.features["border_dist"], raw.features["border_dist"] * 2
     )
     np.testing.assert_allclose(
-        scaled.features["intensity_mean"], raw.features["intensity_mean"]
+        scaled.features["intensity"], raw.features["intensity"]
     )
 
 
@@ -181,6 +181,33 @@ def test_build_windows_uses_requested_wrfeat_mode():
 
     expected = WRFeatures.concat([first, second]).features_stacked_for("wrfeat2")
     assert np.array_equal(windows[0]["features"], expected)
+
+
+def test_build_windows_supports_point_only_inputs_as_torch():
+    first = WRFeatures(
+        coords=np.array([[0, 0], [1, 1]], dtype=np.float32),
+        labels=np.array([1, 2], dtype=np.int32),
+        timepoints=np.zeros(2, dtype=np.int32),
+        features={},
+    )
+    second = WRFeatures(
+        coords=np.array([[0, 1]], dtype=np.float32),
+        labels=np.array([1], dtype=np.int32),
+        timepoints=np.ones(1, dtype=np.int32),
+        features={},
+    )
+
+    windows = build_windows(
+        [first, second],
+        window_size=2,
+        progbar_class=lambda iterable, **_kwargs: iterable,
+        as_torch=True,
+        feature_mode="none",
+    )
+
+    assert tuple(windows[0]["features"].shape) == (3, 0)
+    assert tuple(windows[0]["coords"].shape) == (3, 2)
+    assert tuple(windows[0]["labels"].tolist()) == (1, 2, 1)
 
 
 def test_wrfeat2_3d_no_intensity_removes_only_intensity_channel():

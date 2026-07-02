@@ -58,6 +58,64 @@ _PROPERTIES = {
     ),
 }
 
+FEATURE_AREA = "area"
+FEATURE_BORDER_DIST = "border_dist"
+FEATURE_DIAMETER = "equivalent_diameter_area"
+FEATURE_INERTIA = "inertia_tensor"
+FEATURE_INTENSITY = "intensity"
+FEATURE_CUSTOM = "_custom"
+FEATURE_PRETRAINED = "pretrained_feats"
+
+FEATURE_ALIASES = {
+    "intens": FEATURE_INTENSITY,
+    "intensity_mean": FEATURE_INTENSITY,
+    "mean_intensity": FEATURE_INTENSITY,
+}
+
+FEATURE_RECIPES = {
+    "none": (),
+    "intensity": (FEATURE_INTENSITY,),
+    "wrfeat": (
+        FEATURE_DIAMETER,
+        FEATURE_INTENSITY,
+        FEATURE_INERTIA,
+        FEATURE_BORDER_DIST,
+    ),
+    "wrfeat2": (
+        FEATURE_DIAMETER,
+        FEATURE_INTENSITY,
+        FEATURE_INERTIA,
+        FEATURE_BORDER_DIST,
+    ),
+    "wrfeat2_no_intensity": (
+        FEATURE_DIAMETER,
+        FEATURE_INERTIA,
+        FEATURE_BORDER_DIST,
+    ),
+}
+
+
+def canonical_feature_name(name: str) -> str:
+    return FEATURE_ALIASES.get(name, name)
+
+
+def canonicalize_feature_dict(features: dict[str, np.ndarray]) -> OrderedDict:
+    out = OrderedDict()
+    for name, values in features.items():
+        canonical = canonical_feature_name(name)
+        if canonical in out:
+            raise ValueError(f"Duplicate canonical feature name {canonical!r}")
+        out[canonical] = values
+    return out
+
+
+def feature_recipe_keys(mode: str) -> tuple[str, ...]:
+    if mode == FEATURE_CUSTOM:
+        return (FEATURE_CUSTOM,)
+    if mode not in FEATURE_RECIPES:
+        raise ValueError(f"Unknown feature recipe {mode!r}")
+    return FEATURE_RECIPES[mode]
+
 
 def _filter_points(
     points: np.ndarray, shape: tuple[int], origin: tuple[int] | None = None
@@ -105,7 +163,7 @@ def normalize_diameter_factor(
         raise ValueError("normalize_diameter must be positive")
     diameters = []
     for feature in features:
-        values = feature.features.get("equivalent_diameter_area")
+        values = feature.features.get(FEATURE_DIAMETER)
         if values is not None:
             diameters.append(values[:, 0])
     if not diameters:
@@ -122,10 +180,10 @@ def scale_feature_geometry(feature: "WRFeatures", scale: float) -> "WRFeatures":
         return feature
     features = OrderedDict(feature.features)
     # lengths scale as s, areas/second-moments as s**2
-    for name in ("equivalent_diameter_area", "border_dist"):
+    for name in (FEATURE_DIAMETER, FEATURE_BORDER_DIST):
         if name in features:
             features[name] = features[name] * scale
-    for name in ("area", "inertia_tensor"):
+    for name in (FEATURE_AREA, FEATURE_INERTIA):
         if name in features:
             features[name] = features[name] * scale**2
     return WRFeatures(
@@ -213,7 +271,7 @@ class WRFeatures:
 
         self.coords = coords
         self.labels = labels
-        self.features = features.copy()
+        self.features = canonicalize_feature_dict(features)
         self.timepoints = timepoints
 
     def __repr__(self):
@@ -230,17 +288,15 @@ class WRFeatures:
         # Do not include pretrained_feats here
         # They are handled separately and should not be added to shallow features
         if not self.features or (
-            len(self.features) == 1 and "pretrained_feats" in self.features
+            len(self.features) == 1 and FEATURE_PRETRAINED in self.features
         ):
             return None
         feats = np.concatenate(
-            [v for k, v in self.features.items() if k != "pretrained_feats"], axis=-1
+            [v for k, v in self.features.items() if k != FEATURE_PRETRAINED], axis=-1
         )
         return feats
 
-    def features_stacked_for(
-        self, mode: Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
-    ):
+    def features_stacked_for(self, mode: str):
         """Return the configured shallow feature representation.
 
         ``wrfeat2`` is derived after geometric augmentation so its normalized
@@ -248,25 +304,18 @@ class WRFeatures:
         In 3D the symmetric traceless inertia tensor contributes its five
         independent components.
         """
-        if mode == "wrfeat":
-            return self.features_stacked
-        if mode not in ("wrfeat2", "wrfeat2_no_intensity"):
-            raise ValueError(f"Unknown WRFeatures mode {mode!r}")
-
-        required = {
-            "equivalent_diameter_area",
-            "intensity_mean",
-            "inertia_tensor",
-            "border_dist",
-        }
-        missing = required.difference(self.features)
+        required = feature_recipe_keys(mode)
+        missing = set(required).difference(self.features)
         if missing:
-            raise ValueError(f"wrfeat2 requires feature properties {sorted(missing)}")
+            raise ValueError(f"{mode} requires feature properties {sorted(missing)}")
+        if mode == "none":
+            return np.zeros((len(self), 0), dtype=np.float32)
+        if mode in ("intensity", FEATURE_CUSTOM, "wrfeat"):
+            return np.concatenate([self.features[name] for name in required], axis=-1)
 
-        diameter = self.features["equivalent_diameter_area"][:, 0]
-        intensity = self.features["intensity_mean"][:, 0]
-        inertia = self.features["inertia_tensor"].reshape(-1, self.ndim, self.ndim)
-        border_dist = self.features["border_dist"][:, 0]
+        diameter = self.features[FEATURE_DIAMETER][:, 0]
+        inertia = self.features[FEATURE_INERTIA].reshape(-1, self.ndim, self.ndim)
+        border_dist = self.features[FEATURE_BORDER_DIST][:, 0]
 
         trace = np.trace(inertia, axis1=1, axis2=2)
         unit_ball = np.pi if self.ndim == 2 else 4 * np.pi / 3
@@ -325,20 +374,19 @@ class WRFeatures:
 
         channels = [
             np.log1p(np.maximum(diameter, 0)),
-            intensity,
             np.log1p(np.maximum(compactness, 0)),
             *q_channels,
             np.log1p(np.maximum(border_dist, 0)),
         ]
-        if mode == "wrfeat2_no_intensity":
-            del channels[1]
+        if mode == "wrfeat2":
+            channels.insert(1, self.features[FEATURE_INTENSITY][:, 0])
         return np.stack(channels, axis=-1).astype(np.float32, copy=False)
 
     @property
     def pretrained_feats(self):
         # for compatibility with WRPretrainedFeatures
-        if "pretrained_feats" in self.features:
-            return self.features["pretrained_feats"]
+        if FEATURE_PRETRAINED in self.features:
+            return self.features[FEATURE_PRETRAINED]
         return None
 
     def __len__(self):
@@ -582,12 +630,13 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
     absdet = np.abs(np.linalg.det(M))  # scalar, or (N,) when batched
     if batched:
         absdet = absdet[:, None]
-    if k == "area":
+    k = canonical_feature_name(k)
+    if k == FEATURE_AREA:
         v = absdet * v
-    elif k == "equivalent_diameter_area":
+    elif k == FEATURE_DIAMETER:
         v = absdet ** (1 / ndim) * v
 
-    elif k == "inertia_tensor":
+    elif k == FEATURE_INERTIA:
         # skimage's inertia_tensor is the moment of inertia I = tr(S)*Id - S, with
         # S the covariance. Only S transforms as M S M^T; I does so only for
         # orthogonal M (rotations/reflections), and is wrong under scale/shear. So
@@ -603,11 +652,12 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         tr_sp = np.trace(s, axis1=1, axis2=2)
         v = (tr_sp[:, None, None] * eye - s).reshape(-1, ndim * ndim)
     elif k in (
-        "intensity_mean",
+        FEATURE_INTENSITY,
         "intensity_std",
         "intensity_max",
         "intensity_min",
-        "border_dist",
+        FEATURE_BORDER_DIST,
+        FEATURE_CUSTOM,
     ):
         pass
     else:
@@ -807,6 +857,7 @@ def get_features(
     imgs: np.ndarray | None = None,
     features: Literal[
         "none",
+        "intensity",
         "wrfeat",
         "wrfeat2",
         "wrfeat2_no_intensity",
@@ -922,14 +973,14 @@ def build_windows(
             coords = np.zeros((0, feat.ndim), dtype=int)
 
         stacked_features = feat.features_stacked_for(feature_mode)
+        if as_torch and stacked_features is not None:
+            stacked_features = torch.from_numpy(stacked_features)
         w = dict(
             coords=torch.from_numpy(coords) if as_torch else coords,
             t1=torch.tensor(t1, dtype=torch.int32) if as_torch else t1,
             labels=torch.from_numpy(labels) if as_torch else labels,
             timepoints=torch.from_numpy(timepoints) if as_torch else timepoints,
-            features=torch.from_numpy(stacked_features)
-            if as_torch
-            else stacked_features,
+            features=stacked_features,
         )
         # Add pre-trained features
         if pt_feats is not None:

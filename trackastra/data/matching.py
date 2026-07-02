@@ -9,6 +9,42 @@ from skimage.measure import regionprops
 matching_criteria = dict()
 
 
+def match_points(
+    source_coords: np.ndarray,
+    target_coords: np.ndarray,
+    max_distance: float,
+) -> tuple[tuple[int, int, float], ...]:
+    """Match source points to target points by Euclidean distance.
+
+    Coordinates are assumed to already be in the same model-space units.
+    Returns ``(source_index, target_index, distance)`` triples.
+    """
+    source_coords = np.asarray(source_coords, dtype=np.float32)
+    target_coords = np.asarray(target_coords, dtype=np.float32)
+    if source_coords.ndim != 2:
+        raise ValueError(f"source_coords must be 2D, got shape {source_coords.shape}")
+    if target_coords.ndim != 2:
+        raise ValueError(f"target_coords must be 2D, got shape {target_coords.shape}")
+    if source_coords.shape[1] != target_coords.shape[1]:
+        raise ValueError(
+            "source_coords and target_coords must have the same coordinate dimension"
+        )
+    if max_distance < 0:
+        raise ValueError(f"max_distance must be non-negative, got {max_distance}")
+    if len(source_coords) == 0 or len(target_coords) == 0:
+        return ()
+    if not np.all(np.isfinite(source_coords)) or not np.all(np.isfinite(target_coords)):
+        raise ValueError("point coordinates must be finite")
+
+    distances = cdist(source_coords, target_coords)
+    source_ind, target_ind = linear_sum_assignment(distances)
+    keep = distances[source_ind, target_ind] <= max_distance
+    return tuple(
+        (int(i), int(j), float(distances[i, j]))
+        for i, j in zip(source_ind[keep], target_ind[keep])
+    )
+
+
 def label_are_sequential(y):
     """Returns true if y has only sequential labels from 1..."""
     labels = np.unique(y)

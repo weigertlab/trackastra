@@ -663,6 +663,10 @@ class WrappedLightningModule(pl.LightningModule):
 
         A_pred[mask_invalid] = 0
         mask_valid = ~mask_invalid
+        if "supervised" in batch:
+            supervised = batch["supervised"].bool()
+            pair_supervised = supervised.unsqueeze(1) & supervised.unsqueeze(2)
+            mask_valid = mask_valid & pair_supervised
         if scored_mask is not None:
             # Sparse head: only the kNN pairs carry a real logit; every other pair
             # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
@@ -1469,8 +1473,15 @@ def create_run_name(args):
     return name
 
 
-def _feature_dim(ndim: int, features: str) -> int:
+def _feature_dim(
+    ndim: int,
+    features: str,
+) -> int:
     """Return the feature width produced by TrackingDataset."""
+    if features == "none":
+        return 0
+    if features == "intensity":
+        return 1
     if features == "wrfeat":
         return 7 if ndim == 2 else 12
     if features in ("wrfeat2", "wrfeat2_no_intensity"):
@@ -2013,7 +2024,13 @@ def parse_train_args():
     parser.add_argument(
         "--features",
         type=str,
-        choices=["wrfeat", "wrfeat2", "wrfeat2_no_intensity"],
+        choices=[
+            "none",
+            "intensity",
+            "wrfeat",
+            "wrfeat2",
+            "wrfeat2_no_intensity",
+        ],
         default="wrfeat",
     )
     parser.add_argument(

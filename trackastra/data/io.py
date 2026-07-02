@@ -1,6 +1,6 @@
 """Immutable tracking sequences and CTC-folder loading (torch-free).
 
-This module holds the format-neutral data model (:class:`Segmentation`,
+This module holds the format-neutral data model (:class:`DetectionSet`,
 :class:`TrackingSequence`) and the canonical CTC-folder loaders. It imports no torch in
 its own source; the torch dataset and collation live in ``dataset.py``, which depends on
 this module (one-way ``dataset`` -> ``io``).
@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 from trackastra.data import wrfeat
 from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
-from trackastra.data.matching import matching
+from trackastra.data.matching import match_points, matching
+from trackastra.data.utils import apply_spatial_spacing, validate_spatial_spacing
 from trackastra.utils import normalize
 
 logger = logging.getLogger(__name__)
@@ -38,13 +39,19 @@ def _immutable_array(value: np.ndarray, *, ndim: int | None = None) -> np.ndarra
 
 
 @dataclass(frozen=True)
-class Segmentation:
-    """One segmentation of a movie, stored as flat columnar detections.
+class DetectionSet:
+    """Flat columnar detections for one source across a movie.
 
     All detections across the movie are concatenated and sorted by ``timepoints`` so a
-    temporal window is a contiguous slice (see :class:`trackastra.data.dataset`). This
-    replaces the former per-frame ``DetectionFrame`` / ``DetectionSeries`` pair. ``masks``
-    (optional, ``(n_frames, ...)``) is retained only for inference.
+    temporal window is a contiguous slice (see :class:`trackastra.data.dataset`).
+    ``coords`` are model-space spatial coordinates. ``features`` stores precomputed
+    per-detection arrays under canonical string keys such as ``intensity``,
+    ``equivalent_diameter_area`` or ``inertia_tensor``. Dataset feature
+    recipes query these keys in fixed order and apply any model-specific transforms.
+    ``masks`` is optional and only needed for mask-based inference/export.
+    ``source_coords`` and ``spacing`` preserve the original coordinate system when
+    loaders scale source coordinates into model space. ``supervised`` marks detections
+    that should contribute loss terms; ``None`` means every detection is supervised.
     """
 
     name: str
@@ -55,6 +62,9 @@ class Segmentation:
     features: dict[str, np.ndarray]
     track_indices: np.ndarray
     masks: np.ndarray | None = None
+    source_coords: np.ndarray | None = None
+    spacing: tuple[float, ...] | None = None
+    supervised: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         coords = _immutable_array(self.coords, ndim=2)
@@ -76,6 +86,9 @@ class Segmentation:
             raise ValueError("track_indices may only use -1 for unmatched detections")
         features = {}
         for name, values in self.features.items():
+            name = wrfeat.canonical_feature_name(name)
+            if name in features:
+                raise ValueError(f"Duplicate canonical feature name {name!r}")
             values = _immutable_array(values)
             if values.ndim == 0 or len(values) != n:
                 raise ValueError(f"Feature {name!r} is not aligned with detections")
@@ -92,6 +105,21 @@ class Segmentation:
             if len(masks) != int(self.n_frames):
                 raise ValueError("masks must have one frame per timepoint")
             object.__setattr__(self, "masks", masks)
+        if self.source_coords is not None:
+            source_coords = _immutable_array(self.source_coords, ndim=2)
+            if source_coords.shape != coords.shape:
+                raise ValueError("source_coords must have the same shape as coords")
+            object.__setattr__(self, "source_coords", source_coords)
+        if self.spacing is not None:
+            object.__setattr__(
+                self, "spacing", validate_spatial_spacing(self.spacing, self.dim)
+            )
+        if self.supervised is not None:
+            supervised = _immutable_array(self.supervised, ndim=1).astype(bool)
+            if len(supervised) != n:
+                raise ValueError("supervised must be aligned with detections")
+            supervised.setflags(write=False)
+            object.__setattr__(self, "supervised", supervised)
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -112,15 +140,27 @@ class Segmentation:
                 self.features,
                 self.track_indices,
                 self.masks,
+                self.source_coords,
+                self.spacing,
+                self.supervised,
             ),
         )
 
 
 @dataclass(frozen=True)
 class TrackingSequence:
+    """Tracking data for one movie.
+
+    ``detections`` contains one or more detection series for the same movie, for
+    example GT masks, predicted masks, point proposals, or alternative detector
+    outputs. Each :class:`DetectionSet` carries flat per-detection coordinates,
+    labels, timepoints, features, and track-index assignments into the shared
+    ``lineage_relation`` / ``lineage_parents`` arrays.
+    """
+
     root: Path
     ndim: int
-    segmentations: tuple[Segmentation, ...]
+    detections: tuple[DetectionSet, ...]
     lineage_relation: np.ndarray
     lineage_parents: np.ndarray
     images: np.ndarray | None = None
@@ -128,7 +168,7 @@ class TrackingSequence:
     def __post_init__(self) -> None:
         if self.ndim not in (2, 3):
             raise ValueError("Only 2D and 3D tracking data is supported")
-        segmentations = tuple(self.segmentations)
+        detections = tuple(self.detections)
         relation = _immutable_array(self.lineage_relation, ndim=2).astype(bool)
         parents = _immutable_array(self.lineage_parents, ndim=1)
         if relation.shape[0] != relation.shape[1] or len(parents) != len(relation):
@@ -137,15 +177,15 @@ class TrackingSequence:
             raise ValueError("lineage_relation must be symmetric")
         if len(relation) and not np.all(np.diag(relation)):
             raise ValueError("Each tracklet must be related to itself")
-        for seg in segmentations:
-            if seg.coords.shape[1] != self.ndim:
-                raise ValueError("Segmentation dimensionality does not match sequence")
-            if np.any(seg.track_indices >= len(relation)):
-                raise ValueError("Segmentation references an unknown track index")
+        for det in detections:
+            if det.coords.shape[1] != self.ndim:
+                raise ValueError("DetectionSet dimensionality does not match sequence")
+            if np.any(det.track_indices >= len(relation)):
+                raise ValueError("DetectionSet references an unknown track index")
         relation.setflags(write=False)
         parents.setflags(write=False)
         object.__setattr__(self, "root", Path(self.root))
-        object.__setattr__(self, "segmentations", segmentations)
+        object.__setattr__(self, "detections", detections)
         object.__setattr__(self, "lineage_relation", relation)
         object.__setattr__(self, "lineage_parents", parents)
         if self.images is not None:
@@ -157,7 +197,7 @@ class TrackingSequence:
             (
                 self.root,
                 self.ndim,
-                self.segmentations,
+                self.detections,
                 self.lineage_relation,
                 self.lineage_parents,
                 self.images,
@@ -207,6 +247,45 @@ class TrackingSequence:
             match_threshold,
             match_max_distance,
             load_images,
+        )
+
+    @classmethod
+    def from_geff(
+        cls,
+        root_or_geff: str | Path,
+        detections: str | Path | pd.DataFrame | None = None,
+        spacing: tuple[float, ...] | str | None = None,
+        coord_columns: Sequence[str] = ("z", "y", "x"),
+        time_column: str = "t",
+        detection_coord_columns: Sequence[str] | None = None,
+        detection_time_column: str | None = None,
+        feature_columns: Sequence[str] | None = None,
+        match_max_distance: float | None = None,
+        sparse_gt: bool = False,
+    ) -> TrackingSequence:
+        """Load GT point detections and lineage edges from a GEFF graph.
+
+        ``spacing=None`` uses unit spacing. ``spacing="auto"`` requires GEFF axis
+        scales and uses them.
+        """
+        import geff
+
+        geff_path = Path(root_or_geff).expanduser()
+        graph, metadata = geff.read(geff_path)
+        return _tracking_sequence_from_geff_graph(
+            cls,
+            graph,
+            metadata,
+            geff_path,
+            detections=detections,
+            spacing=spacing,
+            coord_columns=coord_columns,
+            time_column=time_column,
+            detection_coord_columns=detection_coord_columns,
+            detection_time_column=detection_time_column,
+            feature_columns=feature_columns,
+            match_max_distance=match_max_distance,
+            sparse_gt=sparse_gt,
         )
 
 
@@ -408,6 +487,317 @@ def _lineage_arrays(
     return index, relation, parents
 
 
+def _spacing_from_geff_metadata(
+    metadata, coord_columns: Sequence[str]
+) -> tuple[float, ...]:
+    axes = getattr(metadata, "axes", None)
+    if axes is None:
+        raise ValueError("GEFF metadata has no axes to read spacing from")
+    scales = {axis.name: getattr(axis, "scale", None) for axis in axes}
+    missing = [name for name in coord_columns if name not in scales]
+    if missing:
+        raise ValueError(f"GEFF metadata is missing axes {missing}")
+    values = tuple(
+        1.0 if scales[name] is None else float(scales[name])
+        for name in coord_columns
+    )
+    return values
+
+
+def _geff_tracklet_assignments(
+    graph: nx.DiGraph,
+    node_times: dict,
+) -> tuple[dict, np.ndarray, np.ndarray]:
+    nodes = sorted(graph.nodes, key=lambda node: (node_times[node], node))
+    track_indices = {}
+    track_parents = []
+
+    for node in nodes:
+        if node in track_indices:
+            continue
+        parent_track = -1
+        predecessors = list(graph.predecessors(node))
+        if len(predecessors) == 1 and predecessors[0] in track_indices:
+            parent_track = track_indices[predecessors[0]]
+        track_id = len(track_parents)
+        track_parents.append(parent_track)
+
+        current = node
+        while current not in track_indices:
+            track_indices[current] = track_id
+            successors = list(graph.successors(current))
+            if len(successors) != 1:
+                break
+            successor = successors[0]
+            if len(list(graph.predecessors(successor))) != 1:
+                break
+            if graph.out_degree(current) != 1:
+                break
+            current = successor
+
+    parents = np.asarray(track_parents, dtype=np.int64)
+    lineage = np.eye(len(parents), dtype=bool)
+    track_graph = nx.DiGraph()
+    track_graph.add_nodes_from(range(len(parents)))
+    track_graph.add_edges_from(
+        (int(parent), i) for i, parent in enumerate(parents) if parent >= 0
+    )
+    for track_id in range(len(parents)):
+        relatives = nx.ancestors(track_graph, track_id) | nx.descendants(
+            track_graph, track_id
+        )
+        lineage[track_id, list(relatives)] = True
+    return track_indices, lineage, parents
+
+
+def _tracking_sequence_from_geff_graph(
+    sequence_type: type[TrackingSequence],
+    graph: nx.DiGraph,
+    metadata,
+    root: Path,
+    detections: str | Path | pd.DataFrame | None,
+    spacing: tuple[float, ...] | str | None,
+    coord_columns: Sequence[str],
+    time_column: str,
+    detection_coord_columns: Sequence[str] | None,
+    detection_time_column: str | None,
+    feature_columns: Sequence[str] | None,
+    match_max_distance: float | None,
+    sparse_gt: bool,
+) -> TrackingSequence:
+    coord_columns = tuple(coord_columns)
+    ndim = len(coord_columns)
+    if ndim not in (2, 3):
+        raise ValueError("GEFF point coordinates must be 2D or 3D")
+    if spacing is None:
+        spacing = (1.0,) * ndim
+    elif spacing == "auto":
+        spacing = _spacing_from_geff_metadata(metadata, coord_columns)
+    elif isinstance(spacing, str):
+        raise ValueError("spacing must be None, a numeric tuple, or 'auto'")
+
+    node_times = {}
+    node_coords = {}
+    for node, attrs in graph.nodes(data=True):
+        missing = [name for name in (time_column, *coord_columns) if name not in attrs]
+        if missing:
+            raise ValueError(f"GEFF node {node!r} is missing properties {missing}")
+        node_times[node] = int(attrs[time_column])
+        node_coords[node] = [float(attrs[name]) for name in coord_columns]
+
+    nodes = sorted(graph.nodes, key=lambda node: (node_times[node], node))
+    if not nodes:
+        source_coords = np.zeros((0, ndim), dtype=np.float32)
+        relation = np.zeros((0, 0), dtype=bool)
+        parents = np.zeros(0, dtype=np.int64)
+        detection_set = DetectionSet(
+            name=Path(root).name,
+            n_frames=0,
+            coords=apply_spatial_spacing(source_coords, spacing),
+            labels=np.zeros(0, dtype=np.int32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            features={},
+            track_indices=np.zeros(0, dtype=np.int64),
+            source_coords=source_coords,
+            spacing=spacing,
+            supervised=np.zeros(0, dtype=bool),
+        )
+        return sequence_type(
+            root=root,
+            ndim=ndim,
+            detections=(detection_set,),
+            lineage_relation=relation,
+            lineage_parents=parents,
+        )
+
+    gt_source_coords = np.asarray([node_coords[node] for node in nodes], dtype=np.float32)
+    gt_coords = apply_spatial_spacing(gt_source_coords, spacing)
+    gt_timepoints = np.asarray([node_times[node] for node in nodes], dtype=np.int64)
+    track_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
+        graph, node_times
+    )
+    if detections is None:
+        coords = gt_coords
+        source_coords = gt_source_coords
+        timepoints = gt_timepoints
+        track_indices = np.asarray([track_map[node] for node in nodes], dtype=np.int64)
+        supervised = np.ones(len(coords), dtype=bool)
+        features = _geff_node_features(graph, nodes, feature_columns)
+    else:
+        if match_max_distance is None:
+            raise ValueError(
+                "match_max_distance is required when detections are provided"
+            )
+        detections_df = _read_point_detections(detections)
+        detection_time_column, detection_coord_columns = _resolve_point_detection_columns(
+            detections_df,
+            time_column=detection_time_column or time_column,
+            coord_columns=detection_coord_columns or coord_columns,
+            ndim=ndim,
+        )
+        feature_columns = _resolve_point_feature_columns(
+            detections_df,
+            feature_columns,
+            excluded=(detection_time_column, *detection_coord_columns),
+        )
+        coords, source_coords, timepoints, features = _point_detection_arrays(
+            detections_df,
+            spacing=spacing,
+            coord_columns=detection_coord_columns,
+            time_column=detection_time_column,
+            feature_columns=feature_columns,
+        )
+        track_indices = np.full(len(coords), -1, dtype=np.int64)
+        for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
+            prop_idx = np.flatnonzero(timepoints == time)
+            gt_idx = np.flatnonzero(gt_timepoints == time)
+            matches = match_points(
+                coords[prop_idx],
+                gt_coords[gt_idx],
+                max_distance=match_max_distance,
+            )
+            for prop_local, gt_local, _distance in matches:
+                track_indices[prop_idx[prop_local]] = track_map[nodes[gt_idx[gt_local]]]
+        supervised = track_indices >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
+
+    labels = np.empty(len(coords), dtype=np.int32)
+    for time in np.unique(timepoints):
+        idx = np.flatnonzero(timepoints == time)
+        labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
+
+    detection_set = DetectionSet(
+        name=Path(root).name,
+        n_frames=int(timepoints.max()) + 1,
+        coords=coords,
+        labels=labels,
+        timepoints=timepoints,
+        features=features,
+        track_indices=track_indices,
+        source_coords=source_coords,
+        spacing=spacing,
+        supervised=supervised,
+    )
+    return sequence_type(
+        root=root,
+        ndim=ndim,
+        detections=(detection_set,),
+        lineage_relation=lineage_relation,
+        lineage_parents=lineage_parents,
+    )
+
+
+def _geff_node_features(
+    graph: nx.DiGraph,
+    nodes: Sequence,
+    feature_columns: Sequence[str] | None,
+) -> OrderedDict:
+    features = OrderedDict()
+    columns = tuple(feature_columns or ())
+    for name in columns:
+        values = []
+        for node in nodes:
+            attrs = graph.nodes[node]
+            if name not in attrs:
+                raise ValueError(f"GEFF node {node!r} is missing feature {name!r}")
+            values.append(float(attrs[name]))
+        values = np.asarray(values, dtype=np.float32)[:, None]
+        canonical = wrfeat.canonical_feature_name(name)
+        if canonical in features:
+            raise ValueError(f"Duplicate canonical feature name {canonical!r}")
+        features[canonical] = values
+    return features
+
+
+def _read_point_detections(detections: str | Path | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(detections, pd.DataFrame):
+        return detections.copy()
+    return pd.read_csv(Path(detections).expanduser())
+
+
+def _resolve_point_feature_columns(
+    detections: pd.DataFrame,
+    feature_columns: Sequence[str] | None,
+    excluded: Sequence[str],
+) -> tuple[str, ...]:
+    if feature_columns is not None:
+        return tuple(feature_columns)
+    excluded = set(excluded)
+    known = {
+        wrfeat.FEATURE_AREA,
+        wrfeat.FEATURE_BORDER_DIST,
+        wrfeat.FEATURE_DIAMETER,
+        wrfeat.FEATURE_INTENSITY,
+    }
+    columns = []
+    seen = set()
+    for column in detections.columns:
+        if column in excluded:
+            continue
+        canonical = wrfeat.canonical_feature_name(column)
+        if canonical not in known:
+            continue
+        if canonical in seen:
+            raise ValueError(f"Duplicate canonical feature name {canonical!r}")
+        columns.append(column)
+        seen.add(canonical)
+    return tuple(columns)
+
+
+def _resolve_point_detection_columns(
+    detections: pd.DataFrame,
+    time_column: str,
+    coord_columns: Sequence[str],
+    ndim: int,
+) -> tuple[str, tuple[str, ...]]:
+    coord_columns = tuple(coord_columns)
+    if time_column in detections and all(name in detections for name in coord_columns):
+        return time_column, coord_columns
+
+    axis_time = "axis-0"
+    axis_coords = tuple(f"axis-{i}" for i in range(1, ndim + 1))
+    if axis_time in detections and all(name in detections for name in axis_coords):
+        return axis_time, axis_coords
+
+    missing = [
+        name
+        for name in (time_column, *coord_columns)
+        if name not in detections
+    ]
+    raise ValueError(
+        f"Point detections are missing columns {missing}; also tried "
+        f"{(axis_time, *axis_coords)}"
+    )
+
+
+def _point_detection_arrays(
+    detections: pd.DataFrame,
+    spacing: tuple[float, ...] | None,
+    coord_columns: Sequence[str],
+    time_column: str,
+    feature_columns: Sequence[str] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, OrderedDict]:
+    missing = [
+        name
+        for name in (time_column, *coord_columns, *(feature_columns or ()))
+        if name not in detections
+    ]
+    if missing:
+        raise ValueError(f"Point detections are missing columns {missing}")
+    timepoints = detections[time_column].to_numpy(dtype=np.int64)
+    order = np.argsort(timepoints, kind="stable")
+    timepoints = timepoints[order]
+    source_coords = detections.loc[:, coord_columns].to_numpy(dtype=np.float32)[order]
+    coords = apply_spatial_spacing(source_coords, spacing)
+    features = OrderedDict()
+    for name in feature_columns or ():
+        values = detections.loc[:, [name]].to_numpy(dtype=np.float32)[order]
+        canonical = wrfeat.canonical_feature_name(name)
+        if canonical in features:
+            raise ValueError(f"Duplicate canonical feature name {canonical!r}")
+        features[canonical] = values
+    return coords, source_coords, timepoints, features
+
+
 def _load_ctc_sequence(
     sequence_type: type[TrackingSequence],
     root: str | Path,
@@ -491,7 +881,7 @@ def _load_ctc_sequence(
         lineage_relation = np.eye(next_index, dtype=bool)
         lineage_parents = np.full(next_index, -1, dtype=np.int64)
 
-    segmentations = []
+    detections = []
     for folder, detection_path in zip(resolved_folders, detection_paths):
         detection_masks = _load_refined_masks(
             detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
@@ -567,8 +957,8 @@ def _load_ctc_sequence(
             (name, np.concatenate([feature.features[name] for feature in frame_features]))
             for name in names
         )
-        segmentations.append(
-            Segmentation(
+        detections.append(
+            DetectionSet(
                 name=str(folder),
                 n_frames=len(frame_features),
                 coords=coords,
@@ -582,7 +972,7 @@ def _load_ctc_sequence(
     return sequence_type(
         root=root,
         ndim=ndim,
-        segmentations=tuple(segmentations),
+        detections=tuple(detections),
         lineage_relation=lineage_relation,
         lineage_parents=lineage_parents,
         images=images if load_images else None,

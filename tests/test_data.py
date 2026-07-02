@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
+from trackastra.data import apply_spatial_spacing, validate_spatial_spacing
 from trackastra.data.dataset import (
     TrackingDataset,
     _sample_detection_keep_indices,
@@ -11,7 +13,26 @@ from trackastra.data.dataset import (
     densify_assoc,
     warn_association_distances,
 )
-from trackastra.data.io import Segmentation, TrackingSequence
+from trackastra.data.io import DetectionSet, TrackingSequence
+
+
+def test_apply_spatial_spacing_scales_model_space_distances():
+    coords = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
+
+    scaled = apply_spatial_spacing(coords, (4, 1, 1))
+
+    np.testing.assert_allclose(scaled, [[0, 0, 0], [4, 1, 1]])
+    assert np.linalg.norm(scaled[1] - scaled[0]) == pytest.approx(np.sqrt(18))
+    assert np.linalg.norm(coords[1] - coords[0]) == pytest.approx(np.sqrt(3))
+
+
+def test_validate_spatial_spacing_defaults_and_rejects_bad_values():
+    assert validate_spatial_spacing(None, 2) == (1.0, 1.0)
+
+    with pytest.raises(ValueError, match="length 3"):
+        validate_spatial_spacing((1, 1), 3)
+    with pytest.raises(ValueError, match="positive"):
+        validate_spatial_spacing((1, 0), 2)
 
 
 def test_detection_dropout_drops_whole_lineages():
@@ -109,10 +130,108 @@ def test_collate_assoc_coo_densifies_to_dense_padding():
     assert batch["assoc_coo"].shape[1] == 3
 
 
+def test_dataset_and_collate_preserve_sparse_supervision_vector():
+    seg = DetectionSet(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [10, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1, 2]),
+        timepoints=np.array([0, 1, 1], dtype=np.int64),
+        features={"v": np.zeros((3, 1), dtype=np.float32)},
+        track_indices=np.array([0, -1, 0], dtype=np.int64),
+        supervised=np.array([True, False, True]),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg,),
+        lineage_relation=np.eye(1, dtype=bool),
+        lineage_parents=np.full(1, -1),
+    )
+    sample = TrackingDataset(sequence, window_size=2, features="none")[0]
+
+    assert sample["supervised"].tolist() == [True, False, True]
+    assert sample["assoc_matrix"].bool().tolist() == [
+        [True, False, True],
+        [False, False, False],
+        [True, False, True],
+    ]
+
+    short = {
+        **sample,
+        "coords": sample["coords"][:2],
+        "coords0": sample["coords0"][:2],
+        "features": sample["features"][:2],
+        "labels": sample["labels"][:2],
+        "timepoints": sample["timepoints"][:2],
+        "supervised": sample["supervised"][:2],
+        "assoc_matrix": sample["assoc_matrix"][:2, :2],
+    }
+    batch = collate_sequence_padding([sample, short])
+
+    assert batch["supervised"].tolist() == [
+        [True, False, True],
+        [True, False, False],
+    ]
+
+
+def test_tracking_dataset_supports_none_and_intensity_features():
+    seg = DetectionSet(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={"intensity": np.array([[0.25], [0.75]], dtype=np.float32)},
+        track_indices=np.array([0, 0], dtype=np.int64),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg,),
+        lineage_relation=np.eye(1, dtype=bool),
+        lineage_parents=np.full(1, -1),
+    )
+
+    none_sample = TrackingDataset(sequence, window_size=2, features="none")[0]
+    intensity_sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
+
+    assert tuple(none_sample["features"].shape) == (2, 0)
+    np.testing.assert_allclose(
+        intensity_sample["features"].numpy(),
+        [[0.25], [0.75]],
+    )
+
+
+def test_tracking_dataset_resolves_canonical_intensity_alias():
+    seg = DetectionSet(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={"intensity_mean": np.array([[0.25], [0.75]], dtype=np.float32)},
+        track_indices=np.array([0, 0], dtype=np.int64),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg,),
+        lineage_relation=np.eye(1, dtype=bool),
+        lineage_parents=np.full(1, -1),
+    )
+
+    sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
+
+    assert "intensity" in seg.features
+    assert "intensity_mean" not in seg.features
+    np.testing.assert_allclose(sample["features"].numpy(), [[0.25], [0.75]])
+
+
 def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
     """One detection per frame, all the same tracklet, placed at the given x."""
     n_frames = len(xs)
-    seg = Segmentation(
+    seg = DetectionSet(
         name="TRA",
         n_frames=n_frames,
         coords=np.array([[x, 0.0] for x in xs], dtype=np.float32),
@@ -124,7 +243,7 @@ def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
     return TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        segmentations=(seg,),
+        detections=(seg,),
         lineage_relation=np.eye(1, dtype=bool),
         lineage_parents=np.full(1, -1),
     )
@@ -134,7 +253,7 @@ def test_association_distances_deduplicate_overlapping_windows():
     # 4 frames, window_size 3 -> windows [0,1,2] and [1,2,3] share the t1->t2 edge,
     # which must be counted once.
     sequence = _single_lineage_sequence((0.0, 3.0, 13.0, 30.0))
-    data = TrackingDataset(sequence, window_size=3)
+    data = TrackingDataset(sequence, window_size=3, features="none")
 
     distances = association_distances(data, delta_cutoff=1)
 

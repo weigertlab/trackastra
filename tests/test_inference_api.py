@@ -8,7 +8,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
-from trackastra.model import Trackastra
+from trackastra.model import Trackastra, TrackingTransformer
 from trackastra.tracking import (
     graph_to_ctc,
     graph_to_napari_tracks,
@@ -44,6 +44,171 @@ def test_resolve_inference_max_distance_defaults_warns_and_allows_lower(caplog):
     with caplog.at_level(logging.WARNING):
         assert _resolve_inference_max_distance(256, 400) == 400
     assert "exceeds" in caplog.text
+
+
+def test_track_points_reuses_prediction_and_tracking_path(monkeypatch):
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        window=2,
+    )
+    model = Trackastra(
+        transformer=transformer,
+        inference_config={"features": "none"},
+        device="cpu",
+        batch_size=1,
+    )
+    seen = {}
+
+    def fake_predict(features, windows, spatial_dim, **_kwargs):
+        seen["features"] = features
+        seen["windows"] = windows
+        seen["spatial_dim"] = spatial_dim
+        return {
+            "nodes": [
+                {"id": 0, "coords": (0.0, 0.0), "time": 0, "label": 1},
+                {"id": 1, "coords": (1.0, 1.0), "time": 1, "label": 1},
+            ],
+            "weights": tuple(),
+        }
+
+    def fake_track(predictions, mode="greedy", return_candidate=False, **_kwargs):
+        graph = nx.DiGraph()
+        graph.add_nodes_from((node["id"], node) for node in predictions["nodes"])
+        candidate = nx.DiGraph()
+        if return_candidate:
+            return graph, candidate
+        return graph
+
+    monkeypatch.setattr(model, "_predict_from_windows", fake_predict)
+    monkeypatch.setattr(model, "_track_from_predictions", fake_track)
+
+    graph, details = model.track_points(
+        coords=[
+            np.array([[0.0, 0.0], [2.0, 2.0]], dtype=np.float32),
+            np.array([[1.0, 1.0]], dtype=np.float32),
+        ],
+        return_details=True,
+        progbar_class=lambda iterable, **_kwargs: iterable,
+    )
+
+    assert set(graph.nodes) == {0, 1}
+    assert seen["spatial_dim"] == 2
+    assert len(seen["features"]) == 2
+    assert tuple(seen["windows"][0]["features"].shape) == (3, 0)
+    assert tuple(seen["windows"][0]["coords"].shape) == (3, 2)
+    assert tuple(seen["windows"][0]["labels"].tolist()) == (1, 2, 1)
+    assert set(details) == {"candidate_graph", "predictions"}
+
+
+def test_track_points_accepts_explicit_feature_matrix(monkeypatch):
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=1,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        window=2,
+    )
+    model = Trackastra(
+        transformer=transformer,
+        inference_config={"features": "none"},
+        device="cpu",
+        batch_size=1,
+    )
+    seen = {}
+
+    def fake_predict(_features, windows, spatial_dim, **_kwargs):
+        seen["window_features"] = windows[0]["features"]
+        seen["spatial_dim"] = spatial_dim
+        return {"nodes": [], "weights": tuple()}
+
+    monkeypatch.setattr(model, "_predict_from_windows", fake_predict)
+    monkeypatch.setattr(model, "_track_from_predictions", lambda *_args, **_kwargs: nx.DiGraph())
+
+    graph = model.track_points(
+        coords=[
+            np.array([[0.0, 0.0]], dtype=np.float32),
+            np.array([[1.0, 1.0]], dtype=np.float32),
+        ],
+        features=[
+            np.array([[0.25]], dtype=np.float32),
+            np.array([[0.75]], dtype=np.float32),
+        ],
+        progbar_class=lambda iterable, **_kwargs: iterable,
+    )
+
+    assert len(graph) == 0
+    assert seen["spatial_dim"] == 2
+    assert tuple(seen["window_features"].shape) == (2, 1)
+    np.testing.assert_allclose(seen["window_features"].numpy(), [[0.25], [0.75]])
+
+
+def test_track_points_runs_tiny_point_only_model():
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        window=2,
+        causal_norm="none",
+    )
+    model = Trackastra(
+        transformer=transformer,
+        inference_config={"features": "none"},
+        device="cpu",
+        batch_size=1,
+    )
+
+    graph = model.track_points(
+        coords=[
+            np.array([[0.0, 0.0]], dtype=np.float32),
+            np.array([[1.0, 1.0]], dtype=np.float32),
+        ],
+        progbar_class=lambda iterable, **_kwargs: iterable,
+    )
+
+    assert set(graph.nodes) == {0, 1}
+    assert graph.nodes[0]["coords"] == (0.0, 0.0)
+    assert graph.nodes[1]["coords"] == (1.0, 1.0)
+
+
+def test_track_points_requires_matching_feature_width():
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=1,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        window=2,
+    )
+    model = Trackastra(
+        transformer=transformer,
+        inference_config={"features": "none"},
+        device="cpu",
+        batch_size=1,
+    )
+
+    with pytest.raises(ValueError, match="feature width"):
+        model.track_points(
+            coords=[
+                np.array([[0.0, 0.0]], dtype=np.float32),
+                np.array([[1.0, 1.0]], dtype=np.float32),
+            ],
+            progbar_class=lambda iterable, **_kwargs: iterable,
+        )
 
 
 def test_greedy_retains_isolated_detections():

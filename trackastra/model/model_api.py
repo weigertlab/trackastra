@@ -1,5 +1,7 @@
 import logging
 import os
+from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -12,7 +14,12 @@ import yaml
 from tqdm import tqdm
 
 from ..data import build_windows, get_features, load_tiff_timeseries
-from ..data.wrfeat import normalize_to_diameter
+from ..data.wrfeat import (
+    FEATURE_CUSTOM,
+    FEATURE_RECIPES,
+    WRFeatures,
+    normalize_to_diameter,
+)
 from ..tracking import apply_solution_graph_to_masks, build_graph, track_greedy
 from ..utils import normalize
 from .model import TrackingTransformer
@@ -69,6 +76,42 @@ def _default_batch_size(device: str | torch.device):
     batch_size = d[device]
     logger.info(f"Default batch size = {batch_size} for model on {device}.")
     return batch_size
+
+
+def _as_point_coords(coords, *, ndim: int, frame: int) -> np.ndarray:
+    coords = np.asarray(coords, dtype=np.float32)
+    if coords.size == 0 and coords.ndim == 1:
+        coords = coords.reshape(0, ndim)
+    if coords.ndim != 2 or coords.shape[1] != ndim:
+        raise ValueError(
+            f"coords[{frame}] must have shape (N, {ndim}), got {coords.shape}"
+        )
+    if not np.all(np.isfinite(coords)):
+        raise ValueError(f"coords[{frame}] contains non-finite values")
+    return np.ascontiguousarray(coords)
+
+
+def _as_point_labels(labels, *, n: int, frame: int) -> np.ndarray:
+    if labels is None:
+        return np.arange(1, n + 1, dtype=np.int32)
+    labels = np.asarray(labels)
+    if labels.ndim != 1 or len(labels) != n:
+        raise ValueError(f"labels[{frame}] must have shape ({n},), got {labels.shape}")
+    if len(np.unique(labels)) != len(labels):
+        raise ValueError(f"labels[{frame}] must be unique within the frame")
+    return labels.astype(np.int32, copy=False)
+
+
+def _as_point_features(features, *, n: int, frame: int) -> np.ndarray:
+    features = np.asarray(features, dtype=np.float32)
+    if features.ndim != 2 or len(features) != n:
+        raise ValueError(
+            f"features[{frame}] must have shape (N, F) with N={n}, got "
+            f"{features.shape}"
+        )
+    if not np.all(np.isfinite(features)):
+        raise ValueError(f"features[{frame}] contains non-finite values")
+    return np.ascontiguousarray(features)
 
 
 class Trackastra:
@@ -312,7 +355,7 @@ class Trackastra:
             feature_mode=(
                 self.inference_config["features"]
                 if self.inference_config["features"]
-                in ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
+                in FEATURE_RECIPES
                 else "wrfeat"
             ),
         )
@@ -376,6 +419,79 @@ class Trackastra:
             progbar_class=progbar_class,
         )
 
+    def _extract_point_windows(
+        self,
+        coords: Sequence[np.ndarray],
+        features: Sequence[np.ndarray] | None = None,
+        labels: Sequence[np.ndarray] | None = None,
+        progbar_class=tqdm,
+    ) -> tuple[list[WRFeatures], list[dict], int]:
+        """Build model windows from already scaled point coordinates."""
+        coords = list(coords)
+        if len(coords) < 2:
+            raise ValueError(f"Need at least 2 frames for tracking, got {len(coords)}.")
+        ndim = int(self.transformer.config["coord_dim"])
+
+        if features is not None:
+            features = list(features)
+            if len(features) != len(coords):
+                raise ValueError(
+                    "features must have the same number of frames as coords"
+                )
+        if labels is not None:
+            labels = list(labels)
+            if len(labels) != len(coords):
+                raise ValueError("labels must have the same number of frames as coords")
+
+        point_features = []
+        feature_width = 0
+        for t, frame_coords in enumerate(coords):
+            frame_coords = _as_point_coords(frame_coords, ndim=ndim, frame=t)
+            frame_labels = _as_point_labels(
+                None if labels is None else labels[t],
+                n=len(frame_coords),
+                frame=t,
+            )
+            timepoints = np.full(len(frame_coords), t, dtype=np.int32)
+
+            frame_features = OrderedDict()
+            if features is not None:
+                values = _as_point_features(features[t], n=len(frame_coords), frame=t)
+                if t == 0:
+                    feature_width = values.shape[1]
+                elif values.shape[1] != feature_width:
+                    raise ValueError(
+                        "All point feature arrays must have the same width, got "
+                        f"{feature_width} and {values.shape[1]}"
+                    )
+                frame_features[FEATURE_CUSTOM] = values
+
+            point_features.append(
+                WRFeatures(
+                    coords=frame_coords,
+                    labels=frame_labels,
+                    timepoints=timepoints,
+                    features=frame_features,
+                )
+            )
+
+        expected_width = int(self.transformer.config.get("feat_dim", 0))
+        if feature_width != expected_width:
+            raise ValueError(
+                "Point feature width does not match the model: "
+                f"got {feature_width}, expected {expected_width}"
+            )
+
+        logger.info("Building point windows")
+        windows = build_windows(
+            point_features,
+            window_size=self.transformer.config["window"],
+            progbar_class=progbar_class,
+            as_torch=True,
+            feature_mode="none" if features is None else FEATURE_CUSTOM,
+        )
+        return point_features, windows, ndim
+
     def _track_from_predictions(
         self,
         predictions,
@@ -423,6 +539,66 @@ class Trackastra:
         if return_candidate:
             return solution, candidate_graph
         return solution
+
+    def track_points(
+        self,
+        coords: Sequence[np.ndarray],
+        features: Sequence[np.ndarray] | None = None,
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        labels: Sequence[np.ndarray] | None = None,
+        return_details: bool = False,
+        edge_threshold: float = 0.05,
+        batch_size: int | None = None,
+        progbar_class=tqdm,
+        **kwargs,
+    ) -> nx.DiGraph | tuple[nx.DiGraph, dict]:
+        """Track point detections whose coordinates are already in model space.
+
+        Args:
+            coords: Per-frame coordinate arrays with shape ``(N_t, ndim)``.
+                Coordinates must already be scaled into the isotropic/model-space
+                units expected by the checkpoint.
+            features: Optional per-frame scalar feature arrays with shape
+                ``(N_t, F)``. If omitted, the model must have ``feat_dim=0``.
+            mode: Tracking mode, one of ``"greedy_nodiv"``, ``"greedy"``, or
+                ``"ilp"``.
+            labels: Optional unique per-frame labels. Defaults to ``1..N_t``.
+            return_details: If True, return diagnostics with candidate graph and
+                raw predictions.
+            edge_threshold: Minimum association score used when collecting edges
+                from window predictions.
+            batch_size: Batch size for prediction. If None, uses the model default.
+            progbar_class: Progress bar class to use.
+            **kwargs: Additional arguments passed to the tracking algorithm.
+
+        Returns:
+            ``nx.DiGraph`` containing the point tracking result, and optionally a
+            diagnostics dict with ``candidate_graph`` and ``predictions``.
+        """
+        point_features, windows, ndim = self._extract_point_windows(
+            coords,
+            features=features,
+            labels=labels,
+            progbar_class=progbar_class,
+        )
+        predictions = self._predict_from_windows(
+            point_features,
+            windows,
+            spatial_dim=ndim,
+            edge_threshold=edge_threshold,
+            batch_size=batch_size,
+            progbar_class=progbar_class,
+        )
+
+        if return_details:
+            track_graph, candidate_graph = self._track_from_predictions(
+                predictions, mode=mode, return_candidate=True, **kwargs
+            )
+            return track_graph, {
+                "candidate_graph": candidate_graph,
+                "predictions": predictions,
+            }
+        return self._track_from_predictions(predictions, mode=mode, **kwargs)
 
     def track(
         self,

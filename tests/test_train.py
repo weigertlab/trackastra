@@ -30,7 +30,7 @@ from trackastra.data.distributed import (
     BalancedDataModule,
     BalancedDistributedSampler,
 )
-from trackastra.data.io import Segmentation, TrackingSequence
+from trackastra.data.io import DetectionSet, TrackingSequence
 from trackastra.model import TrackingTransformer
 
 # Mark all tests in this module as requiring training dependencies
@@ -40,6 +40,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def test_wrfeat2_feature_dim_supports_2d_and_3d():
+    assert _feature_dim(2, "none") == 0
+    assert _feature_dim(2, "intensity") == 1
     assert _feature_dim(2, "wrfeat2") == 6
     assert _feature_dim(2, "wrfeat2_no_intensity") == 5
     assert _feature_dim(3, "wrfeat2") == 9
@@ -60,11 +62,11 @@ def test_wrfeat2_defaults_to_mlp_feature_embedding():
 def test_tracking_data_cpu_training_smoke(features, width):
     raw_features = {
         "equivalent_diameter_area": np.ones((2, 1), np.float32),
-        "intensity_mean": np.ones((2, 1), np.float32),
+        "intensity": np.ones((2, 1), np.float32),
         "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (2, 1)),
         "border_dist": np.zeros((2, 1), np.float32),
     }
-    seg = Segmentation(
+    seg = DetectionSet(
         name="TRA",
         n_frames=2,
         coords=np.tile(np.array([[0, 0], [4, 4]], dtype=np.float32), (2, 1)),
@@ -76,7 +78,7 @@ def test_tracking_data_cpu_training_smoke(features, width):
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        segmentations=(seg,),
+        detections=(seg,),
         lineage_relation=np.eye(2, dtype=bool),
         lineage_parents=np.full(2, -1),
     )
@@ -107,11 +109,11 @@ def test_tracking_data_cpu_training_smoke(features, width):
 def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
     raw_features = {
         "equivalent_diameter_area": np.ones((2, 1), np.float32),
-        "intensity_mean": np.ones((2, 1), np.float32),
+        "intensity": np.ones((2, 1), np.float32),
         "inertia_tensor": np.tile(np.eye(3, dtype=np.float32).ravel(), (2, 1)),
         "border_dist": np.zeros((2, 1), np.float32),
     }
-    seg = Segmentation(
+    seg = DetectionSet(
         name="TRA",
         n_frames=2,
         coords=np.tile(np.array([[0, 0, 0], [4, 4, 4]], dtype=np.float32), (2, 1)),
@@ -123,7 +125,7 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=3,
-        segmentations=(seg,),
+        detections=(seg,),
         lineage_relation=np.eye(2, dtype=bool),
         lineage_parents=np.full(2, -1),
     )
@@ -461,6 +463,32 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     assert torch.isfinite(loss)
     assert torch.isfinite(model.logits.grad).all()
     assert model.logits.grad[0, 2] > 0.1
+
+
+def test_common_step_masks_unsupervised_pairs():
+    class FixedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.zeros((3, 3)))
+
+        def forward(self, coords, features, padding_mask=None):
+            return self.logits.unsqueeze(0) + 0, None
+
+    module = WrappedLightningModule(FixedModel(), causal_norm="none")
+    batch = {
+        "features": torch.zeros((1, 3, 1)),
+        "coords": torch.zeros((1, 3, 2)),
+        "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
+        "timepoints": torch.tensor([[0, 0, 1]]),
+        "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
+        "supervised": torch.tensor([[True, False, True]]),
+    }
+
+    out = module._common_step(batch)
+
+    assert out["mask"].bool().tolist() == [
+        [[False, False, True], [False, False, False], [False, False, False]]
+    ]
 
 
 def test_balanced_batch_sampler_partial_batch():
