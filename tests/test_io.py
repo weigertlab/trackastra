@@ -169,6 +169,8 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
     assert seg.labels.tolist() == [1, 1, 2]
     assert seg.lineage_index.tolist() == [0, 0, -1]
     assert seg.matched_gt.tolist() == [True, True, True]
+    assert seg.gt_predecessor_set_available.tolist() == [True, True, True]
+    assert seg.gt_successor_set_available.tolist() == [True, True, True]
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3])
     sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
     np.testing.assert_allclose(sample["features"].numpy(), [[0.1], [0.2], [0.3]])
@@ -182,6 +184,16 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
     )
     assert sparse.detections[0].lineage_index.tolist() == [0, 0, -1]
     assert sparse.detections[0].matched_gt.tolist() == [True, True, False]
+    assert sparse.detections[0].gt_predecessor_set_available.tolist() == [
+        False,
+        True,
+        False,
+    ]
+    assert sparse.detections[0].gt_successor_set_available.tolist() == [
+        True,
+        False,
+        False,
+    ]
 
 
 def _linear_geff_graph():

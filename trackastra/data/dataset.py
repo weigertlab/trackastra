@@ -65,6 +65,46 @@ def _association_target(
     return target
 
 
+def association_supervision_mask(
+    timepoints: torch.Tensor,
+    gt_predecessor_set_available: torch.Tensor,
+    gt_successor_set_available: torch.Tensor,
+    delta_cutoff: int | None = None,
+    padding_mask: torch.Tensor | None = None,
+) -> torch.BoolTensor:
+    """Return association pairs with annotated GT link-set supervision."""
+    if delta_cutoff is not None and delta_cutoff < 1:
+        raise ValueError(f"delta_cutoff must be positive, got {delta_cutoff}")
+    batched = timepoints.ndim == 2
+    if timepoints.ndim == 1:
+        timepoints = timepoints.unsqueeze(0)
+        gt_predecessor_set_available = gt_predecessor_set_available.unsqueeze(0)
+        gt_successor_set_available = gt_successor_set_available.unsqueeze(0)
+        if padding_mask is not None:
+            padding_mask = padding_mask.unsqueeze(0)
+    elif timepoints.ndim != 2:
+        raise ValueError(f"timepoints must be 1D or 2D, got shape {timepoints.shape}")
+    if gt_predecessor_set_available.shape != timepoints.shape:
+        raise ValueError("gt_predecessor_set_available must match timepoints shape")
+    if gt_successor_set_available.shape != timepoints.shape:
+        raise ValueError("gt_successor_set_available must match timepoints shape")
+
+    dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+    pair_gt_available = gt_successor_set_available.bool().unsqueeze(
+        2
+    ) | gt_predecessor_set_available.bool().unsqueeze(1)
+    mask_time = dt > 0
+    if delta_cutoff is not None:
+        mask_time = mask_time & (dt <= delta_cutoff)
+    mask = mask_time & pair_gt_available
+    if padding_mask is not None:
+        if padding_mask.shape != timepoints.shape:
+            raise ValueError("padding_mask must match timepoints shape")
+        pair_padding = padding_mask.bool().unsqueeze(1) | padding_mask.bool().unsqueeze(2)
+        mask = mask & ~pair_padding
+    return mask if batched else mask.squeeze(0)
+
+
 def _sample_neighborhood_indices(
     coords: np.ndarray,
     timepoints: np.ndarray,
@@ -262,6 +302,23 @@ class TrackingDataset(Dataset):
             return np.ones(sl.stop - sl.start, dtype=bool)
         return seg.matched_gt[sl].copy()
 
+    def _window_gt_link_set_availability(
+        self, index: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        seg, sl = self._window_slice(index)
+        n = sl.stop - sl.start
+        predecessor = (
+            np.ones(n, dtype=bool)
+            if seg.gt_predecessor_set_available is None
+            else seg.gt_predecessor_set_available[sl].copy()
+        )
+        successor = (
+            np.ones(n, dtype=bool)
+            if seg.gt_successor_set_available is None
+            else seg.gt_successor_set_available[sl].copy()
+        )
+        return predecessor, successor
+
     def _window_object_count(self, index: int) -> int:
         _, sl = self._window_slice(index)
         count = sl.stop - sl.start
@@ -282,10 +339,17 @@ class TrackingDataset(Dataset):
             return feature.features_stacked_for(self.features).shape[1]
         return 0
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(
+        self,
+        index: int,
+        return_all: bool = False,
+    ) -> dict[str, torch.Tensor]:
         seg_index, window_start = self.windows[index]
         coords, labels, timepoints, features, association = self._window_arrays(index)
         matched_gt = self._window_matched_gt(index)
+        gt_predecessor_set_available, gt_successor_set_available = (
+            self._window_gt_link_set_availability(index)
+        )
         feature = wrfeat.WRFeatures(
             coords=coords,
             labels=labels,
@@ -304,6 +368,8 @@ class TrackingDataset(Dataset):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
                 matched_gt = matched_gt[keep]
+                gt_predecessor_set_available = gt_predecessor_set_available[keep]
+                gt_successor_set_available = gt_successor_set_available[keep]
 
         if self.detect_drop and np.random.rand() < self.detect_drop:
             keep = _sample_detection_keep_indices(
@@ -313,6 +379,8 @@ class TrackingDataset(Dataset):
                 feature = _subset_features(feature, keep)
                 association = association[np.ix_(keep, keep)]
                 matched_gt = matched_gt[keep]
+                gt_predecessor_set_available = gt_predecessor_set_available[keep]
+                gt_successor_set_available = gt_successor_set_available[keep]
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
@@ -333,11 +401,23 @@ class TrackingDataset(Dataset):
             "timepoints": torch.from_numpy(feature.timepoints).long(),
             "labels": torch.from_numpy(feature.labels).long(),
             "matched_gt": torch.from_numpy(matched_gt).bool(),
+            "gt_predecessor_set_available": torch.from_numpy(
+                gt_predecessor_set_available
+            ).bool(),
+            "gt_successor_set_available": torch.from_numpy(
+                gt_successor_set_available
+            ).bool(),
             "window_index": torch.tensor(index, dtype=torch.long),
             "seg_index": torch.tensor(seg_index, dtype=torch.long),
             "window_start": torch.tensor(window_start, dtype=torch.long),
             "dataset_index": torch.tensor(self.dataset_index, dtype=torch.long),
         }
+        if return_all:
+            result["supervision_mask"] = association_supervision_mask(
+                result["timepoints"],
+                result["gt_predecessor_set_available"],
+                result["gt_successor_set_available"],
+            )
         return result
 
 
@@ -434,6 +514,8 @@ def collate_sequence_padding(batch):
         "pretrained_feats": 0,
         "labels": 0,
         "matched_gt": False,
+        "gt_predecessor_set_available": False,
+        "gt_successor_set_available": False,
         # There are real timepoints with t=0; pad with -1 to distinguish from those.
         "timepoints": -1,
     }

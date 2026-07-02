@@ -36,6 +36,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from tqdm import tqdm
 from trackastra.data import (
     # load_ctc_data_from_subfolders,
+    association_supervision_mask,
     collate_sequence_padding,
     densify_assoc,
 )
@@ -652,7 +653,7 @@ class WrappedLightningModule(pl.LightningModule):
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
 
-        A_pred, scored_mask = self.model(coords, feats, padding_mask=padding_mask)
+        A_pred, neighbor_mask = self.model(coords, feats, padding_mask=padding_mask)
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
@@ -663,19 +664,29 @@ class WrappedLightningModule(pl.LightningModule):
 
         A_pred[mask_invalid] = 0
         mask_valid = ~mask_invalid
-        if "matched_gt" in batch:
-            matched_gt = batch["matched_gt"].bool()
-            pair_matched_gt = matched_gt.unsqueeze(1) | matched_gt.unsqueeze(2)
-            mask_valid = mask_valid & pair_matched_gt
-        if scored_mask is not None:
+        gt_predecessor_set_available = batch["gt_predecessor_set_available"].bool()
+        gt_successor_set_available = batch["gt_successor_set_available"].bool()
+        pair_gt_available = gt_successor_set_available.unsqueeze(
+            2
+        ) | gt_predecessor_set_available.unsqueeze(1)
+        mask_valid = mask_valid & pair_gt_available
+        loss_mask = association_supervision_mask(
+            timepoints,
+            gt_predecessor_set_available,
+            gt_successor_set_available,
+            delta_cutoff=self.delta_cutoff,
+            padding_mask=padding_mask,
+        )
+        if neighbor_mask is not None:
             # Sparse head: only the kNN pairs carry a real logit; every other pair
             # is pinned to NO_EDGE_LOGIT and is structurally unpredictable. Drop
             # those from the loss (numerator and the normalisation count) so an
             # unrecoverable positive outside the neighbourhood cannot spike it.
-            mask_valid = mask_valid & scored_mask
+            mask_valid = mask_valid & neighbor_mask
+            loss_mask = loss_mask & neighbor_mask
         dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
         mask_time = torch.logical_and(dt > 0, dt <= self.delta_cutoff)
-        mask = (mask_time & mask_valid).float()
+        mask = loss_mask.float()
 
         loss = _apply_focal_weight(self.criterion(A_pred, A), self.focal_loss_gamma)
 

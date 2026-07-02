@@ -2,6 +2,7 @@
 # Core data utilities (no training dependencies required)
 from .dataset import (
     TrackingDataset,
+    association_supervision_mask,
     collate_sequence_padding,
     densify_assoc,
     warn_association_distances,

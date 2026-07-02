@@ -623,19 +623,18 @@ class TrackingTransformer(torch.nn.Module):
             else self.head(x, y)
         )
 
-        # Always return (A, scored_mask). scored_mask is None when every pair was
-        # scored (dense mode); in sparse mode it is a (B, N, N) bool that is True
-        # only at the kNN pairs in nbr_idx, so the loss can skip the unrecoverable
-        # non-neighbour pairs the head pinned to NO_EDGE_LOGIT.
-        scored_mask = None
+        # Always return (A, neighbor_mask). neighbor_mask is None in dense mode; in
+        # sparse mode it is a (B, N, N) bool that is True only at kNN pairs in
+        # nbr_idx. Training may use it to restrict loss to the sparse neighbourhood.
+        neighbor_mask = None
         if nbr_idx is not None:
             b, n, _k = nbr_idx.shape
-            scored_mask = nbr_idx.new_zeros((b, n, A.shape[-1]), dtype=torch.bool)
+            neighbor_mask = nbr_idx.new_zeros((b, n, A.shape[-1]), dtype=torch.bool)
             v = nbr_idx >= 0
             bi = torch.arange(b, device=nbr_idx.device).view(b, 1, 1).expand_as(nbr_idx)
             ni = torch.arange(n, device=nbr_idx.device).view(1, n, 1).expand_as(nbr_idx)
-            scored_mask[bi[v], ni[v], nbr_idx[v]] = True
-        return A, scored_mask
+            neighbor_mask[bi[v], ni[v], nbr_idx[v]] = True
+        return A, neighbor_mask
 
     def normalize_output(
         self,

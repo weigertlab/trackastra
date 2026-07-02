@@ -464,6 +464,8 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
         "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
         "timepoints": torch.tensor([[0, 0, 1]]),
         "padding_mask": torch.zeros((1, 3), dtype=torch.bool),
+        "gt_predecessor_set_available": torch.ones((1, 3), dtype=torch.bool),
+        "gt_successor_set_available": torch.ones((1, 3), dtype=torch.bool),
     }
 
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
@@ -476,7 +478,7 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
     assert model.logits.grad[0, 2] > 0.1
 
 
-def test_common_step_masks_pairs_touching_matched_gt():
+def test_common_step_masks_pairs_with_available_gt_link_sets():
     class FixedModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -492,15 +494,19 @@ def test_common_step_masks_pairs_touching_matched_gt():
         "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
         "timepoints": torch.tensor([[0, 0, 1, 1]]),
         "padding_mask": torch.zeros((1, 4), dtype=torch.bool),
-        "matched_gt": torch.tensor([[True, False, True, False]]),
+        "matched_gt": torch.tensor([[True, True, True, True]]),
+        "gt_predecessor_set_available": torch.tensor(
+            [[False, False, False, True]]
+        ),
+        "gt_successor_set_available": torch.tensor([[False, True, False, False]]),
     }
 
     out = module._common_step(batch)
 
     assert out["mask"].bool().tolist() == [
         [
+            [False, False, False, True],
             [False, False, True, True],
-            [False, False, True, False],
             [False, False, False, False],
             [False, False, False, False],
         ]

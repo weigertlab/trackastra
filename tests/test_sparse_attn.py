@@ -170,11 +170,11 @@ def test_edge_head_runs_and_requires_sparse(head_mode):
         edge_star_dim=32,
     ).eval()
     with torch.no_grad():
-        a, scored_mask = model(coords, padding_mask=padding_mask)
+        a, neighbor_mask = model(coords, padding_mask=padding_mask)
     assert a.shape == (coords.shape[0], coords.shape[1], coords.shape[1])
     assert torch.isfinite(a).all()
     # sparse head: only kNN pairs carry a real logit (the rest are pinned)
-    assert scored_mask is not None and scored_mask.any()
+    assert neighbor_mask is not None and neighbor_mask.any()
 
     # the edge heads need the kNN neighbour list, so dense attention is rejected
     with pytest.raises(ValueError):

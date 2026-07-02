@@ -178,6 +178,8 @@ def test_dataset_and_collate_preserve_matched_gt_vector():
         features={"v": np.zeros((3, 1), dtype=np.float32)},
         lineage_index=np.array([0, -1, 0], dtype=np.int64),
         matched_gt=np.array([True, False, True]),
+        gt_predecessor_set_available=np.array([False, False, True]),
+        gt_successor_set_available=np.array([True, False, False]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
@@ -189,6 +191,8 @@ def test_dataset_and_collate_preserve_matched_gt_vector():
     sample = TrackingDataset(sequence, window_size=2, features="none")[0]
 
     assert sample["matched_gt"].tolist() == [True, False, True]
+    assert sample["gt_predecessor_set_available"].tolist() == [False, False, True]
+    assert sample["gt_successor_set_available"].tolist() == [True, False, False]
     assert sample["assoc_matrix"].bool().tolist() == [
         [True, False, True],
         [False, False, False],
@@ -203,12 +207,22 @@ def test_dataset_and_collate_preserve_matched_gt_vector():
         "labels": sample["labels"][:2],
         "timepoints": sample["timepoints"][:2],
         "matched_gt": sample["matched_gt"][:2],
+        "gt_predecessor_set_available": sample["gt_predecessor_set_available"][:2],
+        "gt_successor_set_available": sample["gt_successor_set_available"][:2],
         "assoc_matrix": sample["assoc_matrix"][:2, :2],
     }
     batch = collate_sequence_padding([sample, short])
 
     assert batch["matched_gt"].tolist() == [
         [True, False, True],
+        [True, False, False],
+    ]
+    assert batch["gt_predecessor_set_available"].tolist() == [
+        [False, False, True],
+        [False, False, False],
+    ]
+    assert batch["gt_successor_set_available"].tolist() == [
+        [True, False, False],
         [True, False, False],
     ]
 
@@ -235,6 +249,8 @@ def test_tracking_dataset_supports_none_and_intensity_features():
     intensity_sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
 
     assert tuple(none_sample["features"].shape) == (2, 0)
+    assert none_sample["gt_predecessor_set_available"].tolist() == [True, True]
+    assert none_sample["gt_successor_set_available"].tolist() == [True, True]
     np.testing.assert_allclose(
         intensity_sample["features"].numpy(),
         [[0.25], [0.75]],

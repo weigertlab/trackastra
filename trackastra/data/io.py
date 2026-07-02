@@ -52,6 +52,8 @@ class DetectionSet:
     ``source_coords`` and ``spacing`` preserve the original coordinate system when
     loaders scale source coordinates into model space. ``matched_gt`` marks detections
     matched to annotated GT; ``None`` means every detection is treated as matched.
+    ``gt_predecessor_set_available`` and ``gt_successor_set_available`` mark whether
+    the full incoming or outgoing GT link set is annotated for each detection.
     """
 
     name: str
@@ -65,6 +67,8 @@ class DetectionSet:
     source_coords: np.ndarray | None = None
     spacing: tuple[float, ...] | None = None
     matched_gt: np.ndarray | None = None
+    gt_predecessor_set_available: np.ndarray | None = None
+    gt_successor_set_available: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         coords = _immutable_array(self.coords, ndim=2)
@@ -120,6 +124,30 @@ class DetectionSet:
                 raise ValueError("matched_gt must be aligned with detections")
             matched_gt.setflags(write=False)
             object.__setattr__(self, "matched_gt", matched_gt)
+        if self.gt_predecessor_set_available is not None:
+            gt_predecessor_set_available = _immutable_array(
+                self.gt_predecessor_set_available, ndim=1
+            ).astype(bool)
+            if len(gt_predecessor_set_available) != n:
+                raise ValueError(
+                    "gt_predecessor_set_available must be aligned with detections"
+                )
+            gt_predecessor_set_available.setflags(write=False)
+            object.__setattr__(
+                self, "gt_predecessor_set_available", gt_predecessor_set_available
+            )
+        if self.gt_successor_set_available is not None:
+            gt_successor_set_available = _immutable_array(
+                self.gt_successor_set_available, ndim=1
+            ).astype(bool)
+            if len(gt_successor_set_available) != n:
+                raise ValueError(
+                    "gt_successor_set_available must be aligned with detections"
+                )
+            gt_successor_set_available.setflags(write=False)
+            object.__setattr__(
+                self, "gt_successor_set_available", gt_successor_set_available
+            )
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -143,6 +171,8 @@ class DetectionSet:
                 self.source_coords,
                 self.spacing,
                 self.matched_gt,
+                self.gt_predecessor_set_available,
+                self.gt_successor_set_available,
             ),
         )
 
@@ -560,6 +590,22 @@ def _geff_tracklet_assignments(
     return lineage_index, lineage, parents
 
 
+def _geff_gt_link_set_availability(
+    graph: nx.DiGraph, node_times: dict
+) -> tuple[dict, dict]:
+    predecessor_available = {}
+    successor_available = {}
+    for component in nx.weakly_connected_components(graph):
+        times = np.asarray([node_times[node] for node in component], dtype=np.int64)
+        t_min = int(times.min())
+        t_max = int(times.max())
+        for node in component:
+            time = int(node_times[node])
+            predecessor_available[node] = time > t_min
+            successor_available[node] = time < t_max
+    return predecessor_available, successor_available
+
+
 def _normalize_detection_sources(
     detections: str | Path | pd.DataFrame | Sequence | None,
 ) -> list:
@@ -611,6 +657,8 @@ def _build_geff_detection_set(
     lineage_index: np.ndarray,
     matched_gt: np.ndarray,
     spacing: tuple[float, ...],
+    gt_predecessor_set_available: np.ndarray | None = None,
+    gt_successor_set_available: np.ndarray | None = None,
 ) -> DetectionSet:
     labels = np.empty(len(coords), dtype=np.int32)
     for time in np.unique(timepoints):
@@ -628,6 +676,8 @@ def _build_geff_detection_set(
         source_coords=source_coords,
         spacing=spacing,
         matched_gt=matched_gt,
+        gt_predecessor_set_available=gt_predecessor_set_available,
+        gt_successor_set_available=gt_successor_set_available,
     )
 
 
@@ -693,6 +743,9 @@ def _tracking_sequence_from_geff_graph(
     lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
         graph, node_times
     )
+    gt_predecessor_available, gt_successor_available = _geff_gt_link_set_availability(
+        graph, node_times
+    )
 
     detection_sets = []
     if not detection_sources:
@@ -735,6 +788,11 @@ def _tracking_sequence_from_geff_graph(
                 feature_columns=src_feature_columns,
             )
             lineage_index = np.full(len(coords), -1, dtype=np.int64)
+            gt_predecessor_set_available = np.ones(len(coords), dtype=bool)
+            gt_successor_set_available = np.ones(len(coords), dtype=bool)
+            if sparse_gt:
+                gt_predecessor_set_available[:] = False
+                gt_successor_set_available[:] = False
             for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
                 prop_idx = np.flatnonzero(timepoints == time)
                 gt_idx = np.flatnonzero(gt_timepoints == time)
@@ -744,9 +802,16 @@ def _tracking_sequence_from_geff_graph(
                     max_distance=match_max_distance,
                 )
                 for prop_local, gt_local, _distance in matches:
-                    lineage_index[prop_idx[prop_local]] = lineage_map[
-                        nodes[gt_idx[gt_local]]
-                    ]
+                    prop_global = prop_idx[prop_local]
+                    gt_node = nodes[gt_idx[gt_local]]
+                    lineage_index[prop_global] = lineage_map[gt_node]
+                    if sparse_gt:
+                        gt_predecessor_set_available[prop_global] = (
+                            gt_predecessor_available[gt_node]
+                        )
+                        gt_successor_set_available[prop_global] = (
+                            gt_successor_available[gt_node]
+                        )
             matched_gt = (
                 lineage_index >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
             )
@@ -760,6 +825,8 @@ def _tracking_sequence_from_geff_graph(
                     lineage_index=lineage_index,
                     matched_gt=matched_gt,
                     spacing=spacing,
+                    gt_predecessor_set_available=gt_predecessor_set_available,
+                    gt_successor_set_available=gt_successor_set_available,
                 )
             )
 
