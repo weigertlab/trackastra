@@ -342,11 +342,11 @@ def test_edge_error_counts_for_division_links():
     tp = torch.tensor([[0, 0, 1, 1, 1, 1]])
     A = torch.zeros((1, 6, 6))
     A[0, 0, 2] = A[0, 1, 3] = A[0, 1, 4] = 1.0
-    # prediction: keep 0->2 and 1->3, MISS 1->4 (FN div), add spurious 0->5 (FP);
-    # 0->{2,5} makes node 0 a predicted division, so the FP lands in fp_div
+    # prediction at t=0.5: keep 0->2 and 1->3, MISS 1->4 (FN div), add spurious
+    # 0->5 (FP); 0->{2,5} makes node 0 a predicted division, so the FP lands in fp_div
     prob = torch.zeros((1, 6, 6))
     prob[0, 0, 2] = prob[0, 1, 3] = prob[0, 0, 5] = 0.9
-    prob[0, 1, 4] = 0.1
+    prob[0, 1, 4] = 0.4
 
     dt = tp.unsqueeze(1) - tp.unsqueeze(2)
     mask = ((dt > 0) & (dt <= 2)).float()
@@ -369,6 +369,20 @@ def test_edge_error_counts_for_division_links():
         "fp_div_num": 1.0,  # spurious 0->5
         "fp_div_den": 2.0,  # two predicted division edges (0->2, 0->5)
     }
+
+    threshold_counts = WrappedLightningModule._edge_error_counts(
+        A, prob, tp, mask, block_sum > 2, thresholds=(0.2, 0.5, 0.8)
+    )
+    threshold_counts = {k: float(v) for k, v in threshold_counts.items()}
+
+    for key, value in counts.items():
+        assert threshold_counts[key] == value
+        name, part = key.rsplit("_", 1)
+        assert threshold_counts[f"{name}_t1_{part}"] == value
+    assert threshold_counts["fn_div_t0_num"] == 0.0
+    assert threshold_counts["fn_div_t0_den"] == 2.0
+    assert threshold_counts["fp_div_t0_num"] == 1.0
+    assert threshold_counts["fp_div_t0_den"] == 4.0
 
 
 class _SamplerDataset(Dataset):

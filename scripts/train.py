@@ -415,6 +415,10 @@ def _summarize_tracking_metrics(metrics) -> dict[str, float]:
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
 # this contains all the training/loss logic
 class WrappedLightningModule(pl.LightningModule):
+    _EDGE_PLOT_THRESHOLDS = tuple(
+        sorted({0.5, *[float(x) for x in np.linspace(0.2, 0.8, 10)]})
+    )
+
     def __init__(
         self,
         model,
@@ -614,7 +618,11 @@ class WrappedLightningModule(pl.LightningModule):
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
     @staticmethod
-    def _edge_error_counts(A, prob, timepoints, mask, gt_division):
+    def _edge_count_key(key: str, threshold_idx: int, part: str) -> str:
+        return f"{key}_t{threshold_idx}_{part}"
+
+    @classmethod
+    def _edge_error_counts(cls, A, prob, timepoints, mask, gt_division, thresholds=None):
         """Pre-solver association FN/FP counts on regular and division links.
 
         Proxy for tracking quality: thresholds the predicted association ``prob``
@@ -624,27 +632,40 @@ class WrappedLightningModule(pl.LightningModule):
         """
         m = mask.bool()
         gt_pos = (A > 0.5) & m
-        pred_pos = (prob >= 0.5) & m
-        # mark predicted edges leaving a predicted division (source out-degree >= 2)
-        pred = pred_pos.to(A.dtype)
-        row = blockwise_sum_batched(pred, timepoints, dim=-1, reduce="sum")
-        col = blockwise_sum_batched(pred, timepoints, dim=-2, reduce="sum")
-        pred_division = pred * (row + col) > 2
-
-        fn = gt_pos & ~pred_pos
-        fp = pred_pos & ~gt_pos
         gt_regular = gt_pos & ~gt_division
-        pred_regular = pred_pos & ~pred_division
-        return {
-            "fn_num": (fn & gt_regular).sum().float(),
-            "fn_den": gt_regular.sum().float(),
-            "fp_num": (fp & pred_regular).sum().float(),
-            "fp_den": pred_regular.sum().float(),
-            "fn_div_num": (fn & gt_division).sum().float(),
-            "fn_div_den": (gt_pos & gt_division).sum().float(),
-            "fp_div_num": (fp & pred_division).sum().float(),
-            "fp_div_den": (pred_pos & pred_division).sum().float(),
-        }
+        gt_div = gt_pos & gt_division
+        thresholds = (0.5,) if thresholds is None else tuple(float(t) for t in thresholds)
+        include_threshold_counts = thresholds != (0.5,)
+        counts = {}
+
+        for threshold_idx, threshold in enumerate(thresholds):
+            pred_pos = (prob >= threshold) & m
+            # mark predicted edges leaving a predicted division (source out-degree >= 2)
+            pred = pred_pos.to(A.dtype)
+            row = blockwise_sum_batched(pred, timepoints, dim=-1, reduce="sum")
+            col = blockwise_sum_batched(pred, timepoints, dim=-2, reduce="sum")
+            pred_division = pred * (row + col) > 2
+
+            fn = gt_pos & ~pred_pos
+            fp = pred_pos & ~gt_pos
+            pred_regular = pred_pos & ~pred_division
+            values = {
+                "fn_num": (fn & gt_regular).sum().float(),
+                "fn_den": gt_regular.sum().float(),
+                "fp_num": (fp & pred_regular).sum().float(),
+                "fp_den": pred_regular.sum().float(),
+                "fn_div_num": (fn & gt_div).sum().float(),
+                "fn_div_den": gt_div.sum().float(),
+                "fp_div_num": (fp & pred_division).sum().float(),
+                "fp_div_den": (pred_pos & pred_division).sum().float(),
+            }
+            if abs(threshold - 0.5) < 1e-12:
+                counts.update(values)
+            if include_threshold_counts:
+                for key, value in values.items():
+                    name, part = key.rsplit("_", 1)
+                    counts[cls._edge_count_key(name, threshold_idx, part)] = value
+        return counts
 
     def _common_step(self, batch):
         feats = batch["features"]
@@ -768,7 +789,12 @@ class WrappedLightningModule(pl.LightningModule):
                 else:
                     prob = torch.sigmoid(A_pred.float())
                 edge_counts = self._edge_error_counts(
-                    A, prob, timepoints, mask, division_tracks
+                    A,
+                    prob,
+                    timepoints,
+                    mask,
+                    division_tracks,
+                    thresholds=self._EDGE_PLOT_THRESHOLDS,
                 )
 
         # print(padding_mask.float().mean())
@@ -826,6 +852,123 @@ class WrappedLightningModule(pl.LightningModule):
             _emit(f"{stage}_assoc_f1", self._error_rate_f1(rates["fn"], rates["fp"]))
         if "fn_div" in rates and "fp_div" in rates:
             _emit(f"{stage}_assoc_f1_div", self._error_rate_f1(rates["fn_div"], rates["fp_div"]))
+
+    def _pooled_edge_threshold_rates(self, stage: str) -> list[dict[str, float | str]]:
+        """Return pooled threshold-sweep association error rates for plotting."""
+        acc = self._edge_counts.get(stage, {})
+        zero = torch.zeros((), device=self.device)
+        rows = []
+
+        def _rate(key: str, threshold_idx: int) -> float | None:
+            num_key = self._edge_count_key(key, threshold_idx, "num")
+            den_key = self._edge_count_key(key, threshold_idx, "den")
+            num = self.all_gather(acc.get(num_key, zero)).sum()
+            den = self.all_gather(acc.get(den_key, zero)).sum()
+            if den.item() == 0:
+                return None
+            return float(num / den)
+
+        for threshold_idx, threshold in enumerate(self._EDGE_PLOT_THRESHOLDS):
+            for edge_type, fn_key, fp_key in (
+                ("regular", "fn", "fp"),
+                ("division", "fn_div", "fp_div"),
+            ):
+                fn_rate = _rate(fn_key, threshold_idx)
+                fp_rate = _rate(fp_key, threshold_idx)
+                if fn_rate is None or fp_rate is None:
+                    continue
+                rows.append(
+                    {
+                        "stage": stage,
+                        "edge_type": edge_type,
+                        "threshold": float(threshold),
+                        "fn": fn_rate,
+                        "fp": fp_rate,
+                        "f1": self._error_rate_f1(fn_rate, fp_rate),
+                    }
+                )
+        return rows
+
+    def _log_assoc_error_plot(self) -> None:
+        """Log a compact FN/FP threshold-sweep plot for train and validation."""
+        if (
+            not self.log_edge_rates
+            or not isinstance(self.logger, WandbLogger)
+            or self.trainer.sanity_checking
+        ):
+            return
+
+        rows = []
+        for stage in ("train", "val"):
+            rows.extend(self._pooled_edge_threshold_rates(stage))
+        if not self.trainer.is_global_zero or not rows:
+            return
+
+        import matplotlib.pyplot as plt
+        import wandb as _wandb
+
+        fig, ax = plt.subplots(figsize=(5.0, 4.0), dpi=150)
+        colors = {"regular": "tab:blue", "division": "tab:red"}
+        linestyles = {"train": "-", "val": "--"}
+        markers = {"train": "o", "val": "s"}
+        labels = {
+            ("train", "regular"): "train non-div",
+            ("train", "division"): "train div",
+            ("val", "regular"): "val non-div",
+            ("val", "division"): "val div",
+        }
+
+        for stage in ("train", "val"):
+            for edge_type in ("regular", "division"):
+                group = [
+                    row
+                    for row in rows
+                    if row["stage"] == stage and row["edge_type"] == edge_type
+                ]
+                if not group:
+                    continue
+                group = sorted(group, key=lambda row: row["threshold"])
+                xs = [row["fn"] for row in group]
+                ys = [row["fp"] for row in group]
+                current = [
+                    row for row in group if abs(float(row["threshold"]) - 0.5) < 1e-12
+                ]
+                ax.plot(
+                    xs,
+                    ys,
+                    color=colors[edge_type],
+                    linestyle=linestyles[stage],
+                    linewidth=1.0,
+                    alpha=0.35,
+                    label=None if current else labels[(stage, edge_type)],
+                    zorder=1,
+                )
+                if current:
+                    row = current[0]
+                    ax.scatter(
+                        row["fn"],
+                        row["fp"],
+                        color=colors[edge_type],
+                        marker=markers[stage],
+                        edgecolor="black",
+                        linewidth=0.5,
+                        s=42,
+                        label=labels[(stage, edge_type)],
+                        zorder=2,
+                    )
+
+        ax.set_xlabel("missed links (FN / GT links)")
+        ax.set_ylabel("wrong proposed links (FP / predicted links)")
+        ax.set_title(f"Association errors, epoch {self.current_epoch}")
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        ax.grid(alpha=0.2, linewidth=0.5)
+        handles, legend_labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, legend_labels, frameon=False, fontsize=8)
+        fig.tight_layout()
+        self.logger.experiment.log({"assoc_errors": _wandb.Image(fig)})
+        plt.close(fig)
 
     @staticmethod
     def _error_rate_f1(fn_rate, fp_rate):
@@ -1211,6 +1354,7 @@ class WrappedLightningModule(pl.LightningModule):
             return
 
         self._log_edge_error_rates("val")
+        self._log_assoc_error_plot()
 
         # val_loss = torch.stack(self.val_loss).mean()
 
