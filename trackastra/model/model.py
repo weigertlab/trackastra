@@ -3,8 +3,9 @@
 import logging
 from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 
@@ -30,6 +31,64 @@ from .sparse_attn import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Configuration for constructing a TrackingTransformer."""
+
+    coord_dim: int = 2
+    feat_dim: int = 6
+    d_model: int = 256
+    pos_embed_per_dim: int = 32
+    feat_embed_per_dim: int = 8
+    feature_embed_mode: Literal["fourier", "mlp"] = "mlp"
+    num_encoder_layers: int = 6
+    num_decoder_layers: int = 6
+    dropout: float = 0.0
+    window: int = 4
+    max_distance: float | None = 256
+    attn_positional_bias: Literal["rope", "none"] = "rope"
+    attn_positional_bias_n_spatial: int = 16
+    attn_dist_mode: str = "v1"
+    attn_mode: Literal["dense", "sparse"] = "dense"
+    max_neighbors: tuple[int, ...] = (16,)
+    sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "per_frame"
+    logit_norm: bool = True
+    head_mode: Literal["bilinear", "sparse_bilinear", "edge_star", "edge_mlp"] | None = None
+    causal_norm: Literal["none", "linear", "softmax", "quiet_softmax"] = "quiet_softmax"
+    architecture_version: Literal[1, 2] = 2
+    disable_abs_pos: bool = False
+    disable_input_norm: bool = False
+    model_path: Path | None = None
+
+    def transformer_kwargs(self) -> dict[str, Any]:
+        """Return kwargs accepted by TrackingTransformer."""
+        return {
+            "coord_dim": self.coord_dim,
+            "feat_dim": self.feat_dim,
+            "d_model": self.d_model,
+            "pos_embed_per_dim": self.pos_embed_per_dim,
+            "feat_embed_per_dim": self.feat_embed_per_dim,
+            "feature_embed_mode": self.feature_embed_mode,
+            "num_encoder_layers": self.num_encoder_layers,
+            "num_decoder_layers": self.num_decoder_layers,
+            "dropout": self.dropout,
+            "window": self.window,
+            "max_distance": self.max_distance,
+            "attn_positional_bias": self.attn_positional_bias,
+            "attn_positional_bias_n_spatial": self.attn_positional_bias_n_spatial,
+            "attn_dist_mode": self.attn_dist_mode,
+            "attn_mode": self.attn_mode,
+            "max_neighbors": self.max_neighbors,
+            "sparse_knn_mode": self.sparse_knn_mode,
+            "logit_norm": self.logit_norm,
+            "head_mode": self.head_mode,
+            "causal_norm": self.causal_norm,
+            "architecture_version": self.architecture_version,
+            "disable_abs_pos": self.disable_abs_pos,
+            "disable_input_norm": self.disable_input_norm,
+        }
 
 
 class EncoderLayer(nn.Module):
@@ -394,7 +453,7 @@ class TrackingTransformer(torch.nn.Module):
         _sparse_heads = ("sparse_bilinear", "edge_star", "edge_mlp")
         if head_mode is None:
             head_mode = "sparse_bilinear" if attn_mode == "sparse" else "bilinear"
-        if head_mode not in ("bilinear",) + _sparse_heads:
+        if head_mode not in ("bilinear", *_sparse_heads):
             raise ValueError(
                 "head_mode must be None, 'bilinear', 'sparse_bilinear', 'edge_star' "
                 f"or 'edge_mlp', got {head_mode!r}"

@@ -249,7 +249,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
         default=".cache",
         help="cache dir for CTCData if --cache is set",
     )
-    parser.add_argument("--resume", type=str2bool, default=True)
+    parser.add_argument("--resume", type=str2bool, default=False)
     parser.add_argument(
         "--n_pool_sampler",
         type=int,

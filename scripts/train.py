@@ -11,8 +11,14 @@ if __name__ == "__main__":
         parse_training_config()
     )
 
-    train_sequences = load_sequences(data_train_config.sources)
-    val_sequences = load_sequences(data_val_config.sources)
+    train_sequences = load_sequences(
+        data_train_config.sources,
+        cache_dir=train_config.cache_dir,
+    )
+    val_sequences = load_sequences(
+        data_val_config.sources,
+        cache_dir=train_config.cache_dir,
+    )
 
     train_dataset = build_dataset(train_sequences, data_train_config)
     val_dataset = build_dataset(val_sequences, data_val_config)

@@ -25,11 +25,10 @@ from trackastra.data.distributed import (
     normalize_sequence_input_specs,
 )
 from trackastra.data.io import DetectionSet, TrackingSequence
-from trackastra.model import TrackingTransformer
+from trackastra.model import ModelConfig, TrackingTransformer
 from trackastra.training import (
     DataSplitConfig,
     LightningTrainerRuntime,
-    ModelConfig,
     SequenceLoadingError,
     SourceSpecError,
     TrackastraTrainer,
@@ -825,6 +824,65 @@ def test_load_sequences_accepts_custom_loader_registry():
     assert loaded == (("movie", 1),)
 
 
+def test_load_sequences_uses_joblib_cache(monkeypatch, tmp_path):
+    cache_calls = []
+    load_calls = []
+
+    class CachedCallable:
+        def __init__(self, func, ignore):
+            self.func = func
+            self.ignore = ignore
+
+        def check_call_in_cache(self, **kwargs):
+            cache_calls.append(("check", self.func.__name__, kwargs))
+            return False
+
+        def __call__(self, **kwargs):
+            load_calls.append((self.func.__name__, kwargs))
+            return self.func(**kwargs)
+
+    class RecordingMemory:
+        def __init__(self, cachedir, verbose):
+            assert Path(cachedir) == tmp_path / "cache"
+            assert verbose == 0
+
+        def cache(self, func, ignore=None):
+            cache_calls.append(("wrap", func.__name__, ignore))
+            return CachedCallable(func, ignore)
+
+    def ctc_loader(root, n_workers):
+        return ("ctc", root, n_workers)
+
+    def geff_loader(root_or_geff, sparse_gt):
+        return ("geff", root_or_geff, sparse_gt)
+
+    monkeypatch.setattr(training_api.joblib, "Memory", RecordingMemory)
+
+    loaded = load_sequences(
+        [
+            {"format": "ctc", "kwargs": {"root": "ctc/01", "n_workers": 4}},
+            {"format": "geff", "kwargs": {"root_or_geff": "movie", "sparse_gt": True}},
+        ],
+        loaders={"ctc": ctc_loader, "geff": geff_loader},
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert loaded == (
+        ("ctc", "ctc/01", 4),
+        ("geff", "movie", True),
+    )
+    assert cache_calls == [
+        ("wrap", "ctc_loader", ["n_workers"]),
+        ("check", "ctc_loader", {"root": "ctc/01", "n_workers": 4}),
+        ("wrap", "geff_loader", None),
+        ("check", "geff_loader", {"root_or_geff": "movie", "sparse_gt": True}),
+    ]
+    assert load_calls == [
+        ("ctc_loader", {"root": "ctc/01", "n_workers": 4}),
+        ("geff_loader", {"root_or_geff": "movie", "sparse_gt": True}),
+    ]
+
+
 def test_normalize_source_specs_reports_all_bad_sources(tmp_path):
     missing_auto = tmp_path / "missing_auto"
 
@@ -940,6 +998,7 @@ def test_build_model_validates_dataset_feature_dim(monkeypatch):
 
     assert model["feat_dim"] == 6
     assert model["d_model"] == 32
+    assert model["feature_embed_mode"] == "mlp"
     with pytest.raises(ValueError, match="does not match"):
         build_model(ModelConfig(feat_dim=5), dataset)
 
@@ -1124,6 +1183,32 @@ def test_build_trainer_facade_fits_domain_datasets(monkeypatch, tmp_path):
     )
 
 
+def test_trainer_fit_returns_without_lightning_when_epochs_zero(monkeypatch):
+    created_modules = []
+    created_trainers = []
+
+    class FakeBundle:
+        def dataloader(self, **kwargs):
+            raise AssertionError("dataloader should not be built for epochs=0")
+
+    monkeypatch.setattr(
+        training_api,
+        "_tracking_lightning_module_class",
+        lambda: created_modules.append,
+    )
+    monkeypatch.setattr(training_api, "_lightning_trainer_class", lambda: created_trainers.append)
+
+    facade = build_trainer(TrainConfig(epochs=0, logger="none"))
+
+    run = facade.fit("model", FakeBundle(), FakeBundle())
+
+    assert run.trainer is None
+    assert run.lightning_module is None
+    assert run.result is None
+    assert created_modules == []
+    assert created_trainers == []
+
+
 def test_lightning_runtime_builds_callbacks(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_api, "git_commit", lambda: "abc123")
 
@@ -1248,6 +1333,8 @@ augment: 4
 tracking_frequency: 2
 model: saved-model
 normalize_diameter: 14
+cache: true
+cachedir: sequence-cache
 """,
     )
     monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
@@ -1266,6 +1353,8 @@ normalize_diameter: 14
     assert val_data_config.dataset_kwargs["detect_drop"] == 0.0
     assert val_data_config.dataset_kwargs["position_noise"] == 0.0
     assert train_config.batch_size == 3
+    assert train_config.resume is False
+    assert train_config.cache_dir == Path("sequence-cache")
     assert train_config.tracking_kwargs["tracking_frequency"] == 2
     assert train_config.tracking_kwargs["tracking_input_paths"] == []
     assert train_config.tracking_kwargs["inference_config"] == {

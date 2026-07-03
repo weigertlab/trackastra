@@ -581,8 +581,10 @@ class TrackingLightningModule(LightningModule):
         ax.set_xlabel("missed links (FN / GT links)")
         ax.set_ylabel("wrong proposed links (FP / predicted links)")
         ax.set_title(f"Association errors, epoch {self.current_epoch}")
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
         ax.grid(alpha=0.2, linewidth=0.5)
         handles, legend_labels = ax.get_legend_handles_labels()
         if handles:

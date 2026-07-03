@@ -10,8 +10,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+import joblib
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
+from trackastra import model as model_api
 from trackastra.data.dataset import TrackingDataset, collate_sequence_padding
 from trackastra.data.distributed import (
     BalancedBatchSampler,
@@ -43,64 +45,6 @@ SEQUENCE_LOADERS: dict[SourceFormat, SequenceLoader] = {
 
 
 @dataclass(frozen=True)
-class ModelConfig:
-    """Configuration for constructing a TrackingTransformer."""
-
-    coord_dim: int = 2
-    feat_dim: int = 6
-    d_model: int = 256
-    pos_embed_per_dim: int = 32
-    feat_embed_per_dim: int = 8
-    feature_embed_mode: Literal["fourier", "mlp"] | None = None
-    num_encoder_layers: int = 6
-    num_decoder_layers: int = 6
-    dropout: float = 0.0
-    window: int = 4
-    max_distance: float | None = 256
-    attn_positional_bias: Literal["rope", "none"] = "rope"
-    attn_positional_bias_n_spatial: int = 16
-    attn_dist_mode: str = "v1"
-    attn_mode: Literal["dense", "sparse"] = "dense"
-    max_neighbors: tuple[int, ...] = (16,)
-    sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "per_frame"
-    logit_norm: bool = True
-    head_mode: Literal["bilinear", "sparse_bilinear", "edge_star", "edge_mlp"] | None = None
-    causal_norm: Literal["none", "linear", "softmax", "quiet_softmax"] = "quiet_softmax"
-    architecture_version: Literal[1, 2] = 2
-    disable_abs_pos: bool = False
-    disable_input_norm: bool = False
-    model_path: Path | None = None
-
-    def transformer_kwargs(self) -> dict[str, Any]:
-        """Return kwargs accepted by TrackingTransformer."""
-        return {
-            "coord_dim": self.coord_dim,
-            "feat_dim": self.feat_dim,
-            "d_model": self.d_model,
-            "pos_embed_per_dim": self.pos_embed_per_dim,
-            "feat_embed_per_dim": self.feat_embed_per_dim,
-            "feature_embed_mode": self.feature_embed_mode,
-            "num_encoder_layers": self.num_encoder_layers,
-            "num_decoder_layers": self.num_decoder_layers,
-            "dropout": self.dropout,
-            "window": self.window,
-            "max_distance": self.max_distance,
-            "attn_positional_bias": self.attn_positional_bias,
-            "attn_positional_bias_n_spatial": self.attn_positional_bias_n_spatial,
-            "attn_dist_mode": self.attn_dist_mode,
-            "attn_mode": self.attn_mode,
-            "max_neighbors": self.max_neighbors,
-            "sparse_knn_mode": self.sparse_knn_mode,
-            "logit_norm": self.logit_norm,
-            "head_mode": self.head_mode,
-            "causal_norm": self.causal_norm,
-            "architecture_version": self.architecture_version,
-            "disable_abs_pos": self.disable_abs_pos,
-            "disable_input_norm": self.disable_input_norm,
-        }
-
-
-@dataclass(frozen=True)
 class DataSplitConfig:
     """Resolved, inspectable training data configuration for one split."""
 
@@ -125,9 +69,10 @@ class TrainConfig:
     logger: Literal["tensorboard", "wandb", "none"] = "tensorboard"
     outdir: Path = Path("runs")
     name: str | None = None
-    resume: bool = True
+    resume: bool = False
     dry: bool = False
     mixed_precision: bool = True
+    cache_dir: Path | None = None
     loss_kwargs: dict[str, Any] = field(default_factory=dict)
     tracking_kwargs: dict[str, Any] = field(default_factory=dict)
     runtime_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -394,6 +339,8 @@ def _source_label(source: Mapping[str, Any]) -> str:
 def load_sequence(
     spec: Mapping[str, Any],
     loaders: Mapping[str, SequenceLoader] | None = None,
+    *,
+    cache_dir: Path | str | None = None,
 ) -> TrackingSequence:
     """Load one sequence from a normalized source spec."""
     fmt = spec.get("format")
@@ -405,19 +352,47 @@ def load_sequence(
     registry = {**SEQUENCE_LOADERS, **(loaders or {})}
     if fmt not in registry:
         raise ValueError(f"Unknown sequence format {fmt!r}")
-    return registry[fmt](**dict(kwargs))
+    loader = _cached_sequence_loader(fmt, registry[fmt], cache_dir=cache_dir)
+    load_kwargs = dict(kwargs)
+    if cache_dir is not None:
+        hit = loader.check_call_in_cache(**load_kwargs)
+        logger.info(
+            "%s (%s): %s",
+            _source_label(spec),
+            fmt,
+            "loaded from cache" if hit else "cache miss, computing",
+        )
+    else:
+        logger.info("%s (%s): loading from disk", _source_label(spec), fmt)
+    return loader(**load_kwargs)
+
+
+def _cached_sequence_loader(
+    fmt: str,
+    loader: SequenceLoader,
+    *,
+    cache_dir: Path | str | None,
+):
+    if cache_dir is None:
+        return loader
+    memory = joblib.Memory(cache_dir, verbose=0)
+    if fmt == "ctc":
+        return memory.cache(loader, ignore=["n_workers"])
+    return memory.cache(loader)
 
 
 def load_sequences(
     specs: Sequence[Mapping[str, Any]],
     loaders: Mapping[str, SequenceLoader] | None = None,
+    *,
+    cache_dir: Path | str | None = None,
 ) -> tuple[TrackingSequence, ...]:
     """Load many sequences and report all failing sources together."""
     sequences = []
     errors = []
     for spec in specs:
         try:
-            sequences.append(load_sequence(spec, loaders=loaders))
+            sequences.append(load_sequence(spec, loaders=loaders, cache_dir=cache_dir))
         except Exception as exc:
             errors.append(f"{_source_label(spec)}\n  - {exc}")
     if errors:
@@ -460,7 +435,7 @@ def _dataset_feature_dim(dataset: Any) -> int | None:
 
 
 def build_model(
-    model_config: ModelConfig,
+    model_config: model_api.ModelConfig,
     train_dataset: Any | None = None,
 ) -> TrackingTransformer:
     """Construct a TrackingTransformer from a model config."""
@@ -622,6 +597,13 @@ class TrackastraTrainer:
         ckpt_path: Path | str | None = None,
     ) -> TrainingRun:
         """Fit a model using domain-level dataset bundles."""
+        if self.config.epochs == 0:
+            return TrainingRun(
+                trainer=None,
+                lightning_module=None,
+                result=None,
+            )
+
         runtime = self._runtime()
         lightning_module = build_or_resume_lightning_module(
             _tracking_lightning_module_class(),
@@ -688,13 +670,13 @@ def tracking_lightning_module_class():
 
 def _training_config_from_args(
     args: Any,
-) -> tuple[ModelConfig, DataSplitConfig, DataSplitConfig, TrainConfig]:
+) -> tuple[model_api.ModelConfig, DataSplitConfig, DataSplitConfig, TrainConfig]:
     """Convert parsed training CLI args into public config objects."""
     feature_embed_mode = _resolve_feature_embed_mode(
         args.features,
         getattr(args, "feature_embed_mode", None),
     )
-    model_config = ModelConfig(
+    model_config = model_api.ModelConfig(
         coord_dim=args.ndim,
         feat_dim=_feature_dim(args.ndim, args.features),
         d_model=args.d_model,
@@ -809,6 +791,7 @@ def _training_config_from_args(
         resume=args.resume,
         dry=args.dry,
         mixed_precision=args.mixedp,
+        cache_dir=Path(args.cachedir) if args.cache else None,
         loss_kwargs={
             "delta_cutoff": delta_cutoff,
             "causal_norm": args.causal_norm,
