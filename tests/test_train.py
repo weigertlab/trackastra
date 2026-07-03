@@ -2,26 +2,15 @@ import os
 import urllib.request
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
-from scripts.train import (
-    WrappedLightningModule,
-    _apply_focal_weight,
-    _check_detection_folders,
-    _child_ce_loss_matrix,
-    _feature_dim,
-    _quiet_softmax_child_log_null,
-    _reduce_decision_loss,
-    _reduce_matrix_loss,
-    _resolve_feature_embed_mode,
-    _skip_missing_input_folders,
-    _summarize_tracking_metrics,
-    _tracking_input_paths_from_specs,
-    parse_train_args,
-)
+import trackastra.training as training_api
+import trackastra.training.runtime as runtime_api
+import yaml
 from torch.utils.data import ConcatDataset, Dataset
 from trackastra.data import distributed
 from trackastra.data.dataset import (
@@ -37,6 +26,57 @@ from trackastra.data.distributed import (
 )
 from trackastra.data.io import DetectionSet, TrackingSequence
 from trackastra.model import TrackingTransformer
+from trackastra.training import (
+    DataSplitConfig,
+    LightningTrainerRuntime,
+    ModelConfig,
+    SequenceLoadingError,
+    SourceSpecError,
+    TrackastraTrainer,
+    TrackingDatasetBundle,
+    TrainConfig,
+    _feature_dim,
+    _resolve_feature_embed_mode,
+    build_dataset,
+    build_lightning_runtime,
+    build_model,
+    build_or_resume_lightning_module,
+    build_trainer,
+    configure_lightning_module_runtime_paths,
+    create_train_parser,
+    load_model_from_path,
+    load_sequences,
+    normalize_source_specs,
+    parse_train_args,
+    parse_training_config,
+    resolve_model_checkpoint_reference,
+    resume_checkpoint_path,
+    tracking_input_paths_from_sources,
+)
+from trackastra.training.callbacks import TrackastraModelCheckpoint
+from trackastra.training.lightning import TrackingLightningModule
+from trackastra.training.losses import (
+    apply_focal_weight as _apply_focal_weight,
+)
+from trackastra.training.losses import (
+    child_ce_loss_matrix as _child_ce_loss_matrix,
+)
+from trackastra.training.losses import (
+    edge_error_counts,
+    error_rate_f1,
+)
+from trackastra.training.losses import (
+    quiet_softmax_child_log_null as _quiet_softmax_child_log_null,
+)
+from trackastra.training.losses import (
+    reduce_decision_loss as _reduce_decision_loss,
+)
+from trackastra.training.losses import (
+    reduce_matrix_loss as _reduce_matrix_loss,
+)
+from trackastra.training.tracking_validation import (
+    summarize_tracking_metrics as _summarize_tracking_metrics,
+)
 
 # Mark all tests in this module as requiring training dependencies
 pytestmark = pytest.mark.train
@@ -47,6 +87,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 def test_wrfeat2_feature_dim_supports_2d_and_3d():
     assert _feature_dim(2, "none") == 0
     assert _feature_dim(2, "intensity") == 1
+    assert _feature_dim(3, "wrfeat") == 12
     assert _feature_dim(2, "wrfeat2") == 6
     assert _feature_dim(2, "wrfeat2_no_intensity") == 5
     assert _feature_dim(3, "wrfeat2") == 9
@@ -101,7 +142,7 @@ def test_tracking_data_cpu_training_smoke(features, width):
         dropout=0,
     )
 
-    loss = WrappedLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
     loss.backward()
 
     assert torch.isfinite(loss)
@@ -148,7 +189,7 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
         dropout=0,
     )
 
-    loss = WrappedLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
     loss.backward()
 
     assert torch.isfinite(loss)
@@ -196,6 +237,23 @@ def test_parse_tracking_dataset_defaults(monkeypatch, tmp_path):
 
     assert args.window == 4
     assert args.features == "wrfeat2"
+
+
+def test_parse_training_config_accepts_extended_parser(monkeypatch, tmp_path):
+    config = tmp_path / "empty.yaml"
+    config.write_text("{}\n")
+    parser = create_train_parser()
+    parser.add_argument("--runtime_tag", default="unset")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train.py", "-c", str(config), "--runtime_tag", "experiment-a"],
+    )
+
+    _model_config, _train_data_config, _val_data_config, train_config = (
+        parse_training_config(parser)
+    )
+
+    assert train_config.runtime_kwargs["training_args"]["runtime_tag"] == "experiment-a"
 
 
 def test_parse_grouped_input_config_preserves_mappings(monkeypatch, tmp_path):
@@ -322,17 +380,15 @@ def test_summarize_tracking_metrics_includes_linking_and_detection():
 
 def test_error_rate_f1():
     # recall = 1 - fn = 0.5, precision = 1 - fp = 0.8 -> F1 = 2*0.4/1.3
-    assert WrappedLightningModule._error_rate_f1(0.5, 0.2) == pytest.approx(
+    assert error_rate_f1(0.5, 0.2) == pytest.approx(
         2 * 0.8 * 0.5 / (0.8 + 0.5)
     )
     # perfect: no FN, no FP -> F1 = 1
-    assert WrappedLightningModule._error_rate_f1(0.0, 0.0) == pytest.approx(1.0)
+    assert error_rate_f1(0.0, 0.0) == pytest.approx(1.0)
     # total failure: all missed and all spurious -> precision=recall=0 -> F1 = 0
-    assert WrappedLightningModule._error_rate_f1(1.0, 1.0) == 0.0
+    assert error_rate_f1(1.0, 1.0) == 0.0
     # undefined component (NaN rate) -> NaN
-    assert WrappedLightningModule._error_rate_f1(float("nan"), 0.2) != WrappedLightningModule._error_rate_f1(
-        float("nan"), 0.2
-    )
+    assert error_rate_f1(float("nan"), 0.2) != error_rate_f1(float("nan"), 0.2)
 
 
 def test_edge_error_counts_for_division_links():
@@ -354,9 +410,7 @@ def test_edge_error_counts_for_division_links():
     b2 = blockwise_sum_batched(A, tp, dim=-2, reduce="sum")
     block_sum = A * (b1 + b2)
 
-    counts = WrappedLightningModule._edge_error_counts(
-        A, prob, tp, mask, block_sum > 2
-    )
+    counts = edge_error_counts(A, prob, tp, mask, block_sum > 2)
     counts = {k: float(v) for k, v in counts.items()}
 
     assert counts == {
@@ -370,7 +424,7 @@ def test_edge_error_counts_for_division_links():
         "fp_div_den": 2.0,  # two predicted division edges (0->2, 0->5)
     }
 
-    threshold_counts = WrappedLightningModule._edge_error_counts(
+    threshold_counts = edge_error_counts(
         A, prob, tp, mask, block_sum > 2, thresholds=(0.2, 0.5, 0.8)
     )
     threshold_counts = {k: float(v) for k, v in threshold_counts.items()}
@@ -485,14 +539,33 @@ def test_child_ce_requires_quiet_softmax_and_decision_norm():
     model = torch.nn.Identity()
 
     with pytest.raises(ValueError, match="causal_norm='quiet_softmax'"):
-        WrappedLightningModule(model, assoc_loss="child_ce", causal_norm="none")
+        TrackingLightningModule(model, assoc_loss="child_ce", causal_norm="none")
     with pytest.raises(ValueError, match="loss_norm='decision'"):
-        WrappedLightningModule(
+        TrackingLightningModule(
             model,
             assoc_loss="child_ce",
             causal_norm="quiet_softmax",
             loss_norm="matrix",
         )
+
+
+def test_tracking_lightning_module_saves_hyperparameters():
+    model = torch.nn.Identity()
+    module = TrackingLightningModule(
+        model,
+        warmup_epochs=2,
+        max_epochs=5,
+        learning_rate=0.002,
+        causal_norm="none",
+        loss_norm="matrix",
+        div_upweight=3.0,
+    )
+
+    assert module.hparams["warmup_epochs"] == 2
+    assert module.hparams["max_epochs"] == 5
+    assert module.hparams["learning_rate"] == 0.002
+    assert module.hparams["div_upweight"] == 3.0
+    assert "model" not in module.hparams
 
 
 def test_focal_weight_preserves_gamma_zero_and_focuses_hard_examples():
@@ -516,7 +589,7 @@ def test_quiet_softmax_loss_keeps_bf16_gradients_finite():
             return self.logits.unsqueeze(0) + 0, None
 
     model = FixedBF16Model()
-    module = WrappedLightningModule(
+    module = TrackingLightningModule(
         model,
         causal_norm="quiet_softmax",
         loss_norm="decision",
@@ -551,7 +624,7 @@ def test_common_step_masks_pairs_with_available_gt_link_sets():
         def forward(self, coords, features, padding_mask=None):
             return self.logits.unsqueeze(0) + 0, None
 
-    module = WrappedLightningModule(FixedModel(), causal_norm="none")
+    module = TrackingLightningModule(FixedModel(), causal_norm="none")
     batch = {
         "features": torch.zeros((1, 4, 1)),
         "coords": torch.zeros((1, 4, 2)),
@@ -621,7 +694,7 @@ def test_balanced_distributed_sampler_supports_all_samples():
 def test_sequence_input_specs_expand_supported_forms():
     specs = normalize_sequence_input_specs(
         [
-            "legacy/01",
+            "ctc_single/01",
             {
                 "format": "ctc",
                 "spacing": [2, 1],
@@ -639,7 +712,7 @@ def test_sequence_input_specs_expand_supported_forms():
         ndim=2,
     )
 
-    assert specs[0] == SequenceInputSpec(path=Path("legacy/01"), format="ctc")
+    assert specs[0] == SequenceInputSpec(path=Path("ctc_single/01"), format="ctc")
     assert specs[1].path == Path("ctc/01")
     assert specs[1].format == "ctc"
     assert specs[1].spacing == (2.0, 1.0)
@@ -669,6 +742,540 @@ def test_sequence_input_specs_validate_ambiguous_or_incomplete_items():
             [{"path": "ctc/01", "format": "ctc", "spacing": "auto"}],
             ndim=2,
         )
+
+
+def test_normalize_source_specs_returns_direct_loader_kwargs(tmp_path):
+    ctc_root = tmp_path / "ctc"
+    (ctc_root / "img").mkdir(parents=True)
+    (ctc_root / "TRA").mkdir()
+    geff_path = tmp_path / "track.geff"
+    geff_path.mkdir()
+
+    sources = normalize_source_specs(
+        [
+            {"path": ctc_root, "format": "auto", "detection_folders": ["TRA"]},
+            {
+                "path": geff_path,
+                "format": "auto",
+                "sparse_gt": True,
+                "spacing": "auto",
+                "match_max_distance": 16,
+            },
+        ],
+        ndim=2,
+        sequence_kwargs={
+            "ndim": 2,
+            "detection_folders": ["SEG"],
+            "downscale_temporal": 1,
+            "downscale_spatial": 1,
+        },
+        split_sequence_kwargs={"slice_pct": (0.0, 0.5)},
+    )
+
+    assert sources[0] == {
+        "format": "ctc",
+        "kwargs": {
+            "root": ctc_root,
+            "ndim": 2,
+            "detection_folders": ["TRA"],
+            "downscale_temporal": 1,
+            "downscale_spatial": 1,
+            "slice_pct": (0.0, 0.5),
+        },
+    }
+    assert sources[1] == {
+        "format": "geff",
+        "kwargs": {
+            "root_or_geff": geff_path,
+            "sparse_gt": True,
+            "match_max_distance": 16,
+            "spacing": "auto",
+        },
+    }
+
+
+def test_load_sequences_reports_all_bad_sources():
+    def fail_a(root):
+        raise ValueError(f"bad {root}")
+
+    def fail_b(root_or_geff, sparse_gt):
+        raise FileNotFoundError(f"missing {root_or_geff}, sparse_gt={sparse_gt}")
+
+    with pytest.raises(SequenceLoadingError) as excinfo:
+        load_sequences(
+            [
+                {"format": "ctc", "kwargs": {"root": "a"}},
+                {"format": "geff", "kwargs": {"root_or_geff": "b", "sparse_gt": True}},
+            ],
+            loaders={"ctc": fail_a, "geff": fail_b},
+        )
+
+    message = str(excinfo.value)
+    assert "2 source" in message
+    assert "a\n  - bad a" in message
+    assert "b\n  - missing b, sparse_gt=True" in message
+
+
+def test_load_sequences_accepts_custom_loader_registry():
+    loaded = load_sequences(
+        [{"format": "custom", "kwargs": {"root": "movie", "channel": 1}}],
+        loaders={"custom": lambda root, channel: (root, channel)},
+    )
+
+    assert loaded == (("movie", 1),)
+
+
+def test_normalize_source_specs_reports_all_bad_sources(tmp_path):
+    missing_auto = tmp_path / "missing_auto"
+
+    with pytest.raises(SourceSpecError) as excinfo:
+        normalize_source_specs(
+            [
+                {"path": tmp_path / "movie", "format": "geff"},
+                {"path": tmp_path / "ctc", "format": "ctc", "spacing": "auto"},
+                {"path": missing_auto, "format": "auto"},
+            ],
+            ndim=2,
+            sequence_kwargs={"ndim": 2, "detection_folders": ["TRA"]},
+        )
+
+    message = str(excinfo.value)
+    assert "3 source" in message
+    assert "GEFF input specs must set sparse_gt" in message
+    assert 'spacing="auto" is only valid for GEFF inputs' in message
+    assert f"Could not auto-detect sequence format for {missing_auto}" in message
+
+
+def test_build_dataset_uses_split_dataset_kwargs(monkeypatch):
+    calls = []
+
+    class RecordingDataset(_SamplerDataset):
+        def __init__(self, sequence, dataset_index=0, **kwargs):
+            super().__init__()
+            self.root = sequence
+            calls.append((sequence, dataset_index, kwargs))
+
+    monkeypatch.setattr(training_api, "TrackingDataset", RecordingDataset)
+
+    bundle = build_dataset(
+        ["train_a", "train_b"],
+        DataSplitConfig(
+            split="train",
+            sources=(),
+            dataset_kwargs={
+                "features": "wrfeat2",
+                "augment": 3,
+                "detect_drop": 0.25,
+                "position_noise": 12.0,
+            },
+        ),
+    )
+
+    assert isinstance(bundle, TrackingDatasetBundle)
+    assert isinstance(bundle.dataset, ConcatDataset)
+    assert len(bundle) == 14
+    assert calls == [
+        (
+            "train_a",
+            0,
+            {
+                "features": "wrfeat2",
+                "augment": 3,
+                "detect_drop": 0.25,
+                "position_noise": 12.0,
+            },
+        ),
+        (
+            "train_b",
+            1,
+            {
+                "features": "wrfeat2",
+                "augment": 3,
+                "detect_drop": 0.25,
+                "position_noise": 12.0,
+            },
+        ),
+    ]
+
+
+def test_dataset_bundle_builds_balanced_train_loader(monkeypatch):
+    class RecordingDataset(_SamplerDataset):
+        def __init__(self, sequence, dataset_index=0, **kwargs):
+            super().__init__(n=sequence)
+            self.root = sequence
+
+    monkeypatch.setattr(training_api, "TrackingDataset", RecordingDataset)
+
+    bundle = build_dataset(
+        [5, 6],
+        DataSplitConfig(
+            split="train",
+            sources=(),
+            dataset_kwargs={"features": "wrfeat2"},
+            sampler_kwargs={"batch_size": 3, "n_pool": 2, "num_samples": 8},
+            loader_kwargs={"batch_size": 3, "num_workers": 0},
+        ),
+    )
+
+    loader = bundle.dataloader()
+
+    assert isinstance(loader.batch_sampler, BalancedBatchSampler)
+    assert loader.batch_sampler.batch_size == 3
+
+
+def test_build_model_validates_dataset_feature_dim(monkeypatch):
+    class FeatureDataset(_SamplerDataset):
+        def __init__(self, feat_dim):
+            super().__init__()
+            self.feat_dim = feat_dim
+
+    monkeypatch.setattr(
+        training_api,
+        "TrackingTransformer",
+        lambda **kwargs: kwargs,
+    )
+    dataset = ConcatDataset([FeatureDataset(6), FeatureDataset(6)])
+
+    model = build_model(ModelConfig(feat_dim=6, d_model=32), dataset)
+
+    assert model["feat_dim"] == 6
+    assert model["d_model"] == 32
+    with pytest.raises(ValueError, match="does not match"):
+        build_model(ModelConfig(feat_dim=5), dataset)
+
+
+def test_resolve_model_checkpoint_reference_handles_absolute_checkpoint(tmp_path):
+    run = tmp_path / "runs" / "exp"
+    checkpoint = run / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    (run / "config.yaml").write_text("{}\n")
+    checkpoint.write_bytes(b"checkpoint")
+
+    folder, checkpoint_path = resolve_model_checkpoint_reference(checkpoint)
+
+    assert folder == run
+    assert checkpoint_path == Path("checkpoints") / "last.ckpt"
+    assert resolve_model_checkpoint_reference(run) == (run, None)
+
+
+def test_load_model_from_path_delegates_folder_and_checkpoint(tmp_path):
+    calls = []
+    run = tmp_path / "runs" / "exp"
+    checkpoint = run / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    (run / "config.yaml").write_text("{}\n")
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeModel:
+        @classmethod
+        def from_folder(cls, folder, **kwargs):
+            calls.append((folder, kwargs))
+            return "loaded"
+
+    loaded = load_model_from_path(
+        checkpoint,
+        args="args",
+        map_location="cpu",
+        model_cls=FakeModel,
+    )
+
+    assert loaded == "loaded"
+    assert calls == [
+        (
+            run,
+            {
+                "args": "args",
+                "map_location": "cpu",
+                "checkpoint_path": Path("checkpoints") / "last.ckpt",
+            },
+        )
+    ]
+
+def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
+    saved_paths = []
+
+    class FakeTrainer:
+        is_global_zero = True
+        sanity_checking = False
+
+        def __init__(self, val_loss):
+            self.logged_metrics = {"val_loss": val_loss}
+
+    class FakeModel:
+        def save(self, path):
+            saved_paths.append(Path(path))
+
+    class FakeModule:
+        def __init__(self):
+            self.inference_config = {"features": "wrfeat2"}
+            self.model = FakeModel()
+
+    callback = TrackastraModelCheckpoint(
+        tmp_path,
+        training_args={"features": "wrfeat", "max_distance": 12},
+        monitor="val_loss",
+    )
+    module = FakeModule()
+
+    callback.on_fit_start(FakeTrainer(1.0), module)
+    callback.on_validation_end(FakeTrainer(1.0), module)
+    callback.on_validation_end(FakeTrainer(2.0), module)
+    callback.on_validation_end(FakeTrainer(0.5), module)
+
+    assert yaml.safe_load((tmp_path / "train_config.yaml").read_text()) == {
+        "features": "wrfeat",
+        "max_distance": 12,
+    }
+    assert yaml.safe_load((tmp_path / "inference_config.yaml").read_text()) == {
+        "features": "wrfeat2",
+    }
+    assert saved_paths == [tmp_path, tmp_path]
+
+
+def test_build_trainer_facade_fits_domain_datasets(monkeypatch, tmp_path):
+    created_modules = []
+    created_trainers = []
+
+    class FakeLightningModule:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created_modules.append(self)
+
+    class FakeTrainer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.fit_args = None
+            created_trainers.append(self)
+
+        def fit(self, *args, **kwargs):
+            self.fit_args = (args, kwargs)
+            return "fit-result"
+
+    class FakeBundle:
+        def __init__(self, name):
+            self.name = name
+            self.calls = []
+
+        def dataloader(self, **kwargs):
+            self.calls.append(kwargs)
+            return f"{self.name}-loader"
+
+    monkeypatch.setattr(
+        training_api,
+        "_tracking_lightning_module_class",
+        lambda: FakeLightningModule,
+    )
+    monkeypatch.setattr(training_api, "_lightning_trainer_class", lambda: FakeTrainer)
+
+    facade = build_trainer(
+        TrainConfig(
+            epochs=3,
+            warmup_epochs=1,
+            learning_rate=0.01,
+            distributed=True,
+            logger="none",
+            outdir=tmp_path,
+            mixed_precision=False,
+            loss_kwargs={"delta_cutoff": 1, "causal_norm": "none"},
+            tracking_kwargs={"tracking_frequency": 0},
+            runtime_kwargs={
+                "lightning_runtime": LightningTrainerRuntime(
+                    logdir=tmp_path,
+                    logger=False,
+                    callbacks=["callback"],
+                    profiler="profiler",
+                    run_name="run",
+                ),
+                "trainer_kwargs": {"gradient_clip_val": 0.5},
+            },
+        )
+    )
+    train_bundle = FakeBundle("train")
+    val_bundle = FakeBundle("val")
+
+    run = facade.fit("model", train_bundle, val_bundle, ckpt_path="last.ckpt")
+
+    assert isinstance(facade, TrackastraTrainer)
+    assert run.result == "fit-result"
+    assert created_modules[0].kwargs == {
+        "model": "model",
+        "warmup_epochs": 1,
+        "max_epochs": 3,
+        "learning_rate": 0.01,
+        "delta_cutoff": 1,
+        "causal_norm": "none",
+        "tracking_frequency": 0,
+    }
+    assert created_trainers[0].kwargs["max_epochs"] == 3
+    assert created_trainers[0].kwargs["logger"] is False
+    assert created_trainers[0].kwargs["gradient_clip_val"] == 0.5
+    assert created_trainers[0].kwargs["callbacks"] == ["callback"]
+    assert created_trainers[0].kwargs["profiler"] == "profiler"
+    assert created_trainers[0].kwargs["default_root_dir"] == tmp_path
+    assert train_bundle.calls == [{"distributed": True}]
+    assert val_bundle.calls == [{}]
+    assert created_trainers[0].fit_args == (
+        (created_modules[0],),
+        {
+            "train_dataloaders": "train-loader",
+            "val_dataloaders": "val-loader",
+            "ckpt_path": "last.ckpt",
+        },
+    )
+
+
+def test_lightning_runtime_builds_callbacks(monkeypatch, tmp_path):
+    monkeypatch.setattr(runtime_api, "git_commit", lambda: "abc123")
+
+    runtime = build_lightning_runtime(
+        dry=False,
+        timestamp=False,
+        name="run",
+        outdir=tmp_path,
+        resume=True,
+        logger_name="none",
+        wandb_project="proj",
+        profile=False,
+        training_args={"features": "wrfeat"},
+    )
+
+    assert isinstance(runtime, LightningTrainerRuntime)
+    assert runtime.logdir == tmp_path / "run"
+    assert runtime.logger is False
+    assert runtime.profiler is None
+    assert runtime.run_name == "run"
+    assert {type(callback).__name__ for callback in runtime.callbacks} >= {
+        "ModelCheckpoint",
+        "TrackastraModelCheckpoint",
+        "Timer",
+        "PreciseProgressBar",
+    }
+
+
+def test_configure_lightning_module_runtime_paths(tmp_path):
+    module = SimpleNamespace()
+
+    configure_lightning_module_runtime_paths(
+        module,
+        logdir=tmp_path,
+        debug=True,
+    )
+
+    assert module.loss_spike_debug_dir == tmp_path / "debug" / "debug_loss_spikes"
+    assert module.batch_provenance_path == tmp_path / "debug"
+    assert module.viz_debug_dir == tmp_path / "debug" / "viz"
+    assert module.tracking_metrics_path == tmp_path / "metrics"
+
+    configure_lightning_module_runtime_paths(
+        module,
+        logdir=None,
+        debug=False,
+    )
+
+    assert module.loss_spike_debug_dir is None
+    assert module.batch_provenance_path is None
+    assert module.viz_debug_dir is None
+    assert module.tracking_metrics_path is None
+
+
+def test_build_or_resume_lightning_module_uses_last_checkpoint(tmp_path):
+    calls = []
+    run = tmp_path / "run"
+    checkpoint = run / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeModule:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        @classmethod
+        def load_from_checkpoint(cls, path, **kwargs):
+            calls.append(("load", path, kwargs))
+            module = cls(**kwargs)
+            module.loaded_path = path
+            return module
+
+    module = build_or_resume_lightning_module(
+        FakeModule,
+        {"model": "m", "learning_rate": 0.1},
+        logdir=run,
+        resume=True,
+    )
+
+    assert module.loaded_path == checkpoint
+    assert calls == [
+        ("init", {"model": "m", "learning_rate": 0.1}),
+        ("load", checkpoint, {"model": "m", "learning_rate": 0.1}),
+        ("init", {"model": "m", "learning_rate": 0.1}),
+    ]
+
+
+def test_resume_checkpoint_path_returns_standard_last_checkpoint(tmp_path):
+    run = tmp_path / "run"
+    checkpoint = run / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    assert resume_checkpoint_path(logdir=run, resume=True) == checkpoint
+    assert resume_checkpoint_path(logdir=run, resume=False) is None
+    assert resume_checkpoint_path(logdir=None, resume=True) is None
+    assert resume_checkpoint_path(logdir=tmp_path / "missing", resume=True) is None
+
+
+def test_parse_training_config_splits_public_configs(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+ndim: 3
+input_train:
+- format: geff
+  sparse_gt: true
+  spacing: [4, 1, 1]
+  match_max_distance: 5
+  paths:
+  - train_a
+input_val:
+- format: geff
+  sparse_gt: true
+  spacing: [4, 1, 1]
+  match_max_distance: 5
+  path: val_a
+features: wrfeat2_no_intensity
+batch_size: 3
+detect_drop: 0.25
+augment: 4
+tracking_frequency: 2
+model: saved-model
+normalize_diameter: 14
+""",
+    )
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    model_config, train_data_config, val_data_config, train_config = parse_training_config()
+
+    assert model_config.coord_dim == 3
+    assert model_config.feat_dim == 8
+    assert model_config.feature_embed_mode == "mlp"
+    assert model_config.model_path == Path("saved-model")
+    assert train_data_config.sources[0]["kwargs"]["root_or_geff"] == Path("train_a")
+    assert train_data_config.sources[0]["kwargs"]["spacing"] == (4.0, 1.0, 1.0)
+    assert train_data_config.dataset_kwargs["detect_drop"] == 0.25
+    assert train_data_config.dataset_kwargs["augment"] == 4
+    assert val_data_config.sources[0]["kwargs"]["root_or_geff"] == Path("val_a")
+    assert val_data_config.dataset_kwargs["detect_drop"] == 0.0
+    assert val_data_config.dataset_kwargs["position_noise"] == 0.0
+    assert train_config.batch_size == 3
+    assert train_config.tracking_kwargs["tracking_frequency"] == 2
+    assert train_config.tracking_kwargs["tracking_input_paths"] == []
+    assert train_config.tracking_kwargs["inference_config"] == {
+        "features": "wrfeat2_no_intensity",
+        "normalize_diameter": 14,
+        "pretrained_feats_model": None,
+        "pretrained_feats_mode": None,
+        "pretrained_feats_additional_props": None,
+    }
+    assert train_config.runtime_kwargs["training_args"]["feature_embed_mode"] == "mlp"
 
 
 def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
@@ -938,59 +1545,17 @@ def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path)
     ]
 
 
-def test_skip_missing_input_folders_filters_group_paths(tmp_path):
-    existing = tmp_path / "existing"
-    missing = tmp_path / "missing"
-    existing.mkdir()
+def test_tracking_input_paths_filter_geff_sources(tmp_path):
+    ctc_root = tmp_path / "ctc"
+    geff_root = tmp_path / "movie"
 
-    filtered = _skip_missing_input_folders(
-        "training",
+    assert tracking_input_paths_from_sources(
         [
-            {
-                "format": "ctc",
-                "paths": [existing, missing],
-            }
+            {"format": "ctc", "kwargs": {"root": ctc_root}},
+            {"format": "geff", "kwargs": {"root_or_geff": geff_root}},
         ],
-    )
-
-    assert filtered == [{"format": "ctc", "paths": [existing]}]
-
-
-def test_detection_folder_precheck_skips_auto_geff_directory(tmp_path):
-    geff_root = tmp_path / "movie"
-    (geff_root / "track.geff").mkdir(parents=True)
-    ctc_root = tmp_path / "ctc"
-    ctc_root.mkdir()
-    specs = normalize_sequence_input_specs(
-        [
-            {"path": geff_root, "sparse_gt": True, "match_max_distance": 16},
-            {"path": ctc_root, "format": "ctc"},
-        ]
-    )
-
-    with pytest.raises(FileNotFoundError, match="1 training input"):
-        _check_detection_folders("training", specs, ["TRA"])
-
-
-def test_tracking_input_paths_filter_geff_specs(tmp_path):
-    ctc_root = tmp_path / "ctc"
-    ctc_root.mkdir()
-    geff_root = tmp_path / "movie"
-    (geff_root / "track.geff").mkdir(parents=True)
-    specs = normalize_sequence_input_specs(
-        [
-            {"path": ctc_root, "format": "ctc"},
-            {"path": geff_root, "sparse_gt": True, "match_max_distance": 16},
-            {
-                "path": geff_root / "track.geff",
-                "format": "geff",
-                "sparse_gt": True,
-                "match_max_distance": 16,
-            },
-        ]
-    )
-
-    assert _tracking_input_paths_from_specs(specs, tracking_frequency=1) == [ctc_root]
+        tracking_frequency=1,
+    ) == [ctc_root]
 
 
 def download_gt_data(url: str, data_dir: str | Path):
