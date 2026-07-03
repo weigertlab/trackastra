@@ -2,11 +2,13 @@
 
 import logging
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer
-
+from typing import Any, Literal
+from tqdm import tqdm
 import joblib
 import numpy as np
 import torch
@@ -25,10 +27,147 @@ from .dataset import (
     association_distances,
     warn_association_distances,
 )
-from .io import TrackingSequence
+from .io import (
+    TrackingSequence,
+    _resolve_detection_folder,
+    _resolve_paths,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+@dataclass(frozen=True)
+class SequenceInputSpec:
+    path: Path
+    format: Literal["auto", "ctc", "geff"] = "auto"
+    spacing: tuple[float, ...] | Literal["auto"] | None = None
+    sparse_gt: bool = False
+    loader_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+_SPEC_CORE_KEYS = {"path", "paths", "format", "spacing", "sparse_gt"}
+_SequenceFormat = Literal["ctc", "geff"]
+
+
+def _normalize_spacing(
+    spacing: object,
+    ndim: int | None,
+    fmt: Literal["auto", "ctc", "geff"],
+) -> tuple[float, ...] | Literal["auto"] | None:
+    if spacing is None:
+        return None
+    if spacing == "auto":
+        if fmt == "ctc":
+            raise ValueError('spacing="auto" is only valid for GEFF inputs')
+        return "auto"
+    if isinstance(spacing, str):
+        raise ValueError("spacing must be a numeric sequence, None, or 'auto'")
+    try:
+        values = tuple(float(v) for v in spacing)  # type: ignore[union-attr]
+    except TypeError as exc:
+        raise ValueError("spacing must be a numeric sequence, None, or 'auto'") from exc
+    if ndim is not None and len(values) != ndim:
+        raise ValueError(f"spacing must have length {ndim}, got {len(values)}")
+    if not values or not all(np.isfinite(values)) or any(v <= 0 for v in values):
+        raise ValueError("spacing values must be finite and positive")
+    return values
+
+
+def _sequence_input_spec_from_mapping(
+    item: Mapping[str, Any],
+    ndim: int | None,
+) -> SequenceInputSpec:
+    if "path" not in item:
+        raise ValueError("sequence input mapping must contain 'path'")
+    if "paths" in item:
+        raise ValueError("sequence input mapping cannot contain both 'path' and 'paths'")
+    fmt = item.get("format", "auto")
+    if fmt not in ("auto", "ctc", "geff"):
+        raise ValueError(f"format must be one of 'auto', 'ctc', or 'geff', got {fmt!r}")
+    fmt = fmt  # type: ignore[assignment]
+    if fmt == "geff" and "sparse_gt" not in item:
+        raise ValueError("GEFF input specs must set sparse_gt explicitly")
+    loader_kwargs = {
+        key: deepcopy(value)
+        for key, value in item.items()
+        if key not in _SPEC_CORE_KEYS
+    }
+    if (
+        fmt == "geff"
+        and "detections" in loader_kwargs
+        and "match_max_distance" not in loader_kwargs
+    ):
+        raise ValueError("GEFF inputs with external detections require match_max_distance")
+    return SequenceInputSpec(
+        path=Path(item["path"]),
+        format=fmt,
+        spacing=_normalize_spacing(item.get("spacing"), ndim, fmt),
+        sparse_gt=bool(item.get("sparse_gt", False)),
+        loader_kwargs=loader_kwargs,
+    )
+
+
+def normalize_sequence_input_specs(
+    inputs: Sequence[str | Path | Mapping[str, Any]],
+    ndim: int | None = None,
+) -> tuple[SequenceInputSpec, ...]:
+    specs = []
+    for item in inputs:
+        if isinstance(item, str | Path):
+            specs.append(SequenceInputSpec(path=Path(item), format="ctc"))
+            continue
+        if not isinstance(item, Mapping):
+            raise ValueError(f"Unsupported sequence input item {item!r}")
+        if ("path" in item) == ("paths" in item):
+            raise ValueError("sequence input mapping must contain exactly one of path/paths")
+        if "path" in item:
+            specs.append(_sequence_input_spec_from_mapping(item, ndim))
+            continue
+
+        group = {key: value for key, value in item.items() if key != "paths"}
+        paths = item["paths"]
+        if isinstance(paths, str | Path) or not isinstance(paths, Sequence):
+            raise ValueError("paths must be a sequence of paths or path mappings")
+        for path_item in paths:
+            if isinstance(path_item, str | Path):
+                merged = {**group, "path": path_item}
+            elif isinstance(path_item, Mapping):
+                if "path" not in path_item or "paths" in path_item:
+                    raise ValueError("path mappings inside paths must contain exactly path")
+                merged = {**group, **path_item}
+            else:
+                raise ValueError(f"Unsupported path item {path_item!r}")
+            specs.append(_sequence_input_spec_from_mapping(merged, ndim))
+    return tuple(specs)
+
+
+def _looks_like_geff(path: Path) -> tuple[bool, str | None]:
+    path = path.expanduser()
+    if path.suffix == ".geff":
+        return True, None
+    if not path.is_dir():
+        return False, f"{path} is not a GEFF store or directory"
+    stores = sorted(path.glob("*.geff"))
+    if len(stores) != 1:
+        return False, f"Expected exactly one .geff store in {path}, found {len(stores)}"
+    return True, None
+
+
+def _looks_like_ctc(path: Path, kwargs: Mapping[str, Any]) -> tuple[bool, str | None]:
+    try:
+        root, _, _, _ = _resolve_paths(
+            path,
+            kwargs.get("image_folder"),
+            kwargs.get("gt_folder"),
+            kwargs.get("track_file"),
+            bool(kwargs.get("use_gt", True)),
+        )
+        for folder in kwargs.get("detection_folders", ("TRA",)):
+            _resolve_detection_folder(root, folder)
+    except (FileNotFoundError, ValueError) as exc:
+        return False, str(exc)
+    return True, None
 
 
 class BalancedBatchSampler(BatchSampler):
@@ -297,8 +436,9 @@ class BalancedDataModule(LightningDataModule):
         association_delta_cutoff: int = 1,
     ):
         super().__init__()
-        self.input_train = input_train
-        self.input_val = input_val
+        ndim = sequence_kwargs.get("ndim")
+        self.input_train = normalize_sequence_input_specs(input_train, ndim=ndim)
+        self.input_val = normalize_sequence_input_specs(input_val, ndim=ndim)
         self.cachedir = cachedir
         self.distributed = distributed
         self.sequence_kwargs = sequence_kwargs
@@ -346,21 +486,81 @@ class BalancedDataModule(LightningDataModule):
         )
         return kwargs
 
-    def _sequence_loader(self):
+    def _sequence_loader(self, fmt: _SequenceFormat):
+        if fmt == "ctc":
+            loader = TrackingSequence.from_ctc
+        elif fmt == "geff":
+            loader = TrackingSequence.from_geff
+        else:
+            raise ValueError(f"Unknown sequence format: {fmt!r}")
         if self.cachedir is None:
-            return TrackingSequence.from_ctc
+            return loader
         memory = joblib.Memory(self.cachedir, verbose=0)
-        return memory.cache(TrackingSequence.from_ctc, ignore=["n_workers"])
+        if fmt == "ctc":
+            return memory.cache(loader, ignore=["n_workers"])
+        return memory.cache(loader)
 
-    def _load_sequence(self, loader, inp, split):
+    def _ctc_loader_kwargs(self, inp: SequenceInputSpec, split: str) -> dict:
+        kwargs = dict(root=inp.path, **self._sequence_kwargs_for_split(split))
+        if inp.spacing is not None:
+            if inp.spacing == "auto":
+                raise ValueError('spacing="auto" is only valid for GEFF inputs')
+            kwargs["spacing"] = inp.spacing
+        kwargs.update(inp.loader_kwargs)
+        return kwargs
+
+    def _geff_loader_kwargs(self, inp: SequenceInputSpec) -> dict:
+        kwargs = dict(
+            root_or_geff=inp.path,
+            sparse_gt=inp.sparse_gt,
+            **inp.loader_kwargs,
+        )
+        if inp.spacing is not None:
+            kwargs["spacing"] = inp.spacing
+        return kwargs
+
+    def _resolve_input_format(
+        self,
+        inp: SequenceInputSpec,
+        split: str,
+    ) -> _SequenceFormat:
+        if inp.format != "auto":
+            return inp.format
+        ctc_kwargs = self._sequence_kwargs_for_split(split)
+        ctc_kwargs.update(inp.loader_kwargs)
+        geff_ok, geff_error = _looks_like_geff(inp.path)
+        ctc_ok, ctc_error = _looks_like_ctc(inp.path, ctc_kwargs)
+        if geff_ok and ctc_ok:
+            raise ValueError(
+                f"Could not auto-detect unique format for {inp.path}: "
+                "both CTC and GEFF layouts are valid"
+            )
+        if geff_ok:
+            return "geff"
+        if ctc_ok:
+            return "ctc"
+        raise ValueError(
+            f"Could not auto-detect sequence format for {inp.path}. "
+            f"CTC check failed: {ctc_error}. GEFF check failed: {geff_error}."
+        )
+
+    def _load_sequence(self, inp: SequenceInputSpec, split: str):
         """Load one sequence, logging whether it was served from the joblib cache."""
-        kwargs = dict(root=Path(inp), **self._sequence_kwargs_for_split(split))
+        fmt = self._resolve_input_format(inp, split)
+        loader = self._sequence_loader(fmt)
+        kwargs = (
+            self._ctc_loader_kwargs(inp, split)
+            if fmt == "ctc"
+            else self._geff_loader_kwargs(inp)
+        )
         if self.cachedir is not None:
             hit = loader.check_call_in_cache(**kwargs)
             logger.info(
-                f"  {split.upper()} {inp}: "
+                f"  {split.upper()} {inp.path} ({fmt}): "
                 + ("loaded from cache" if hit else "cache miss, computing")
             )
+        else: 
+            logger.info(f"  {split.upper()} {inp.path} ({fmt}): loading from disk")
         return loader(**kwargs)
 
     def prepare_data(self):
@@ -370,23 +570,19 @@ class BalancedDataModule(LightningDataModule):
         """
         if self.cachedir is None:
             return
-        loader = self._sequence_loader()
         for split, inps in zip(
             ("train", "val"),
             (self.input_train, self.input_val),
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
-            sequences = tuple(
-                self._load_sequence(loader, inp, split) for inp in inps
-            )
+            sequences = tuple(self._load_sequence(inp, split) for inp in tqdm(inps, desc=f"Loading {split.upper()} data"))
             logger.info(
                 f"Loaded {len(sequences)} {split.upper()} sequences (in"
                 f" {(default_timer() - start):.1f} s)\n\n"
             )
 
     def setup(self, stage: str):
-        loader = self._sequence_loader()
         self.datasets = dict()
         for split, inps in zip(
             ("train", "val"),
@@ -396,7 +592,7 @@ class BalancedDataModule(LightningDataModule):
             start = default_timer()
             self.datasets[split] = torch.utils.data.ConcatDataset(
                 TrackingDataset(
-                    self._load_sequence(loader, inp, split),
+                    self._load_sequence(inp, split),
                     dataset_index=i,
                     **self._tracking_data_kwargs_for_split(split),
                 )

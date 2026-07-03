@@ -10,13 +10,16 @@ import torch
 from scripts.train import (
     WrappedLightningModule,
     _apply_focal_weight,
+    _check_detection_folders,
     _child_ce_loss_matrix,
     _feature_dim,
     _quiet_softmax_child_log_null,
     _reduce_decision_loss,
     _reduce_matrix_loss,
     _resolve_feature_embed_mode,
+    _skip_missing_input_folders,
     _summarize_tracking_metrics,
+    _tracking_input_paths_from_specs,
     parse_train_args,
 )
 from torch.utils.data import ConcatDataset, Dataset
@@ -29,6 +32,8 @@ from trackastra.data.distributed import (
     BalancedBatchSampler,
     BalancedDataModule,
     BalancedDistributedSampler,
+    SequenceInputSpec,
+    normalize_sequence_input_specs,
 )
 from trackastra.data.io import DetectionSet, TrackingSequence
 from trackastra.model import TrackingTransformer
@@ -191,6 +196,51 @@ def test_parse_tracking_dataset_defaults(monkeypatch, tmp_path):
 
     assert args.window == 4
     assert args.features == "wrfeat2"
+
+
+def test_parse_grouped_input_config_preserves_mappings(monkeypatch, tmp_path):
+    config = tmp_path / "grouped.yaml"
+    config.write_text(
+        """
+ndim: 3
+input_train:
+- format: geff
+  sparse_gt: true
+  spacing: [4, 1, 1]
+  match_max_distance: 5
+  paths:
+  - train_a
+  - train_b
+input_val:
+- format: geff
+  sparse_gt: true
+  spacing: [4, 1, 1]
+  match_max_distance: 5
+  path: val_a
+""",
+    )
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    args = parse_train_args()
+
+    assert args.input_train == [
+        {
+            "format": "geff",
+            "sparse_gt": True,
+            "spacing": [4, 1, 1],
+            "match_max_distance": 5,
+            "paths": ["train_a", "train_b"],
+        }
+    ]
+    assert args.input_val == [
+        {
+            "format": "geff",
+            "sparse_gt": True,
+            "spacing": [4, 1, 1],
+            "match_max_distance": 5,
+            "path": "val_a",
+        }
+    ]
 
 
 def test_parse_disable_abs_pos(monkeypatch):
@@ -554,6 +604,59 @@ def test_balanced_distributed_sampler_supports_all_samples():
     assert len(list(sampler)) == len(sampler)
 
 
+def test_sequence_input_specs_expand_supported_forms():
+    specs = normalize_sequence_input_specs(
+        [
+            "legacy/01",
+            {
+                "format": "ctc",
+                "spacing": [2, 1],
+                "detection_folders": ["TRA", "SEG"],
+                "paths": ["ctc/01", {"path": "ctc/02", "spacing": [1, 1]}],
+            },
+            {
+                "path": "movie",
+                "format": "geff",
+                "sparse_gt": True,
+                "spacing": "auto",
+                "match_max_distance": 16,
+            },
+        ],
+        ndim=2,
+    )
+
+    assert specs[0] == SequenceInputSpec(path=Path("legacy/01"), format="ctc")
+    assert specs[1].path == Path("ctc/01")
+    assert specs[1].format == "ctc"
+    assert specs[1].spacing == (2.0, 1.0)
+    assert specs[1].loader_kwargs == {"detection_folders": ["TRA", "SEG"]}
+    assert specs[2].path == Path("ctc/02")
+    assert specs[2].spacing == (1.0, 1.0)
+    assert specs[2].loader_kwargs == {"detection_folders": ["TRA", "SEG"]}
+    assert specs[3].path == Path("movie")
+    assert specs[3].format == "geff"
+    assert specs[3].sparse_gt is True
+    assert specs[3].spacing == "auto"
+    assert specs[3].loader_kwargs == {"match_max_distance": 16}
+
+
+def test_sequence_input_specs_validate_ambiguous_or_incomplete_items():
+    with pytest.raises(ValueError, match="exactly one of path/paths"):
+        normalize_sequence_input_specs([{"format": "ctc"}])
+    with pytest.raises(ValueError, match="GEFF input specs must set sparse_gt"):
+        normalize_sequence_input_specs([{"path": "movie", "format": "geff"}])
+    with pytest.raises(ValueError, match="length 3"):
+        normalize_sequence_input_specs(
+            [{"path": "ctc/01", "format": "ctc", "spacing": [1, 1]}],
+            ndim=3,
+        )
+    with pytest.raises(ValueError, match='spacing="auto"'):
+        normalize_sequence_input_specs(
+            [{"path": "ctc/01", "format": "ctc", "spacing": "auto"}],
+            ndim=2,
+        )
+
+
 def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
     sequence_calls = []
     dataset_calls = []
@@ -621,6 +724,259 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
             "augment": 0,
         },
     )
+
+
+def test_balanced_datamodule_dispatches_ctc_and_geff(monkeypatch):
+    sequence_calls = []
+
+    class RecordingSequence:
+        @classmethod
+        def from_ctc(cls, root, **kwargs):
+            sequence_calls.append(("ctc", Path(root), kwargs))
+            return Path(root)
+
+        @classmethod
+        def from_geff(cls, root_or_geff, **kwargs):
+            sequence_calls.append(("geff", Path(root_or_geff), kwargs))
+            return Path(root_or_geff)
+
+    class RecordingTrackingData(_SamplerDataset):
+        def __init__(self, sequence, **kwargs):
+            super().__init__()
+            self.root = sequence
+
+    monkeypatch.setattr(distributed, "TrackingSequence", RecordingSequence)
+    monkeypatch.setattr(distributed, "TrackingDataset", RecordingTrackingData)
+    module = BalancedDataModule(
+        input_train=[
+            {
+                "path": "ctc/01",
+                "format": "ctc",
+                "spacing": [2, 1],
+                "detection_folders": ["SEG"],
+            }
+        ],
+        input_val=[
+            {
+                "path": "movie/track.geff",
+                "format": "geff",
+                "sparse_gt": True,
+                "spacing": "auto",
+                "match_max_distance": 16,
+            }
+        ],
+        cachedir=None,
+        distributed=False,
+        sequence_kwargs={"ndim": 2},
+        tracking_data_kwargs={"features": "wrfeat"},
+        sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
+        loader_kwargs={"batch_size": 2, "num_workers": 0},
+    )
+
+    module.setup("fit")
+
+    assert sequence_calls == [
+        (
+            "ctc",
+            Path("ctc/01"),
+            {"ndim": 2, "spacing": (2.0, 1.0), "detection_folders": ["SEG"]},
+        ),
+        (
+            "geff",
+            Path("movie/track.geff"),
+            {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"},
+        ),
+    ]
+
+
+def test_balanced_datamodule_auto_detects_geff_directory(monkeypatch, tmp_path):
+    geff_root = tmp_path / "movie"
+    (geff_root / "track.geff").mkdir(parents=True)
+    sequence_calls = []
+
+    class RecordingSequence:
+        @classmethod
+        def from_geff(cls, root_or_geff, **kwargs):
+            sequence_calls.append((Path(root_or_geff), kwargs))
+            return Path(root_or_geff)
+
+    class RecordingTrackingData(_SamplerDataset):
+        def __init__(self, sequence, **kwargs):
+            super().__init__()
+            self.root = sequence
+
+    monkeypatch.setattr(distributed, "TrackingSequence", RecordingSequence)
+    monkeypatch.setattr(distributed, "TrackingDataset", RecordingTrackingData)
+    module = BalancedDataModule(
+        input_train=[
+            {
+                "path": geff_root,
+                "sparse_gt": True,
+                "spacing": "auto",
+                "match_max_distance": 16,
+            }
+        ],
+        input_val=[
+            {
+                "path": geff_root,
+                "sparse_gt": True,
+                "spacing": "auto",
+                "match_max_distance": 16,
+            }
+        ],
+        cachedir=None,
+        distributed=False,
+        sequence_kwargs={"ndim": 2},
+        tracking_data_kwargs={"features": "wrfeat"},
+        sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
+        loader_kwargs={"batch_size": 2, "num_workers": 0},
+    )
+
+    module.setup("fit")
+
+    assert sequence_calls == [
+        (geff_root, {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"}),
+        (geff_root, {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"}),
+    ]
+
+
+def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path):
+    cache_calls = []
+    load_calls = []
+
+    class CachedCallable:
+        def __init__(self, func, ignore):
+            self.func = func
+            self.ignore = ignore
+
+        def check_call_in_cache(self, **kwargs):
+            cache_calls.append(("check", self.func.__name__, kwargs))
+            return False
+
+        def __call__(self, **kwargs):
+            load_calls.append((self.func.__name__, kwargs))
+            return self.func(**kwargs)
+
+    class RecordingMemory:
+        def __init__(self, cachedir, verbose):
+            assert Path(cachedir) == tmp_path / "cache"
+            assert verbose == 0
+
+        def cache(self, func, ignore=None):
+            cache_calls.append(("wrap", func.__name__, ignore))
+            return CachedCallable(func, ignore)
+
+    class RecordingSequence:
+        @classmethod
+        def from_ctc(cls, root, **kwargs):
+            return Path(root)
+
+        @classmethod
+        def from_geff(cls, root_or_geff, **kwargs):
+            return Path(root_or_geff)
+
+    monkeypatch.setattr(distributed.joblib, "Memory", RecordingMemory)
+    monkeypatch.setattr(distributed, "TrackingSequence", RecordingSequence)
+    module = BalancedDataModule(
+        input_train=[{"path": "ctc/01", "format": "ctc"}],
+        input_val=[
+            {
+                "path": "movie/track.geff",
+                "format": "geff",
+                "sparse_gt": True,
+                "match_max_distance": 16,
+            }
+        ],
+        cachedir=str(tmp_path / "cache"),
+        distributed=False,
+        sequence_kwargs={"ndim": 2, "n_workers": 4},
+        tracking_data_kwargs={"features": "wrfeat"},
+        sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
+        loader_kwargs={"batch_size": 2, "num_workers": 0},
+    )
+
+    module.prepare_data()
+
+    assert cache_calls == [
+        ("wrap", "from_ctc", ["n_workers"]),
+        ("check", "from_ctc", {"root": Path("ctc/01"), "ndim": 2, "n_workers": 4}),
+        ("wrap", "from_geff", None),
+        (
+            "check",
+            "from_geff",
+            {
+                "root_or_geff": Path("movie/track.geff"),
+                "sparse_gt": True,
+                "match_max_distance": 16,
+            },
+        ),
+    ]
+    assert load_calls == [
+        ("from_ctc", {"root": Path("ctc/01"), "ndim": 2, "n_workers": 4}),
+        (
+            "from_geff",
+            {
+                "root_or_geff": Path("movie/track.geff"),
+                "sparse_gt": True,
+                "match_max_distance": 16,
+            },
+        ),
+    ]
+
+
+def test_skip_missing_input_folders_filters_group_paths(tmp_path):
+    existing = tmp_path / "existing"
+    missing = tmp_path / "missing"
+    existing.mkdir()
+
+    filtered = _skip_missing_input_folders(
+        "training",
+        [
+            {
+                "format": "ctc",
+                "paths": [existing, missing],
+            }
+        ],
+    )
+
+    assert filtered == [{"format": "ctc", "paths": [existing]}]
+
+
+def test_detection_folder_precheck_skips_auto_geff_directory(tmp_path):
+    geff_root = tmp_path / "movie"
+    (geff_root / "track.geff").mkdir(parents=True)
+    ctc_root = tmp_path / "ctc"
+    ctc_root.mkdir()
+    specs = normalize_sequence_input_specs(
+        [
+            {"path": geff_root, "sparse_gt": True, "match_max_distance": 16},
+            {"path": ctc_root, "format": "ctc"},
+        ]
+    )
+
+    with pytest.raises(FileNotFoundError, match="1 training input"):
+        _check_detection_folders("training", specs, ["TRA"])
+
+
+def test_tracking_input_paths_filter_geff_specs(tmp_path):
+    ctc_root = tmp_path / "ctc"
+    ctc_root.mkdir()
+    geff_root = tmp_path / "movie"
+    (geff_root / "track.geff").mkdir(parents=True)
+    specs = normalize_sequence_input_specs(
+        [
+            {"path": ctc_root, "format": "ctc"},
+            {"path": geff_root, "sparse_gt": True, "match_max_distance": 16},
+            {
+                "path": geff_root / "track.geff",
+                "format": "geff",
+                "sparse_gt": True,
+                "match_max_distance": 16,
+            },
+        ]
+    )
+
+    assert _tracking_input_paths_from_specs(specs, tracking_frequency=1) == [ctc_root]
 
 
 def download_gt_data(url: str, data_dir: str | Path):

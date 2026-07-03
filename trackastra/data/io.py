@@ -19,11 +19,19 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import tifffile
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
+from skimage.measure import regionprops
 from tqdm import tqdm
 
 from trackastra.data import wrfeat
 from trackastra.data._check_ctc import _check_ctc, _get_node_attributes
-from trackastra.data.matching import match_points, matching
+from trackastra.data.matching import (
+    intersection_over_union,
+    label_overlap,
+    match_points,
+    relabel_sequential,
+)
 from trackastra.data.utils import apply_spatial_spacing, validate_spatial_spacing
 from trackastra.utils import normalize
 
@@ -251,6 +259,7 @@ class TrackingSequence:
         match_threshold: float = 0.3,
         match_max_distance: float = 16,
         load_images: bool = False,
+        spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
     ) -> TrackingSequence:
         """Load a CTC-like sequence into immutable detections and lineage metadata.
 
@@ -277,6 +286,7 @@ class TrackingSequence:
             match_threshold,
             match_max_distance,
             load_images,
+            spacing,
         )
 
     @classmethod
@@ -623,13 +633,13 @@ def _resolve_geff_paths(
 ) -> tuple[Path, list]:
     """Resolve a ``.geff`` store and its detection sources from a path.
 
-    ``root_or_geff`` is treated as a store when it ends in ``.geff`` or contains a
-    top-level ``zarr.json``; otherwise, if it is a directory, it must hold exactly
-    one ``.geff`` store, and its ``*.csv`` files become detection sources unless
-    ``detections`` is passed explicitly.
+    ``root_or_geff`` is treated as a store when it ends in ``.geff``; otherwise,
+    if it is a directory, it must hold exactly one ``.geff`` store, and its
+    ``*.csv`` files become detection sources unless ``detections`` is passed
+    explicitly.
     """
     path = Path(root_or_geff).expanduser()
-    is_store = path.suffix == ".geff" or (path / "zarr.json").exists()
+    is_store = path.suffix == ".geff"
     if is_store or not path.is_dir():
         return path, _normalize_detection_sources(detections)
     stores = sorted(path.glob("*.geff"))
@@ -951,6 +961,52 @@ def _point_detection_arrays(
     return coords, source_coords, timepoints, features
 
 
+def _matching_with_spacing(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    threshold: float | None,
+    max_distance: float,
+    spacing: tuple[float, ...],
+) -> tuple[tuple[int, int], ...]:
+    y_true, y_pred = y_true.astype(np.int32), y_pred.astype(np.int32)
+    if y_true.shape != y_pred.shape:
+        raise ValueError(
+            f"y_true ({y_true.shape}) and y_pred ({y_pred.shape}) have different shapes"
+        )
+    if threshold is None:
+        threshold = 0
+
+    y_true, _, map_rev_true = relabel_sequential(y_true)
+    y_pred, _, map_rev_pred = relabel_sequential(y_pred)
+    overlap = label_overlap(y_true, y_pred, check=False)
+    scores_iou = intersection_over_union(overlap)
+    n_true, n_pred = scores_iou.shape
+    n_matched = min(n_true, n_pred)
+    if n_matched == 0:
+        return ()
+
+    true_coords = apply_spatial_spacing(
+        np.asarray([r.centroid for r in regionprops(y_true)], dtype=np.float32),
+        spacing,
+    )
+    pred_coords = apply_spatial_spacing(
+        np.asarray([r.centroid for r in regionprops(y_pred)], dtype=np.float32),
+        spacing,
+    )
+    distances = np.minimum(cdist(true_coords, pred_coords), max_distance)
+    scores_dist = 1 - distances / max_distance
+    scores = np.maximum(scores_iou, scores_dist)
+    costs = -(scores >= float(threshold)).astype(float) - scores / (2 * n_matched)
+    true_ind, pred_ind = linear_sum_assignment(costs)
+    keep = scores[true_ind, pred_ind] >= float(threshold)
+    true_ind = true_ind[keep]
+    pred_ind = pred_ind[keep]
+    return tuple(
+        (int(map_rev_true[i]), int(map_rev_pred[j]))
+        for i, j in zip(1 + true_ind, 1 + pred_ind)
+    )
+
+
 def _load_ctc_sequence(
     sequence_type: type[TrackingSequence],
     root: str | Path,
@@ -967,11 +1023,16 @@ def _load_ctc_sequence(
     match_threshold: float,
     match_max_distance: float,
     load_images: bool = False,
+    spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
 ) -> TrackingSequence:
     if not 0 <= slice_pct[0] < slice_pct[1] <= 1:
         raise ValueError(f"Invalid slice_pct {slice_pct}")
     if downscale_spatial < 1 or downscale_temporal < 1:
         raise ValueError("Downscale factors must be positive integers")
+    if spacing is not None and downscale_spatial != 1:
+        raise ValueError("CTC spacing support requires downscale_spatial=1")
+    spacing = validate_spatial_spacing(spacing, ndim)
+    spacing_matrix = np.diag(spacing).astype(np.float32)
     root, image_path, gt_path, track_path = _resolve_paths(
         Path(root), image_folder, gt_folder, track_file, use_gt
     )
@@ -1053,11 +1114,12 @@ def _load_ctc_sequence(
             matches = [
                 {
                     int(detection): int(gt)
-                    for gt, detection in matching(
+                    for gt, detection in _matching_with_spacing(
                         gt_mask,
                         detection_mask,
                         threshold=match_threshold,
                         max_distance=match_max_distance,
+                        spacing=spacing,
                     )
                 }
                 for gt_mask, detection_mask in tqdm(
@@ -1067,14 +1129,18 @@ def _load_ctc_sequence(
                     leave=False,
                 )
             ]
-        frame_features = joblib.Parallel(n_jobs=n_workers)(
+        frame_features_raw = joblib.Parallel(n_jobs=n_workers)(
             joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
                 mask=mask[None], img=image[None], t_start=t
             )
             for t, (mask, image) in enumerate(zip(detection_masks, images))
         )
+        frame_features = [
+            wrfeat.transform_feature_geometry(feature, spacing_matrix)
+            for feature in frame_features_raw
+        ]
         indices_per_frame = []
-        for t, feature in enumerate(frame_features):
+        for t, feature in enumerate(frame_features_raw):
             if isolated_indices is None:
                 indices = np.array(
                     [
@@ -1093,12 +1159,15 @@ def _load_ctc_sequence(
                 )
             indices_per_frame.append(indices)
         names = tuple(frame_features[0].features)
+        source_coords = np.concatenate(
+            [feature.coords for feature in frame_features_raw]
+        )
         coords = np.concatenate([feature.coords for feature in frame_features])
-        labels = np.concatenate([feature.labels for feature in frame_features])
+        labels = np.concatenate([feature.labels for feature in frame_features_raw])
         timepoints = np.concatenate(
             [
                 np.full(len(feature.labels), t, dtype=np.int64)
-                for t, feature in enumerate(frame_features)
+                for t, feature in enumerate(frame_features_raw)
             ]
         )
         lineage_index = (
@@ -1120,6 +1189,8 @@ def _load_ctc_sequence(
                 features=features,
                 lineage_index=lineage_index,
                 masks=detection_masks if load_images else None,
+                source_coords=source_coords,
+                spacing=spacing,
             )
         )
     return sequence_type(

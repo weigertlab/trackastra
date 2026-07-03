@@ -422,12 +422,13 @@ class TrackingDataset(Dataset):
 
 
 def association_distances(dataset: TrackingDataset, delta_cutoff: int) -> np.ndarray:
-    """Distances of unique positive forward associations in raw windows."""
+    """Distances of unique positive forward associations in runtime model units."""
     if delta_cutoff < 1:
         raise ValueError("delta_cutoff must be positive")
     distances = {}
     for window, (seg_index, _) in enumerate(dataset.windows):
         coords, labels, timepoints, _, association = dataset._window_arrays(window)
+        coords = coords * dataset.scale_factor
         rows, cols = np.nonzero(association)
         delta = timepoints[cols] - timepoints[rows]
         valid = (delta > 0) & (delta <= delta_cutoff)

@@ -1,10 +1,10 @@
+import ast
 import json
 import os
 
 import pandas as pd
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
 import torch
 import torch.multiprocessing
 
@@ -40,7 +40,11 @@ from trackastra.data import (
     collate_sequence_padding,
     densify_assoc,
 )
-from trackastra.data.distributed import BalancedDataModule
+from trackastra.data.distributed import (
+    BalancedDataModule,
+    SequenceInputSpec,
+    normalize_sequence_input_specs,
+)
 from trackastra.model import INFERENCE_CONFIG_KEYS, TrackingTransformer
 from trackastra.utils import (
     blockwise_causal_log_prob_batched,
@@ -1222,6 +1226,7 @@ class WrappedLightningModule(pl.LightningModule):
         if (
             _is_tracking_epoch(self.current_epoch, self.tracking_frequency)
             and self.trainer.is_global_zero
+            and self.tracking_input_paths
         ):
             try:
                 metrics = self._run_tracking_eval()
@@ -1509,15 +1514,38 @@ def _resolve_feature_embed_mode(features: str, requested: str | None) -> str:
     return "mlp" if features in ("wrfeat2", "wrfeat2_no_intensity") else "fourier"
 
 
-def _skip_missing_input_folders(split: str, input_paths: list[str]) -> list[str]:
+def _input_path(item) -> Path | None:
+    if isinstance(item, dict):
+        if "path" not in item:
+            return None
+        return Path(item["path"])
+    return Path(item)
+
+
+def _skip_missing_input_folders(split: str, input_paths: list) -> list:
     """Warn about missing input folders and return existing paths."""
     existing = []
     missing = []
-    for p in input_paths:
-        if Path(p).exists():
-            existing.append(p)
+    for item in input_paths:
+        if isinstance(item, dict) and "paths" in item:
+            kept_paths = []
+            for path_item in item["paths"]:
+                path = _input_path(path_item)
+                if path is None or path.exists():
+                    kept_paths.append(path_item)
+                else:
+                    missing.append(str(path))
+            if kept_paths:
+                updated = item.copy()
+                updated["paths"] = kept_paths
+                existing.append(updated)
+            continue
+
+        path = _input_path(item)
+        if path is None or path.exists():
+            existing.append(item)
         else:
-            missing.append(p)
+            missing.append(str(path))
 
     if missing:
         logger.warning(
@@ -1535,8 +1563,17 @@ def _skip_missing_input_folders(split: str, input_paths: list[str]) -> list[str]
     return existing
 
 
+def _looks_like_geff_input_path(path: Path) -> bool:
+    path = path.expanduser()
+    if path.suffix == ".geff":
+        return True
+    return path.is_dir() and len(tuple(path.glob("*.geff"))) == 1
+
+
 def _check_detection_folders(
-    split: str, input_paths: list[str], detection_folders: list[str]
+    split: str,
+    input_specs: list[SequenceInputSpec],
+    detection_folders: list[str],
 ) -> None:
     """Error once, listing every input that has none of the requested detection folders.
 
@@ -1546,26 +1583,76 @@ def _check_detection_folders(
     from trackastra.data.io import _resolve_detection_folder
 
     unusable = []
-    for p in input_paths:
-        root = Path(p).expanduser()
+    for spec in input_specs:
+        if spec.format == "geff" or (
+            spec.format == "auto" and _looks_like_geff_input_path(spec.path)
+        ):
+            continue
+        root = spec.path.expanduser()
         # mirror _resolve_paths: a folder named "TRA" points back at its sequence root
         if root.name == "TRA":
             root = root.parent.parent / root.parent.name.split("_")[0]
+        folders = spec.loader_kwargs.get("detection_folders", detection_folders)
         found = []
-        for folder in detection_folders:
+        for folder in folders:
             try:
                 _resolve_detection_folder(root, folder)
                 found.append(folder)
             except FileNotFoundError:
                 pass
         if not found:
-            unusable.append(p)
+            unusable.append(str(spec.path))
 
     if unusable:
         raise FileNotFoundError(
             f"{len(unusable)} {split} input(s) have none of the detection folders "
             f"{detection_folders}:\n  " + "\n  ".join(unusable)
         )
+
+
+def _tracking_input_paths_from_specs(
+    input_specs: list[SequenceInputSpec],
+    tracking_frequency: int,
+) -> list[Path]:
+    """Return CTC validation paths for the CTC-only full-movie tracking evaluator."""
+    paths = []
+    skipped_geff = []
+    for spec in input_specs:
+        is_geff = spec.format == "geff" or (
+            spec.format == "auto" and _looks_like_geff_input_path(spec.path)
+        )
+        if is_geff:
+            skipped_geff.append(str(spec.path))
+            continue
+        paths.append(spec.path)
+    if tracking_frequency > 0 and skipped_geff:
+        logger.warning(
+            "full-movie tracking validation is CTC-only; skipping %d GEFF validation"
+            " input(s): %s",
+            len(skipped_geff),
+            ", ".join(skipped_geff),
+        )
+    return paths
+
+
+def _restore_input_config_items(items: list | None) -> list | None:
+    """Restore grouped YAML input specs stringified by configargparse."""
+    if items is None:
+        return None
+    restored = []
+    for item in items:
+        if not isinstance(item, str):
+            restored.append(item)
+            continue
+        stripped = item.strip()
+        if not (stripped.startswith("{") or stripped.startswith("[")):
+            restored.append(item)
+            continue
+        try:
+            restored.append(ast.literal_eval(stripped))
+        except (SyntaxError, ValueError):
+            restored.append(item)
+    return restored
 
 
 def find_val_batch(loader_val, n_gpus):
@@ -1677,8 +1764,14 @@ def train(args):
 
     args.input_train = _skip_missing_input_folders("training", args.input_train)
     args.input_val = _skip_missing_input_folders("validation", args.input_val)
-    _check_detection_folders("training", args.input_train, args.detection_folders)
-    _check_detection_folders("validation", args.input_val, args.detection_folders)
+    train_input_specs = normalize_sequence_input_specs(args.input_train, ndim=args.ndim)
+    val_input_specs = normalize_sequence_input_specs(args.input_val, ndim=args.ndim)
+    _check_detection_folders("training", train_input_specs, args.detection_folders)
+    _check_detection_folders("validation", val_input_specs, args.detection_folders)
+    tracking_input_paths = _tracking_input_paths_from_specs(
+        val_input_specs,
+        tracking_frequency=args.tracking_frequency,
+    )
 
     sequence_kwargs = dict(
         ndim=args.ndim,
@@ -1808,7 +1901,7 @@ def train(args):
         loss_norm=args.loss_norm,
         focal_loss_gamma=args.focal_loss_gamma,
         tracking_frequency=args.tracking_frequency,
-        tracking_input_paths=args.input_val,
+        tracking_input_paths=tracking_input_paths,
         tracking_detection_folder=args.detection_folders[0],
         tracking_mode=args.tracking_mode,
         inference_config=inference_config,
@@ -1834,7 +1927,7 @@ def train(args):
                 loss_norm=args.loss_norm,
                 focal_loss_gamma=args.focal_loss_gamma,
                 tracking_frequency=args.tracking_frequency,
-                tracking_input_paths=args.input_val,
+                tracking_input_paths=tracking_input_paths,
                 tracking_detection_folder=args.detection_folders[0],
                 tracking_mode=args.tracking_mode,
                 inference_config=inference_config,
@@ -2181,6 +2274,8 @@ def parse_train_args():
     )
 
     args, unknown_args = parser.parse_known_args()
+    args.input_train = _restore_input_config_items(args.input_train)
+    args.input_val = _restore_input_config_items(args.input_val)
 
     # Hack to allow for --input_test
     allowed_unknown = ["input_test"]

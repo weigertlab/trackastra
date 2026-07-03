@@ -414,6 +414,105 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     assert not sample["assoc_matrix"][1, 2]
 
 
+def test_tracking_sequence_from_ctc_spacing_scales_coords_and_geometry(tmp_path):
+    root = _write_ctc_fixture(tmp_path, "simple")
+
+    unit = TrackingSequence.from_ctc(root, n_workers=1)
+    spaced = TrackingSequence.from_ctc(root, n_workers=1, spacing=(2, 2))
+
+    unit_seg = unit.detections[0]
+    spaced_seg = spaced.detections[0]
+    assert spaced_seg.spacing == (2.0, 2.0)
+    np.testing.assert_allclose(spaced_seg.source_coords, unit_seg.coords)
+    np.testing.assert_allclose(spaced_seg.coords, unit_seg.coords * 2)
+    np.testing.assert_allclose(
+        spaced_seg.features["equivalent_diameter_area"],
+        unit_seg.features["equivalent_diameter_area"] * 2,
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["inertia_tensor"],
+        unit_seg.features["inertia_tensor"] * 4,
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["border_dist"],
+        unit_seg.features["border_dist"],
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["intensity"],
+        unit_seg.features["intensity"],
+    )
+
+
+def test_tracking_sequence_from_ctc_anisotropic_spacing_transforms_geometry(tmp_path):
+    root = _write_ctc_fixture(tmp_path, "simple")
+
+    unit = TrackingSequence.from_ctc(root, n_workers=1)
+    spaced = TrackingSequence.from_ctc(root, n_workers=1, spacing=(2, 1))
+
+    unit_seg = unit.detections[0]
+    spaced_seg = spaced.detections[0]
+    assert spaced_seg.spacing == (2.0, 1.0)
+    np.testing.assert_allclose(
+        spaced_seg.coords,
+        unit_seg.coords * np.array([2, 1], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["equivalent_diameter_area"],
+        unit_seg.features["equivalent_diameter_area"] * np.sqrt(2),
+    )
+    assert not np.allclose(
+        spaced_seg.features["inertia_tensor"],
+        unit_seg.features["inertia_tensor"],
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["border_dist"],
+        unit_seg.features["border_dist"],
+    )
+    np.testing.assert_allclose(
+        spaced_seg.features["intensity"],
+        unit_seg.features["intensity"],
+    )
+
+
+def test_tracking_sequence_from_ctc_spacing_scales_match_distance(tmp_path):
+    root = _write_ctc_fixture(tmp_path, "simple")
+    res = root / "RES"
+    res.mkdir()
+    for f in sorted((root / "TRA").glob("*.tif")):
+        mask = imread(f)
+        shifted = np.zeros_like(mask)
+        shifted[:, 2:] = mask[:, :-2]
+        imwrite(res / f.name, shifted)
+
+    unit = TrackingSequence.from_ctc(
+        root,
+        detection_folders=("RES",),
+        match_threshold=0.5,
+        match_max_distance=5,
+        n_workers=1,
+    )
+    spaced = TrackingSequence.from_ctc(
+        root,
+        detection_folders=("RES",),
+        match_threshold=0.5,
+        match_max_distance=5,
+        n_workers=1,
+        spacing=(2, 2),
+    )
+
+    assert np.all(unit.detections[0].lineage_index >= 0)
+    assert np.all(spaced.detections[0].lineage_index == -1)
+
+
+def test_tracking_sequence_from_ctc_rejects_spacing_with_spatial_downscale(tmp_path):
+    root = _write_ctc_fixture(tmp_path, "simple")
+
+    with pytest.raises(ValueError, match="downscale_spatial=1"):
+        TrackingSequence.from_ctc(
+            root, n_workers=1, spacing=(1, 1), downscale_spatial=2
+        )
+
+
 def test_from_ctc_tolerates_partial_detection_folders(tmp_path):
     # simple layout writes masks under root/TRA; mirror them into root/RES
     root = _write_ctc_fixture(tmp_path, "simple")

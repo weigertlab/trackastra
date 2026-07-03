@@ -194,6 +194,30 @@ def scale_feature_geometry(feature: "WRFeatures", scale: float) -> "WRFeatures":
     )
 
 
+def transform_feature_geometry(
+    feature: "WRFeatures", matrix: np.ndarray
+) -> "WRFeatures":
+    matrix = np.asarray(matrix, dtype=np.float32)
+    if matrix.shape != (feature.ndim, feature.ndim):
+        raise ValueError(
+            f"matrix must have shape {(feature.ndim, feature.ndim)}, got {matrix.shape}"
+        )
+    if np.allclose(matrix, np.eye(feature.ndim)):
+        return feature
+    features = OrderedDict()
+    for name, values in feature.features.items():
+        # `border_dist` is left in source-grid units for spacing transforms.
+        # A truly physical value needs recomputing from the mask with an anisotropic
+        # distance transform; treating it like a generic affine feature is not correct.
+        features[name] = _transform_affine(name, values, matrix)
+    return WRFeatures(
+        coords=feature.coords @ matrix.T,
+        labels=feature.labels,
+        timepoints=feature.timepoints,
+        features=features,
+    )
+
+
 def normalize_to_diameter(
     features: Sequence["WRFeatures"], normalize_diameter: float | None
 ) -> list["WRFeatures"]:

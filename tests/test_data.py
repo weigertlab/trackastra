@@ -291,7 +291,10 @@ def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
         coords=np.array([[x, 0.0] for x in xs], dtype=np.float32),
         labels=np.array([10 + t for t in range(n_frames)]),
         timepoints=np.arange(n_frames, dtype=np.int64),
-        features={"v": np.zeros((n_frames, 1), dtype=np.float32)},
+        features={
+            "equivalent_diameter_area": np.full((n_frames, 1), 2, dtype=np.float32),
+            "v": np.zeros((n_frames, 1), dtype=np.float32),
+        },
         lineage_index=np.zeros(n_frames, dtype=np.int64),
     )
     return TrackingSequence(
@@ -312,6 +315,20 @@ def test_association_distances_deduplicate_overlapping_windows():
     distances = association_distances(data, delta_cutoff=1)
 
     assert sorted(distances.tolist()) == [3.0, 10.0, 17.0]
+
+
+def test_association_distances_use_runtime_model_units():
+    sequence = _single_lineage_sequence((0.0, 3.0, 13.0, 30.0))
+    data = TrackingDataset(
+        sequence,
+        window_size=3,
+        features="none",
+        normalize_diameter=4,
+    )
+
+    distances = association_distances(data, delta_cutoff=1)
+
+    assert sorted(distances.tolist()) == [6.0, 20.0, 34.0]
 
 
 def test_association_distance_warning_ignores_values_at_cutoff(caplog):
