@@ -81,6 +81,10 @@ def build_lightning_runtime(
     if not dry:
         run_name = create_run_name(name, timestamp=timestamp)
         logdir = Path(outdir) / run_name
+        if logdir.exists() and not resume:
+            raise ValueError(
+                f'Logdir {logdir} exists, set "--resume t" if you want to resume'
+            )
         callbacks.append(
             pl.pytorch.callbacks.ModelCheckpoint(
                 dirpath=logdir / "checkpoints",
@@ -121,11 +125,6 @@ def build_lightning_runtime(
         run_name = None
         logdir = None
         train_logger = False
-
-    if logdir is not None and logdir.exists() and not resume:
-        raise ValueError(
-            f'Logdir {logdir} exists, set "--resume t"  if you want to overwrite'
-        )
 
     if train_logger:
         callbacks.append(
