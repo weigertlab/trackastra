@@ -1,7 +1,7 @@
 """Runtime temporal-window dataset and collation over tracking sequences (torch).
 
 Depends on the torch-free data model in ``io.py`` (one-way ``dataset`` -> ``io``). A
-temporal window is a ``timepoints``-range slice of a flat :class:`DetectionSet`.
+temporal window is a ``timepoints``-range slice of a flat :class:`DetectionSequence`.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from scipy.sparse.csgraph import connected_components
 from torch.utils.data import Dataset
 
 from trackastra.data import wrfeat
-from trackastra.data.io import DetectionSet, TrackingSequence
+from trackastra.data.io import DetectionSequence, DetectionSupervision, TrackingSequence
 from trackastra.utils import blockwise_sum
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,13 @@ def _normalize_diameter_factor(
 
 
 def _wr_augmenter(level: int):
+    # TEMP scale-invariance check: WRRandomOffset/WRRandomMovement perturb coords
+    # by absolute magnitudes in model units, so a rescaled dataset sees different
+    # relative jitter. Hardcode the biohub2 factor (max_distance 104 / reference
+    # 256) to test the hypothesis; generalize to max_distance / 256 later.
+    coord_scale = 104 / 256
+    jitter = (-3.0 * coord_scale, 3.0 * coord_scale)
+    drift = (-10.0 * coord_scale, 10.0 * coord_scale)
     common = [
         wrfeat.WRRandomFlip(p=0.5),
         wrfeat.WRRandomAffine(p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)),
@@ -180,7 +187,7 @@ def _wr_augmenter(level: int):
         augmentations = [
             *common,
             wrfeat.WRRandomBrightness(p=0.8),
-            wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            wrfeat.WRRandomOffset(p=0.8, offset=jitter),
         ]
     elif level in (3, 4):
         if level == 4:
@@ -190,8 +197,8 @@ def _wr_augmenter(level: int):
         augmentations = [
             *common,
             wrfeat.WRRandomBrightness(p=0.8),
-            wrfeat.WRRandomMovement(offset=(-10, 10), p=0.3),
-            wrfeat.WRRandomOffset(p=0.8, offset=(-3, 3)),
+            wrfeat.WRRandomMovement(offset=drift, p=0.3),
+            wrfeat.WRRandomOffset(p=0.8, offset=jitter),
         ]
     else:
         return None
@@ -225,6 +232,8 @@ class TrackingDataset(Dataset):
     ) -> None:
         if window_size <= 1:
             raise ValueError("window_size must be greater than one")
+        if sequence.gt is None:
+            raise ValueError("TrackingDataset requires a gt LineageGraph")
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
         _validate_feature_mode(sequence, features)
@@ -274,53 +283,58 @@ class TrackingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.windows)
 
-    def _window_slice(self, index: int) -> tuple[DetectionSet, slice]:
+    def _window_slice(
+        self, index: int
+    ) -> tuple[DetectionSequence, DetectionSupervision, slice]:
         seg_index, start = self.windows[index]
         seg = self.sequence.detections[seg_index]
+        supervision = self.sequence.supervision[seg_index]
+        if supervision is None:
+            raise ValueError("TrackingDataset requires supervision for every detection")
         lo = int(np.searchsorted(seg.timepoints, start, side="left"))
         hi = int(np.searchsorted(seg.timepoints, start + self.window_size, side="left"))
-        return seg, slice(lo, hi)
+        return seg, supervision, slice(lo, hi)
 
     def _window_arrays(self, index: int):
         # Slices of the stored arrays are read-only views; return writable copies so
         # downstream WRFeatures augmentation can mutate in place (matching the former
         # _concat_frames, which produced fresh np.concatenate buffers per window).
-        seg, sl = self._window_slice(index)
+        seg, supervision, sl = self._window_slice(index)
         coords = seg.coords[sl].copy()
         labels = seg.labels[sl].copy()
         timepoints = seg.timepoints[sl].copy()
-        lineage_index = seg.lineage_index[sl]
+        lineage_index = supervision.lineage_index[sl]
         features = OrderedDict(
             (name, values[sl].copy()) for name, values in seg.features.items()
         )
-        association = _association_target(lineage_index, self.sequence.lineage_relation)
+        association = _association_target(lineage_index, self.sequence.gt.lineage_relation)
         return coords, labels, timepoints, features, association
 
     def _window_matched_gt(self, index: int) -> np.ndarray:
-        seg, sl = self._window_slice(index)
-        if seg.matched_gt is None:
+        seg, supervision, sl = self._window_slice(index)
+        if supervision.matched_gt is None:
             return np.ones(sl.stop - sl.start, dtype=bool)
-        return seg.matched_gt[sl].copy()
+        return supervision.matched_gt[sl].copy()
 
     def _window_gt_link_set_availability(
         self, index: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        seg, sl = self._window_slice(index)
+        seg, supervision, sl = self._window_slice(index)
         n = sl.stop - sl.start
         predecessor = (
             np.ones(n, dtype=bool)
-            if seg.gt_predecessor_set_available is None
-            else seg.gt_predecessor_set_available[sl].copy()
+            if supervision.gt_predecessor_set_available is None
+            else supervision.gt_predecessor_set_available[sl].copy()
         )
         successor = (
             np.ones(n, dtype=bool)
-            if seg.gt_successor_set_available is None
-            else seg.gt_successor_set_available[sl].copy()
+            if supervision.gt_successor_set_available is None
+            else supervision.gt_successor_set_available[sl].copy()
         )
         return predecessor, successor
 
     def _window_object_count(self, index: int) -> int:
-        _, sl = self._window_slice(index)
+        _seg, _supervision, sl = self._window_slice(index)
         count = sl.stop - sl.start
         return min(count, self.max_detections) if self.max_detections else count
 

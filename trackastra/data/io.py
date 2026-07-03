@@ -1,6 +1,6 @@
 """Immutable tracking sequences and CTC-folder loading (torch-free).
 
-This module holds the format-neutral data model (:class:`DetectionSet`,
+This module holds the format-neutral data model (:class:`DetectionSequence`,
 :class:`TrackingSequence`) and the canonical CTC-folder loaders. It imports no torch in
 its own source; the torch dataset and collation live in ``dataset.py``, which depends on
 this module (one-way ``dataset`` -> ``io``).
@@ -38,6 +38,23 @@ from trackastra.utils import normalize
 logger = logging.getLogger(__name__)
 
 
+def _resolve_detection_spacing(
+    spacing: tuple[float, ...] | list[float] | np.ndarray | None,
+    ndim: int,
+    *,
+    context: str,
+) -> tuple[float, ...]:
+    if spacing is None and ndim == 3:
+        logger.warning(
+            "%s received 3D detections without spacing; assuming unit "
+            "source-to-model scale (1, 1, 1). If coordinates are pixels/voxels, "
+            "pass voxel spacing in model units, normally micrometers. If coordinates "
+            "are already in model units, pass spacing=(1, 1, 1) explicitly.",
+            context,
+        )
+    return validate_spatial_spacing(spacing, ndim)
+
+
 def _immutable_array(value: np.ndarray, *, ndim: int | None = None) -> np.ndarray:
     array = np.asarray(value).copy()
     if ndim is not None and array.ndim != ndim:
@@ -47,21 +64,23 @@ def _immutable_array(value: np.ndarray, *, ndim: int | None = None) -> np.ndarra
 
 
 @dataclass(frozen=True)
-class DetectionSet:
+class DetectionSequence:
     """Flat columnar detections for one source across a movie.
 
     All detections across the movie are concatenated and sorted by ``timepoints`` so a
     temporal window is a contiguous slice (see :class:`trackastra.data.dataset`).
-    ``coords`` are model-space spatial coordinates. ``features`` stores precomputed
-    per-detection arrays under canonical string keys such as ``intensity``,
-    ``equivalent_diameter_area`` or ``inertia_tensor``. Dataset feature
-    recipes query these keys in fixed order and apply any model-specific transforms.
-    ``masks`` is optional and only needed for mask-based inference/export.
+    ``coords`` are model-space spatial coordinates. For microscopy checkpoints, model
+    units should be physical units, normally micrometers. Constructors that ingest
+    masks, points, or CSV tables interpret coordinates as source pixel/voxel
+    coordinates and store ``coords = source_coords * spacing``. If coordinates are
+    already in model units, pass unit spacing explicitly. ``features`` stores
+    precomputed per-detection arrays under canonical string keys such as ``intensity``,
+    ``equivalent_diameter_area`` or ``inertia_tensor``. Dataset feature recipes query
+    these keys in fixed order and apply any model-specific transforms. ``masks`` is
+    optional and only needed for mask-based inference/export.
     ``source_coords`` and ``spacing`` preserve the original coordinate system when
-    loaders scale source coordinates into model space. ``matched_gt`` marks detections
-    matched to annotated GT; ``None`` means every detection is treated as matched.
-    ``gt_predecessor_set_available`` and ``gt_successor_set_available`` mark whether
-    the full incoming or outgoing GT link set is annotated for each detection.
+    loaders scale source coordinates into model space. GT matching and lineage
+    supervision live in :class:`DetectionSupervision`, not on this object.
     """
 
     name: str
@@ -70,32 +89,24 @@ class DetectionSet:
     labels: np.ndarray
     timepoints: np.ndarray
     features: dict[str, np.ndarray]
-    lineage_index: np.ndarray
     masks: np.ndarray | None = None
+    images: np.ndarray | None = None
     source_coords: np.ndarray | None = None
     spacing: tuple[float, ...] | None = None
-    matched_gt: np.ndarray | None = None
-    gt_predecessor_set_available: np.ndarray | None = None
-    gt_successor_set_available: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         coords = _immutable_array(self.coords, ndim=2)
         labels = _immutable_array(self.labels, ndim=1)
         timepoints = _immutable_array(self.timepoints, ndim=1)
-        lineage_index = _immutable_array(self.lineage_index, ndim=1)
         n = len(coords)
-        if len(labels) != n or len(timepoints) != n or len(lineage_index) != n:
-            raise ValueError(
-                "coords, labels, timepoints, and lineage_index must be aligned"
-            )
+        if len(labels) != n or len(timepoints) != n:
+            raise ValueError("coords, labels, and timepoints must be aligned")
         if coords.shape[1] not in (2, 3):
             raise ValueError("Detection coordinates must be 2D or 3D")
         if n and np.any(np.diff(timepoints) < 0):
             raise ValueError("timepoints must be sorted in non-decreasing order")
         if n and (timepoints.min() < 0 or timepoints.max() >= int(self.n_frames)):
             raise ValueError("timepoints must lie within [0, n_frames)")
-        if np.any(lineage_index < -1):
-            raise ValueError("lineage_index may only use -1 for unmatched detections")
         features = {}
         for name, values in self.features.items():
             name = wrfeat.canonical_feature_name(name)
@@ -110,13 +121,17 @@ class DetectionSet:
         object.__setattr__(self, "coords", coords)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "timepoints", timepoints)
-        object.__setattr__(self, "lineage_index", lineage_index)
         object.__setattr__(self, "features", features)
         if self.masks is not None:
             masks = _immutable_array(self.masks)
             if len(masks) != int(self.n_frames):
                 raise ValueError("masks must have one frame per timepoint")
             object.__setattr__(self, "masks", masks)
+        if self.images is not None:
+            images = _immutable_array(self.images)
+            if len(images) != int(self.n_frames):
+                raise ValueError("images must have one frame per timepoint")
+            object.__setattr__(self, "images", images)
         if self.source_coords is not None:
             source_coords = _immutable_array(self.source_coords, ndim=2)
             if source_coords.shape != coords.shape:
@@ -126,36 +141,6 @@ class DetectionSet:
             object.__setattr__(
                 self, "spacing", validate_spatial_spacing(self.spacing, self.dim)
             )
-        if self.matched_gt is not None:
-            matched_gt = _immutable_array(self.matched_gt, ndim=1).astype(bool)
-            if len(matched_gt) != n:
-                raise ValueError("matched_gt must be aligned with detections")
-            matched_gt.setflags(write=False)
-            object.__setattr__(self, "matched_gt", matched_gt)
-        if self.gt_predecessor_set_available is not None:
-            gt_predecessor_set_available = _immutable_array(
-                self.gt_predecessor_set_available, ndim=1
-            ).astype(bool)
-            if len(gt_predecessor_set_available) != n:
-                raise ValueError(
-                    "gt_predecessor_set_available must be aligned with detections"
-                )
-            gt_predecessor_set_available.setflags(write=False)
-            object.__setattr__(
-                self, "gt_predecessor_set_available", gt_predecessor_set_available
-            )
-        if self.gt_successor_set_available is not None:
-            gt_successor_set_available = _immutable_array(
-                self.gt_successor_set_available, ndim=1
-            ).astype(bool)
-            if len(gt_successor_set_available) != n:
-                raise ValueError(
-                    "gt_successor_set_available must be aligned with detections"
-                )
-            gt_successor_set_available.setflags(write=False)
-            object.__setattr__(
-                self, "gt_successor_set_available", gt_successor_set_available
-            )
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -163,6 +148,320 @@ class DetectionSet:
     @property
     def dim(self) -> int:
         return self.coords.shape[1]
+
+    @classmethod
+    def from_masks(
+        cls,
+        imgs: np.ndarray | None,
+        masks: np.ndarray,
+        *,
+        name: str = "detections",
+        ndim: int | None = None,
+        spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
+        normalize_imgs: bool = True,
+        n_workers: int = 0,
+        keep_masks: bool = True,
+        keep_images: bool = False,
+        progbar_class=tqdm,
+    ) -> DetectionSequence:
+        """Build mask-derived detections and canonical region features.
+
+        Mask centroids and geometry are measured in pixel/voxel coordinates, then
+        multiplied by ``spacing`` to produce model-space coordinates and geometry
+        features. Use physical voxel size, normally micrometers per axis, when the
+        model was trained in physical units. Passing ``spacing=None`` means unit
+        spacing; for 3D data this logs a warning because anisotropy is common.
+        """
+        masks = np.asarray(masks)
+        if masks.ndim not in (3, 4):
+            raise ValueError(f"masks must have shape (T,(Z),Y,X), got {masks.shape}")
+        source_ndim = masks.ndim - 1
+        ndim = source_ndim if ndim is None else int(ndim)
+        if ndim not in (2, 3):
+            raise ValueError("Only 2D and 3D mask detections are supported")
+        if ndim == 2 and source_ndim != 2:
+            raise ValueError(f"Expected 2D masks, got {source_ndim}D masks")
+        if ndim == 3 and source_ndim == 2:
+            feature_masks = masks[:, np.newaxis, ...]
+        elif ndim == source_ndim:
+            feature_masks = masks
+        else:
+            raise ValueError(f"Expected {ndim}D masks, got {source_ndim}D masks")
+        spacing = _resolve_detection_spacing(
+            spacing, ndim, context="DetectionSequence.from_masks"
+        )
+        if imgs is None:
+            image_frames = np.zeros(feature_masks.shape, dtype=np.float32)
+            has_real_images = False
+        else:
+            image_frames = np.asarray(imgs)
+            if image_frames.shape != masks.shape:
+                raise ValueError(
+                    f"imgs and masks must have matching shapes, got "
+                    f"{image_frames.shape} and {masks.shape}"
+                )
+            if normalize_imgs:
+                image_frames = normalize(image_frames)
+            if ndim == 3 and source_ndim == 2:
+                image_frames = image_frames[:, np.newaxis, ...]
+            has_real_images = True
+
+        def _extract(t: int, mask: np.ndarray, image: np.ndarray) -> wrfeat.WRFeatures:
+            return wrfeat.WRFeatures.from_mask_img(
+                mask=mask[np.newaxis, ...],
+                img=image[np.newaxis, ...],
+                t_start=t,
+            )
+
+        iterable = progbar_class(
+            enumerate(zip(feature_masks, image_frames)),
+            total=len(feature_masks),
+            desc="Extracting features",
+            leave=False,
+        )
+        if n_workers > 0:
+            frame_features_raw = joblib.Parallel(n_jobs=n_workers)(
+                joblib.delayed(_extract)(t, mask, image) for t, (mask, image) in iterable
+            )
+        else:
+            frame_features_raw = [
+                _extract(t, mask, image) for t, (mask, image) in iterable
+            ]
+        spacing_matrix = np.diag(spacing).astype(np.float32)
+        frame_features = [
+            wrfeat.transform_feature_geometry(feature, spacing_matrix)
+            for feature in frame_features_raw
+        ]
+        return cls.from_wrfeatures(
+            frame_features=frame_features,
+            source_features=frame_features_raw,
+            name=name,
+            n_frames=len(feature_masks),
+            masks=masks if keep_masks else None,
+            images=image_frames if keep_images and has_real_images else None,
+            spacing=spacing,
+            drop_intensity=not has_real_images,
+        )
+
+    @classmethod
+    def from_wrfeatures(
+        cls,
+        frame_features: Sequence[wrfeat.WRFeatures],
+        *,
+        source_features: Sequence[wrfeat.WRFeatures] | None = None,
+        name: str = "detections",
+        n_frames: int | None = None,
+        masks: np.ndarray | None = None,
+        images: np.ndarray | None = None,
+        spacing: tuple[float, ...] | None = None,
+        drop_intensity: bool = False,
+    ) -> DetectionSequence:
+        """Build detections from one ``WRFeatures`` object per frame."""
+        frame_features = tuple(frame_features)
+        source_features = tuple(source_features or frame_features)
+        if len(frame_features) != len(source_features):
+            raise ValueError("frame_features and source_features must have equal length")
+        n_frames = len(frame_features) if n_frames is None else int(n_frames)
+        if not frame_features:
+            if spacing is None:
+                raise ValueError("spacing is required when constructing empty detections")
+            ndim = len(spacing)
+            return cls(
+                name=name,
+                n_frames=n_frames,
+                coords=np.zeros((0, ndim), dtype=np.float32),
+                labels=np.zeros(0, dtype=np.int32),
+                timepoints=np.zeros(0, dtype=np.int64),
+                features={},
+                masks=masks,
+                images=images,
+                source_coords=np.zeros((0, ndim), dtype=np.float32),
+                spacing=spacing,
+            )
+
+        feature_names = tuple(frame_features[0].features)
+        if drop_intensity:
+            feature_names = tuple(
+                name for name in feature_names if name != wrfeat.FEATURE_INTENSITY
+            )
+        features = OrderedDict(
+            (
+                name,
+                np.concatenate([feature.features[name] for feature in frame_features]),
+            )
+            for name in feature_names
+        )
+        coords = np.concatenate([feature.coords for feature in frame_features])
+        source_coords = np.concatenate([feature.coords for feature in source_features])
+        labels = np.concatenate([feature.labels for feature in source_features])
+        timepoints = np.concatenate(
+            [
+                np.full(len(feature.labels), t, dtype=np.int64)
+                for t, feature in enumerate(source_features)
+            ]
+        )
+        return cls(
+            name=name,
+            n_frames=n_frames,
+            coords=coords,
+            labels=labels,
+            timepoints=timepoints,
+            features=features,
+            masks=masks,
+            images=images,
+            source_coords=source_coords,
+            spacing=spacing,
+        )
+
+    @classmethod
+    def from_points(
+        cls,
+        coords: Sequence[np.ndarray],
+        *,
+        name: str = "points",
+        features: Sequence[np.ndarray] | dict[str, np.ndarray] | None = None,
+        labels: Sequence[np.ndarray] | None = None,
+        spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    ) -> DetectionSequence:
+        """Build detections from per-frame point coordinates.
+
+        Input coordinates are interpreted as source pixel/voxel coordinates and are
+        multiplied by ``spacing`` before they are fed to the model. If points are
+        already in model units, normally micrometers for microscopy checkpoints, pass
+        unit spacing explicitly.
+        """
+        coords = tuple(np.asarray(frame, dtype=np.float32) for frame in coords)
+        if len(coords) < 1:
+            raise ValueError("coords must contain at least one frame")
+        ndim = coords[0].shape[1] if coords[0].ndim == 2 else 0
+        if ndim not in (2, 3):
+            raise ValueError("Point coordinates must be 2D or 3D")
+        spacing = _resolve_detection_spacing(
+            spacing, ndim, context="DetectionSequence.from_points"
+        )
+        label_frames = []
+        for t, frame_coords in enumerate(coords):
+            if frame_coords.ndim != 2 or frame_coords.shape[1] != ndim:
+                raise ValueError(
+                    f"coords[{t}] must have shape (N, {ndim}), got {frame_coords.shape}"
+                )
+            if labels is None:
+                label_frames.append(np.arange(1, len(frame_coords) + 1, dtype=np.int32))
+            else:
+                frame_labels = np.asarray(labels[t])
+                if frame_labels.ndim != 1 or len(frame_labels) != len(frame_coords):
+                    raise ValueError(
+                        f"labels[{t}] must have shape ({len(frame_coords)},), "
+                        f"got {frame_labels.shape}"
+                    )
+                if len(np.unique(frame_labels)) != len(frame_labels):
+                    raise ValueError(f"labels[{t}] must be unique within the frame")
+                label_frames.append(frame_labels.astype(np.int32, copy=False))
+        source_coords = np.concatenate(coords) if coords else np.zeros((0, ndim))
+        model_coords = apply_spatial_spacing(source_coords, spacing)
+        timepoints = np.concatenate(
+            [np.full(len(frame), t, dtype=np.int64) for t, frame in enumerate(coords)]
+        )
+        flat_labels = np.concatenate(label_frames)
+        feature_dict: OrderedDict[str, np.ndarray] = OrderedDict()
+        if features is not None:
+            if isinstance(features, dict):
+                for name, values in features.items():
+                    feature_dict[name] = np.asarray(values, dtype=np.float32)
+            else:
+                feature_dict[wrfeat.FEATURE_CUSTOM] = np.concatenate(
+                    [np.asarray(values, dtype=np.float32) for values in features]
+                )
+        return cls(
+            name=name,
+            n_frames=len(coords),
+            coords=model_coords,
+            labels=flat_labels,
+            timepoints=timepoints,
+            features=feature_dict,
+            source_coords=source_coords,
+            spacing=spacing,
+        )
+
+    @classmethod
+    def from_df(
+        cls,
+        df: pd.DataFrame,
+        *,
+        name: str = "detections",
+        coord_columns: Sequence[str] = ("z", "y", "x"),
+        time_column: str = "t",
+        label_column: str | None = None,
+        feature_columns: Sequence[str] | None = None,
+        spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    ) -> DetectionSequence:
+        """Build detections from a point-detection table.
+
+        Coordinate columns are interpreted as source pixel/voxel coordinates and are
+        multiplied by ``spacing`` before tracking. If the table already stores model
+        units, normally micrometers for microscopy checkpoints, pass unit spacing
+        explicitly.
+        """
+        ndim = len(tuple(coord_columns))
+        time_column, coord_columns = _resolve_point_detection_columns(
+            df, time_column=time_column, coord_columns=coord_columns, ndim=ndim
+        )
+        feature_columns = _resolve_point_feature_columns(
+            df, feature_columns, excluded=(time_column, *coord_columns)
+        )
+        coords, source_coords, timepoints, features = _point_detection_arrays(
+            df,
+            spacing=spacing,
+            coord_columns=coord_columns,
+            time_column=time_column,
+            feature_columns=feature_columns,
+        )
+        order = np.argsort(df[time_column].to_numpy(dtype=np.int64), kind="stable")
+        if label_column is None:
+            labels = np.empty(len(coords), dtype=np.int32)
+            for time in np.unique(timepoints):
+                idx = np.flatnonzero(timepoints == time)
+                labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
+        else:
+            if label_column not in df:
+                raise ValueError(f"Point detections are missing column {label_column!r}")
+            labels = df[label_column].to_numpy(dtype=np.int32)[order]
+        n_frames = int(timepoints.max()) + 1 if len(timepoints) else 0
+        return cls(
+            name=name,
+            n_frames=n_frames,
+            coords=coords,
+            labels=labels,
+            timepoints=timepoints,
+            features=features,
+            source_coords=source_coords,
+            spacing=_resolve_detection_spacing(
+                spacing, ndim, context="DetectionSequence.from_df"
+            ),
+        )
+
+    @classmethod
+    def from_csv(cls, path: str | Path, **kwargs) -> DetectionSequence:
+        """Build detections from a CSV point table."""
+        path = Path(path).expanduser()
+        return cls.from_df(pd.read_csv(path), name=kwargs.pop("name", path.stem), **kwargs)
+
+    def to_wrfeatures(self) -> list[wrfeat.WRFeatures]:
+        """Return one ``WRFeatures`` object per frame."""
+        frames = []
+        for t in range(self.n_frames):
+            idx = np.flatnonzero(self.timepoints == t)
+            frames.append(
+                wrfeat.WRFeatures(
+                    coords=self.coords[idx],
+                    labels=self.labels[idx],
+                    timepoints=self.timepoints[idx].astype(np.int32, copy=False),
+                    features=OrderedDict(
+                        (name, values[idx]) for name, values in self.features.items()
+                    ),
+                )
+            )
+        return frames
 
     def __reduce__(self):
         return (
@@ -174,13 +473,197 @@ class DetectionSet:
                 self.labels,
                 self.timepoints,
                 self.features,
-                self.lineage_index,
                 self.masks,
+                self.images,
                 self.source_coords,
                 self.spacing,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DetectionSupervision:
+    """Ground-truth alignment for one :class:`DetectionSequence`.
+
+    A :class:`LineageGraph` describes the GT lineage in the abstract, but the
+    model is trained on concrete detection streams (GT masks, predicted masks,
+    point proposals, ...). This class is the bridge: for each detection in one
+    stream it records which GT tracklet that detection corresponds to, so the
+    per-tracklet ``lineage_relation`` can be projected onto detection pairs.
+
+    Every array here is per-detection, length M = number of detections in that
+    stream, aligned one-to-one with them. A stream with no GT (pure inference)
+    has no ``DetectionSupervision``.
+
+    Attributes:
+        lineage_index: (M,) for each detection, the GT tracklet it matches, given
+            as an index into the tracklet dimension of
+            :attr:`LineageGraph.lineage_relation`. ``-1`` means the detection has
+            no GT match (e.g. a predicted object with no annotated counterpart)
+            and is excluded from the association target. Many detections of the
+            same cell across frames share one ``lineage_index``. This is the only
+            field the training target strictly requires.
+        matched_gt: (M,) ``True`` where the detection was matched to a GT object.
+            Redundant: equal to ``lineage_index >= 0``. ``None`` if unused.
+        gt_predecessor_set_available: (M,) ``True`` where the complete set of
+            incoming GT links is known for that detection. ``False`` at annotation
+            boundaries, e.g. a track's first annotated frame under sparse GT,
+            where a link just outside the annotated span cannot be ruled out.
+            Lets those pairs be masked from the loss rather than scored as
+            "no link". ``None`` if unused.
+        gt_successor_set_available: (M,) the same for outgoing GT links (e.g.
+            ``False`` at a track's last annotated frame). ``None`` if unused.
+    """
+
+    lineage_index: np.ndarray
+    matched_gt: np.ndarray | None = None
+    gt_predecessor_set_available: np.ndarray | None = None
+    gt_successor_set_available: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        lineage_index = _immutable_array(self.lineage_index, ndim=1)
+        if np.any(lineage_index < -1):
+            raise ValueError("lineage_index may only use -1 for unmatched detections")
+        object.__setattr__(self, "lineage_index", lineage_index)
+        n = len(lineage_index)
+        for field in (
+            "matched_gt",
+            "gt_predecessor_set_available",
+            "gt_successor_set_available",
+        ):
+            values = getattr(self, field)
+            if values is None:
+                continue
+            array = _immutable_array(values, ndim=1).astype(bool)
+            if len(array) != n:
+                raise ValueError(f"{field} must be aligned with lineage_index")
+            array.setflags(write=False)
+            object.__setattr__(self, field, array)
+
+    def __len__(self) -> int:
+        return len(self.lineage_index)
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.lineage_index,
                 self.matched_gt,
                 self.gt_predecessor_set_available,
                 self.gt_successor_set_available,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LineageGraph:
+    """Ground-truth cell lineage for one sequence, shared by its detection streams.
+
+    In cell tracking, objects divide over time: a mother cell splits into two
+    daughters, each of which may split again. A *lineage* is the whole family
+    tree descending from one founder cell. Trackastra learns to associate
+    detections that belong to the same lineage, so this class holds the GT that
+    supervision is built from.
+
+    Terminology used throughout:
+        - detection: one segmented object in one frame.
+        - tracklet: one cell's chain of detections across consecutive frames,
+          from when it appears until it divides, dies, or leaves.
+        - lineage: the whole family tree of tracklets connected by divisions
+          (a founder cell, its daughters, granddaughters, ...).
+
+    This is a *tracklet-collapsed* view of the source graph, not the raw GT
+    tracking graph. The loaders (``from_ctc`` / ``from_geff``) start from an
+    explicit node-to-node graph, cut it into linear tracklets at divisions, and
+    keep only the summary below. The explicit "which detection links to which"
+    edges are NOT stored here; within a tracklet they are implicit (consecutive
+    ``timepoints`` of the same tracklet form a chain) and at divisions they are
+    recoverable from ``lineage_parents``. Evaluation re-loads the full edge graph
+    from the source files rather than from this object.
+
+    The arrays come at two different granularities; do not mix them.
+
+    Per-tracklet arrays (size T = number of tracklets) hold the actual lineage
+    topology and are the only part the training target uses. A detection reaches
+    them via a tracklet index (``lineage_index`` in
+    :class:`DetectionSupervision`), not by row position:
+        lineage_relation: (T, T) symmetric bool. ``lineage_relation[i, j]`` is
+            ``True`` iff tracklets i and j belong to the same lineage tree
+            (ancestor/descendant across any number of divisions, plus the
+            diagonal). This is the "same cell or relatives" association target.
+        lineage_parents: (T,) parent tracklet index of each tracklet, or ``-1``
+            for a founder with no parent. Two tracklets sharing a parent are the
+            daughters of one division. This is the only record of division
+            structure; note the current training loss does not consume it yet.
+
+    Per-detection arrays (length N = number of GT detections, all row-aligned)
+    are a self-contained snapshot of the GT detections. They exist so GT can be
+    matched to a detection stream and traced back / visualized; the
+    training/inference path does not read them:
+        coords: (N, ndim) object centroids, scaled by ``spacing``.
+        source_coords: (N, ndim) the same centroids in raw pixel units, before
+            ``spacing`` is applied. ``None`` if not provided.
+        timepoints: (N,) frame index of each detection.
+        node_ids: (N,) a stable identifier per detection (e.g. a ``(t, label)``
+            pair or a source graph node id) to trace it back to its origin.
+
+    Attributes:
+        spacing: physical pixel spacing per spatial axis, or ``None`` for unit
+            spacing. Only applied at construction to produce ``coords`` from
+            ``source_coords``; nothing reads it afterward (it is recoverable as
+            ``coords / source_coords``), so it is retained purely as provenance.
+    """
+
+    coords: np.ndarray
+    timepoints: np.ndarray
+    node_ids: np.ndarray
+    lineage_relation: np.ndarray
+    lineage_parents: np.ndarray
+    spacing: tuple[float, ...] | None = None
+    source_coords: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        coords = _immutable_array(self.coords, ndim=2)
+        timepoints = _immutable_array(self.timepoints, ndim=1)
+        node_ids = _immutable_array(self.node_ids, ndim=1)
+        if len(coords) != len(timepoints) or len(coords) != len(node_ids):
+            raise ValueError("coords, timepoints, and node_ids must be aligned")
+        relation = _immutable_array(self.lineage_relation, ndim=2).astype(bool)
+        parents = _immutable_array(self.lineage_parents, ndim=1)
+        if relation.shape[0] != relation.shape[1] or len(parents) != len(relation):
+            raise ValueError("Lineage arrays must describe the same tracklets")
+        if not np.array_equal(relation, relation.T):
+            raise ValueError("lineage_relation must be symmetric")
+        if len(relation) and not np.all(np.diag(relation)):
+            raise ValueError("Each tracklet must be related to itself")
+        relation.setflags(write=False)
+        parents.setflags(write=False)
+        object.__setattr__(self, "coords", coords)
+        object.__setattr__(self, "timepoints", timepoints)
+        object.__setattr__(self, "node_ids", node_ids)
+        object.__setattr__(self, "lineage_relation", relation)
+        object.__setattr__(self, "lineage_parents", parents)
+        if self.spacing is not None:
+            object.__setattr__(
+                self, "spacing", validate_spatial_spacing(self.spacing, coords.shape[1])
+            )
+        if self.source_coords is not None:
+            source_coords = _immutable_array(self.source_coords, ndim=2)
+            if source_coords.shape != coords.shape:
+                raise ValueError("source_coords must have the same shape as coords")
+            object.__setattr__(self, "source_coords", source_coords)
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.coords,
+                self.timepoints,
+                self.node_ids,
+                self.lineage_relation,
+                self.lineage_parents,
+                self.spacing,
+                self.source_coords,
             ),
         )
 
@@ -191,41 +674,45 @@ class TrackingSequence:
 
     ``detections`` contains one or more detection series for the same movie, for
     example GT masks, predicted masks, point proposals, or alternative detector
-    outputs. Each :class:`DetectionSet` carries flat per-detection coordinates,
-    labels, timepoints, features, and track-index assignments into the shared
-    ``lineage_relation`` / ``lineage_parents`` arrays.
+    outputs. ``supervision`` stores the optional GT alignment for each detection stream.
     """
 
     root: Path
     ndim: int
-    detections: tuple[DetectionSet, ...]
-    lineage_relation: np.ndarray
-    lineage_parents: np.ndarray
+    detections: tuple[DetectionSequence, ...]
+    gt: LineageGraph | None = None
+    supervision: tuple[DetectionSupervision | None, ...] | None = None
     images: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.ndim not in (2, 3):
             raise ValueError("Only 2D and 3D tracking data is supported")
         detections = tuple(self.detections)
-        relation = _immutable_array(self.lineage_relation, ndim=2).astype(bool)
-        parents = _immutable_array(self.lineage_parents, ndim=1)
-        if relation.shape[0] != relation.shape[1] or len(parents) != len(relation):
-            raise ValueError("Lineage arrays must describe the same tracklets")
-        if not np.array_equal(relation, relation.T):
-            raise ValueError("lineage_relation must be symmetric")
-        if len(relation) and not np.all(np.diag(relation)):
-            raise ValueError("Each tracklet must be related to itself")
+        supervision = (
+            (None,) * len(detections)
+            if self.supervision is None
+            else tuple(self.supervision)
+        )
+        if len(supervision) != len(detections):
+            raise ValueError("supervision must align with detections")
         for det in detections:
             if det.coords.shape[1] != self.ndim:
-                raise ValueError("DetectionSet dimensionality does not match sequence")
-            if np.any(det.lineage_index >= len(relation)):
-                raise ValueError("DetectionSet references an unknown lineage index")
-        relation.setflags(write=False)
-        parents.setflags(write=False)
+                raise ValueError("DetectionSequence dimensionality does not match sequence")
+        if self.gt is not None:
+            if self.gt.coords.shape[1] != self.ndim:
+                raise ValueError("LineageGraph dimensionality does not match sequence")
+            for det, sup in zip(detections, supervision):
+                if sup is None:
+                    continue
+                if len(sup) != len(det):
+                    raise ValueError("DetectionSupervision must align with detections")
+                if np.any(sup.lineage_index >= len(self.gt.lineage_relation)):
+                    raise ValueError("DetectionSupervision references an unknown lineage")
+        elif any(sup is not None for sup in supervision):
+            raise ValueError("supervision requires a gt LineageGraph")
         object.__setattr__(self, "root", Path(self.root))
         object.__setattr__(self, "detections", detections)
-        object.__setattr__(self, "lineage_relation", relation)
-        object.__setattr__(self, "lineage_parents", parents)
+        object.__setattr__(self, "supervision", supervision)
         if self.images is not None:
             object.__setattr__(self, "images", _immutable_array(self.images))
 
@@ -236,8 +723,8 @@ class TrackingSequence:
                 self.root,
                 self.ndim,
                 self.detections,
-                self.lineage_relation,
-                self.lineage_parents,
+                self.gt,
+                self.supervision,
                 self.images,
             ),
         )
@@ -537,6 +1024,44 @@ def _lineage_arrays(
     return index, relation, parents
 
 
+def _lineage_graph_from_masks(
+    masks: np.ndarray,
+    lineage_relation: np.ndarray,
+    lineage_parents: np.ndarray,
+    spacing: tuple[float, ...],
+) -> LineageGraph:
+    source_coords = []
+    timepoints = []
+    node_ids = []
+    for t, mask in enumerate(masks):
+        for prop in regionprops(mask):
+            source_coords.append(prop.centroid)
+            timepoints.append(t)
+            node_ids.append((t, int(prop.label)))
+    ndim = masks.ndim - 1
+    if source_coords:
+        source_coords = np.asarray(source_coords, dtype=np.float32)
+        coords = apply_spatial_spacing(source_coords, spacing)
+        timepoints = np.asarray(timepoints, dtype=np.int64)
+        node_id_array = np.empty(len(node_ids), dtype=object)
+        node_id_array[:] = node_ids
+        node_ids = node_id_array
+    else:
+        source_coords = np.zeros((0, ndim), dtype=np.float32)
+        coords = np.zeros((0, ndim), dtype=np.float32)
+        timepoints = np.zeros(0, dtype=np.int64)
+        node_ids = np.zeros(0, dtype=object)
+    return LineageGraph(
+        coords=coords,
+        timepoints=timepoints,
+        node_ids=node_ids,
+        lineage_relation=lineage_relation,
+        lineage_parents=lineage_parents,
+        spacing=spacing,
+        source_coords=source_coords,
+    )
+
+
 def _spacing_from_geff_metadata(
     metadata, coord_columns: Sequence[str]
 ) -> tuple[float, ...]:
@@ -658,36 +1183,28 @@ def _detection_source_name(source: str | Path | pd.DataFrame, index: int) -> str
     return f"detections_{index}"
 
 
-def _build_geff_detection_set(
+def _build_geff_detection_sequence(
     name: str,
     coords: np.ndarray,
     source_coords: np.ndarray,
     timepoints: np.ndarray,
     features,
-    lineage_index: np.ndarray,
-    matched_gt: np.ndarray,
     spacing: tuple[float, ...],
-    gt_predecessor_set_available: np.ndarray | None = None,
-    gt_successor_set_available: np.ndarray | None = None,
-) -> DetectionSet:
+) -> DetectionSequence:
     labels = np.empty(len(coords), dtype=np.int32)
     for time in np.unique(timepoints):
         idx = np.flatnonzero(timepoints == time)
         labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
     n_frames = int(timepoints.max()) + 1 if len(timepoints) else 0
-    return DetectionSet(
+    return DetectionSequence(
         name=name,
         n_frames=n_frames,
         coords=coords,
         labels=labels,
         timepoints=timepoints,
         features=features,
-        lineage_index=lineage_index,
         source_coords=source_coords,
         spacing=spacing,
-        matched_gt=matched_gt,
-        gt_predecessor_set_available=gt_predecessor_set_available,
-        gt_successor_set_available=gt_successor_set_available,
     )
 
 
@@ -729,22 +1246,34 @@ def _tracking_sequence_from_geff_graph(
     nodes = sorted(graph.nodes, key=lambda node: (node_times[node], node))
     if not nodes:
         source_coords = np.zeros((0, ndim), dtype=np.float32)
-        detection_set = _build_geff_detection_set(
+        detection_sequence = _build_geff_detection_sequence(
             name=Path(root).name,
             coords=apply_spatial_spacing(source_coords, spacing),
             source_coords=source_coords,
             timepoints=np.zeros(0, dtype=np.int64),
             features={},
-            lineage_index=np.zeros(0, dtype=np.int64),
-            matched_gt=np.zeros(0, dtype=bool),
             spacing=spacing,
+        )
+        gt = LineageGraph(
+            coords=np.zeros((0, ndim), dtype=np.float32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            node_ids=np.zeros(0, dtype=object),
+            lineage_relation=np.zeros((0, 0), dtype=bool),
+            lineage_parents=np.zeros(0, dtype=np.int64),
+            spacing=spacing,
+            source_coords=np.zeros((0, ndim), dtype=np.float32),
         )
         return sequence_type(
             root=root,
             ndim=ndim,
-            detections=(detection_set,),
-            lineage_relation=np.zeros((0, 0), dtype=bool),
-            lineage_parents=np.zeros(0, dtype=np.int64),
+            detections=(detection_sequence,),
+            gt=gt,
+            supervision=(
+                DetectionSupervision(
+                    lineage_index=np.zeros(0, dtype=np.int64),
+                    matched_gt=np.zeros(0, dtype=bool),
+                ),
+            ),
         )
 
     gt_source_coords = np.asarray([node_coords[node] for node in nodes], dtype=np.float32)
@@ -753,23 +1282,37 @@ def _tracking_sequence_from_geff_graph(
     lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
         graph, node_times
     )
+    gt = LineageGraph(
+        coords=gt_coords,
+        timepoints=gt_timepoints,
+        node_ids=np.asarray(nodes, dtype=object),
+        lineage_relation=lineage_relation,
+        lineage_parents=lineage_parents,
+        spacing=spacing,
+        source_coords=gt_source_coords,
+    )
     gt_predecessor_available, gt_successor_available = _geff_gt_link_set_availability(
         graph, node_times
     )
 
-    detection_sets = []
+    detection_sequences = []
+    supervision = []
     if not detection_sources:
         lineage_index = np.asarray([lineage_map[node] for node in nodes], dtype=np.int64)
-        detection_sets.append(
-            _build_geff_detection_set(
+        detection_sequences.append(
+            _build_geff_detection_sequence(
                 name=Path(root).name,
                 coords=gt_coords,
                 source_coords=gt_source_coords,
                 timepoints=gt_timepoints,
                 features=_geff_node_features(graph, nodes, feature_columns),
+                spacing=spacing,
+            )
+        )
+        supervision.append(
+            DetectionSupervision(
                 lineage_index=lineage_index,
                 matched_gt=np.ones(len(gt_coords), dtype=bool),
-                spacing=spacing,
             )
         )
     else:
@@ -825,16 +1368,20 @@ def _tracking_sequence_from_geff_graph(
             matched_gt = (
                 lineage_index >= 0 if sparse_gt else np.ones(len(coords), dtype=bool)
             )
-            detection_sets.append(
-                _build_geff_detection_set(
+            detection_sequences.append(
+                _build_geff_detection_sequence(
                     name=_detection_source_name(source, index),
                     coords=coords,
                     source_coords=source_coords,
                     timepoints=timepoints,
                     features=features,
+                    spacing=spacing,
+                )
+            )
+            supervision.append(
+                DetectionSupervision(
                     lineage_index=lineage_index,
                     matched_gt=matched_gt,
-                    spacing=spacing,
                     gt_predecessor_set_available=gt_predecessor_set_available,
                     gt_successor_set_available=gt_successor_set_available,
                 )
@@ -843,9 +1390,9 @@ def _tracking_sequence_from_geff_graph(
     return sequence_type(
         root=root,
         ndim=ndim,
-        detections=tuple(detection_sets),
-        lineage_relation=lineage_relation,
-        lineage_parents=lineage_parents,
+        detections=tuple(detection_sequences),
+        gt=gt,
+        supervision=tuple(supervision),
     )
 
 
@@ -889,6 +1436,7 @@ def _resolve_point_feature_columns(
         wrfeat.FEATURE_AREA,
         wrfeat.FEATURE_BORDER_DIST,
         wrfeat.FEATURE_DIAMETER,
+        wrfeat.FEATURE_INERTIA,
         wrfeat.FEATURE_INTENSITY,
     }
     columns = []
@@ -1095,7 +1643,9 @@ def _load_ctc_sequence(
         lineage_relation = np.eye(next_index, dtype=bool)
         lineage_parents = np.full(next_index, -1, dtype=np.int64)
 
+    gt = _lineage_graph_from_masks(gt_masks, lineage_relation, lineage_parents, spacing)
     detections = []
+    supervision = []
     for folder, detection_path in zip(resolved_folders, detection_paths):
         detection_masks = _load_refined_masks(
             detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
@@ -1139,6 +1689,15 @@ def _load_ctc_sequence(
             wrfeat.transform_feature_geometry(feature, spacing_matrix)
             for feature in frame_features_raw
         ]
+        detection_sequence = DetectionSequence.from_wrfeatures(
+            frame_features=frame_features,
+            source_features=frame_features_raw,
+            name=str(folder),
+            n_frames=len(frame_features),
+            masks=detection_masks if load_images else None,
+            images=images if load_images else None,
+            spacing=spacing,
+        )
         indices_per_frame = []
         for t, feature in enumerate(frame_features_raw):
             if isolated_indices is None:
@@ -1158,47 +1717,19 @@ def _load_ctc_sequence(
                     dtype=np.int64,
                 )
             indices_per_frame.append(indices)
-        names = tuple(frame_features[0].features)
-        source_coords = np.concatenate(
-            [feature.coords for feature in frame_features_raw]
-        )
-        coords = np.concatenate([feature.coords for feature in frame_features])
-        labels = np.concatenate([feature.labels for feature in frame_features_raw])
-        timepoints = np.concatenate(
-            [
-                np.full(len(feature.labels), t, dtype=np.int64)
-                for t, feature in enumerate(frame_features_raw)
-            ]
-        )
         lineage_index = (
             np.concatenate(indices_per_frame)
             if indices_per_frame
             else np.zeros(0, dtype=np.int64)
         )
-        features = OrderedDict(
-            (name, np.concatenate([feature.features[name] for feature in frame_features]))
-            for name in names
-        )
-        detections.append(
-            DetectionSet(
-                name=str(folder),
-                n_frames=len(frame_features),
-                coords=coords,
-                labels=labels,
-                timepoints=timepoints,
-                features=features,
-                lineage_index=lineage_index,
-                masks=detection_masks if load_images else None,
-                source_coords=source_coords,
-                spacing=spacing,
-            )
-        )
+        detections.append(detection_sequence)
+        supervision.append(DetectionSupervision(lineage_index=lineage_index))
     return sequence_type(
         root=root,
         ndim=ndim,
         detections=tuple(detections),
-        lineage_relation=lineage_relation,
-        lineage_parents=lineage_parents,
+        gt=gt,
+        supervision=tuple(supervision),
         images=images if load_images else None,
     )
 

@@ -88,7 +88,7 @@ def test_track_points_reuses_prediction_and_tracking_path(monkeypatch):
     monkeypatch.setattr(model, "_predict_from_windows", fake_predict)
     monkeypatch.setattr(model, "_track_from_predictions", fake_track)
 
-    graph, details = model.track_points(
+    result = model.track_points(
         coords=[
             np.array([[0.0, 0.0], [2.0, 2.0]], dtype=np.float32),
             np.array([[1.0, 1.0]], dtype=np.float32),
@@ -97,13 +97,14 @@ def test_track_points_reuses_prediction_and_tracking_path(monkeypatch):
         progbar_class=lambda iterable, **_kwargs: iterable,
     )
 
-    assert set(graph.nodes) == {0, 1}
+    assert set(result.graph.nodes) == {0, 1}
     assert seen["spatial_dim"] == 2
     assert len(seen["features"]) == 2
     assert tuple(seen["windows"][0]["features"].shape) == (3, 0)
     assert tuple(seen["windows"][0]["coords"].shape) == (3, 2)
     assert tuple(seen["windows"][0]["labels"].tolist()) == (1, 2, 1)
-    assert set(details) == {"candidate_graph", "predictions"}
+    assert result.candidate_graph is not None
+    assert result.predictions is not None
 
 
 def test_track_points_accepts_explicit_feature_matrix(monkeypatch):
@@ -119,7 +120,7 @@ def test_track_points_accepts_explicit_feature_matrix(monkeypatch):
     )
     model = Trackastra(
         transformer=transformer,
-        inference_config={"features": "none"},
+        inference_config={"features": "_custom"},
         device="cpu",
         batch_size=1,
     )
@@ -133,7 +134,7 @@ def test_track_points_accepts_explicit_feature_matrix(monkeypatch):
     monkeypatch.setattr(model, "_predict_from_windows", fake_predict)
     monkeypatch.setattr(model, "_track_from_predictions", lambda *_args, **_kwargs: nx.DiGraph())
 
-    graph = model.track_points(
+    result = model.track_points(
         coords=[
             np.array([[0.0, 0.0]], dtype=np.float32),
             np.array([[1.0, 1.0]], dtype=np.float32),
@@ -145,7 +146,7 @@ def test_track_points_accepts_explicit_feature_matrix(monkeypatch):
         progbar_class=lambda iterable, **_kwargs: iterable,
     )
 
-    assert len(graph) == 0
+    assert len(result.graph) == 0
     assert seen["spatial_dim"] == 2
     assert tuple(seen["window_features"].shape) == (2, 1)
     np.testing.assert_allclose(seen["window_features"].numpy(), [[0.25], [0.75]])
@@ -170,7 +171,7 @@ def test_track_points_runs_tiny_point_only_model():
         batch_size=1,
     )
 
-    graph = model.track_points(
+    result = model.track_points(
         coords=[
             np.array([[0.0, 0.0]], dtype=np.float32),
             np.array([[1.0, 1.0]], dtype=np.float32),
@@ -178,9 +179,9 @@ def test_track_points_runs_tiny_point_only_model():
         progbar_class=lambda iterable, **_kwargs: iterable,
     )
 
-    assert set(graph.nodes) == {0, 1}
-    assert graph.nodes[0]["coords"] == (0.0, 0.0)
-    assert graph.nodes[1]["coords"] == (1.0, 1.0)
+    assert set(result.graph.nodes) == {0, 1}
+    assert result.graph.nodes[0]["coords"] == (0.0, 0.0)
+    assert result.graph.nodes[1]["coords"] == (1.0, 1.0)
 
 
 def test_track_points_requires_matching_feature_width():
@@ -196,7 +197,7 @@ def test_track_points_requires_matching_feature_width():
     )
     model = Trackastra(
         transformer=transformer,
-        inference_config={"features": "none"},
+        inference_config={"features": "_custom"},
         device="cpu",
         batch_size=1,
     )
@@ -244,12 +245,13 @@ def test_api(example_data):
 
     track_graph = model._track_from_predictions(predictions)
 
-    track_graph, masks_tracked = model.track(
+    result = model.track_masks(
         imgs,
         masks,
         mode="greedy",
         ilp_config="gt",
     )
+    track_graph, masks_tracked = result.graph, result.masks
 
     # track_graph = model.track_from_disk(
     # imgs_path=...,
@@ -282,11 +284,12 @@ def test_write_to_geff(example_data):
         device="cpu",
     )
 
-    track_graph, masks_tracked = model.track(
+    result = model.track_masks(
         imgs,
         masks,
         mode="greedy",
     )
+    track_graph, masks_tracked = result.graph, result.masks
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         write_to_geff(
@@ -308,7 +311,7 @@ def test_empty_frame():
 
     model = Trackastra.from_pretrained("general_2d", device="cpu")
 
-    model.track(
+    model.track_masks(
         imgs,
         masks,
         mode="greedy",
@@ -322,7 +325,7 @@ def test_empty_window_greedy():
     window_size = model.transformer.config["window"]
     masks[:window_size] = 0
 
-    model.track(
+    model.track_masks(
         imgs,
         masks,
         mode="greedy",
@@ -337,7 +340,7 @@ def test_empty_window_ilp():
     window_size = model.transformer.config["window"]
     masks[:window_size] = 0
 
-    model.track(
+    model.track_masks(
         imgs,
         masks,
         mode="ilp",
@@ -350,7 +353,7 @@ def test_empty_sequence_greedy():
 
     model = Trackastra.from_pretrained("general_2d", device="cpu")
 
-    model.track(
+    model.track_masks(
         imgs,
         masks,
         mode="greedy",
@@ -364,7 +367,7 @@ def test_empty_sequence_ilp():
 
     model = Trackastra.from_pretrained("general_2d", device="cpu")
 
-    model.track(
+    model.track_masks(
         imgs,
         masks,
         mode="ilp",

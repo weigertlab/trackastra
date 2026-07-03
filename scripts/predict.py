@@ -46,6 +46,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-distance", type=int, default=None)
     parser.add_argument(
+        "--spacing",
+        type=float,
+        nargs="+",
+        default=None,
+        help=(
+            "Source-to-model spatial scale, normally voxel size in micrometers. "
+            "Use one value per spatial axis, e.g. 4 1 1 for anisotropic 3D. "
+            "If omitted, unit spacing is assumed."
+        ),
+    )
+    parser.add_argument(
         "--normalize-diameter",
         "--normalize_diameter",
         dest="normalize_diameter",
@@ -238,6 +249,7 @@ def predict_and_evaluate(
     model_name: str,
     mode: str = "greedy",
     max_distance: int | None = None,
+    spacing: tuple[float, ...] | None = None,
     normalize_diameter: float | None = None,
     overwrite: bool = False,
     print_results: bool = True,
@@ -246,7 +258,7 @@ def predict_and_evaluate(
     link_breakdown: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
-    from trackastra.data import load_ctc_images_masks
+    from trackastra.data import DetectionSequence, load_ctc_images_masks
     from trackastra.tracking import graph_to_ctc
 
     rows = []
@@ -255,10 +267,11 @@ def predict_and_evaluate(
         root = Path(root)
         transformer = getattr(model, "transformer", None)
         config = getattr(transformer, "config", {})
+        ndim = int(config.get("coord_dim", 2))
         imgs, masks, image_path, gt_path = load_ctc_images_masks(
             root,
             detection_folder=detection_folder,
-            ndim=int(config.get("coord_dim", 2)),
+            ndim=ndim,
         )
         if root.name == "TRA":
             seq_dir = root.parent
@@ -275,17 +288,31 @@ def predict_and_evaluate(
         output_path = outdir / model_name / name
         _prepare_output(output_path, overwrite)
 
-        track_kwargs = dict(
-            mode=mode,
-            max_distance=max_distance,
+        detections = DetectionSequence.from_masks(
+            imgs,
+            masks,
+            name=name,
+            ndim=ndim,
+            spacing=spacing,
             normalize_imgs=False,
-            normalize_diameter=normalize_diameter,
+            keep_masks=True,
+            keep_images=True,
         )
+        track_kwargs = dict(mode=mode, max_distance=max_distance)
         if error_report:
             track_kwargs["return_details"] = True
-        tracked = model.track(imgs, masks, **track_kwargs)
-        graph, masks, details = tracked if error_report else (*tracked, None)
-        graph_to_ctc(graph, masks, outdir=output_path)
+        result = model.track(
+            detections,
+            normalize_diameter=normalize_diameter,
+            **track_kwargs,
+        )
+        graph = result.graph
+        details = (
+            {"candidate_graph": result.candidate_graph, "predictions": result.predictions}
+            if error_report
+            else None
+        )
+        graph_to_ctc(graph, result.masks, outdir=output_path)
         need_matched = error_report or link_breakdown
         evaluated = evaluate_ctc(gt_path, output_path, return_matched=need_matched)
         values, matched = evaluated if need_matched else (evaluated, None)
@@ -299,7 +326,7 @@ def predict_and_evaluate(
                     details,
                     matched,
                     output_path,
-                    ndim=int(config.get("coord_dim", 2)),
+                    ndim=ndim,
                     mode=mode,
                 )
             except Exception as error:
@@ -357,6 +384,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         model_name=model_name,
         mode=args.mode,
         max_distance=args.max_distance,
+        spacing=tuple(args.spacing) if args.spacing is not None else None,
         normalize_diameter=args.normalize_diameter,
         overwrite=args.overwrite,
         errormovie=args.errormovie,

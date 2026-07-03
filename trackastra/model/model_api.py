@@ -2,6 +2,7 @@ import logging
 import os
 from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -13,12 +14,20 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from ..data import build_windows, get_features, load_tiff_timeseries
+from ..data import (
+    DetectionSequence,
+    build_windows,
+    get_features,
+    load_ctc_images_masks,
+    load_tiff_timeseries,
+)
 from ..data.wrfeat import (
     FEATURE_CUSTOM,
     FEATURE_RECIPES,
     WRFeatures,
+    feature_recipe_keys,
     normalize_to_diameter,
+    transform_feature_geometry,
 )
 from ..tracking import apply_solution_graph_to_masks, build_graph, track_greedy
 from ..utils import normalize
@@ -46,6 +55,17 @@ INFERENCE_CONFIG_KEYS = (
     "pretrained_feats_mode",
     "pretrained_feats_additional_props",
 )
+
+
+@dataclass(frozen=True)
+class TrackResult:
+    """Single return object for all Trackastra inference paths."""
+
+    graph: nx.DiGraph
+    masks: np.ndarray | None
+    candidate_graph: nx.DiGraph | None
+    predictions: dict | None
+    detections: DetectionSequence
 
 
 def _resolve_inference_max_distance(trained: float, requested: float | None) -> float:
@@ -136,7 +156,7 @@ class Trackastra:
         >>>
         >>> # Load pretrained model and track
         >>> model = Trackastra.from_pretrained("general_2d", device="cuda")
-        >>> track_graph = model.track(imgs, masks, mode="greedy")
+        >>> result = model.track_masks(imgs, masks, mode="greedy")
     """
 
     def __init__(
@@ -419,6 +439,77 @@ class Trackastra:
             progbar_class=progbar_class,
         )
 
+    def _extract_detection_windows(
+        self,
+        detections: DetectionSequence,
+        n_workers: int = 0,
+        progbar_class=tqdm,
+        normalize_diameter: float | None = None,
+        batch_size: int | None = None,
+    ) -> tuple[list[WRFeatures], list[dict], int, str]:
+        """Build model windows from a canonical detection sequence."""
+        recipe = self.inference_config["features"]
+        if recipe in FEATURE_RECIPES or recipe == FEATURE_CUSTOM:
+            required = feature_recipe_keys(recipe)
+            missing = [name for name in required if name not in detections.features]
+            if missing:
+                if recipe == FEATURE_CUSTOM:
+                    expected_width = int(self.transformer.config.get("feat_dim", 0))
+                    raise ValueError(
+                        "Point feature width does not match the model: "
+                        f"got 0, expected {expected_width}"
+                    )
+                available = ", ".join(sorted(detections.features)) or "<none>"
+                raise ValueError(
+                    f"Model requires feature {missing[0]!r} for recipe {recipe!r}, "
+                    f"but DetectionSequence only has: {available}."
+                )
+            if recipe == FEATURE_CUSTOM:
+                got_width = int(detections.features[FEATURE_CUSTOM].shape[1])
+                expected_width = int(self.transformer.config.get("feat_dim", 0))
+                if got_width != expected_width:
+                    raise ValueError(
+                        "Point feature width does not match the model: "
+                        f"got {got_width}, expected {expected_width}"
+                    )
+            features = detections.to_wrfeatures()
+            feature_mode = recipe
+        else:
+            if detections.masks is None or detections.images is None:
+                raise ValueError(
+                    f"Feature recipe {recipe!r} requires mask and image data on the "
+                    "DetectionSequence."
+                )
+            self._maybe_setup_pretrained_extractor(
+                detections.images, batch_size=batch_size
+            )
+            features = get_features(
+                detections=detections.masks,
+                imgs=detections.images,
+                features=recipe,
+                feature_extractor=self.feature_extractor,
+                ndim=self.transformer.config["coord_dim"],
+                n_workers=n_workers,
+                progbar_class=progbar_class,
+            )
+            if detections.spacing is not None:
+                matrix = np.diag(detections.spacing).astype(np.float32)
+                features = [transform_feature_geometry(f, matrix) for f in features]
+            feature_mode = "wrfeat"
+
+        if normalize_diameter is None:
+            normalize_diameter = self.inference_config.get("normalize_diameter")
+        features = normalize_to_diameter(features, normalize_diameter)
+        logger.info("Building windows")
+        windows = build_windows(
+            features,
+            window_size=self.transformer.config["window"],
+            progbar_class=progbar_class,
+            as_torch=True,
+            feature_mode=feature_mode,
+        )
+        return features, windows, detections.dim, feature_mode
+
     def _extract_point_windows(
         self,
         coords: Sequence[np.ndarray],
@@ -544,6 +635,7 @@ class Trackastra:
         self,
         coords: Sequence[np.ndarray],
         features: Sequence[np.ndarray] | None = None,
+        spacing: tuple[float, ...] | None = None,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         labels: Sequence[np.ndarray] | None = None,
         return_details: bool = False,
@@ -551,38 +643,85 @@ class Trackastra:
         batch_size: int | None = None,
         progbar_class=tqdm,
         **kwargs,
-    ) -> nx.DiGraph | tuple[nx.DiGraph, dict]:
-        """Track point detections whose coordinates are already in model space.
+    ) -> TrackResult:
+        """Track point detections.
+
+        Coordinates are interpreted as source pixel/voxel coordinates. They are
+        converted to model-space physical coordinates by multiplying with ``spacing``.
+        For microscopy models, model units should normally be micrometers. If the input
+        points are already in model units, pass unit spacing explicitly, e.g.
+        ``spacing=(1, 1, 1)`` for 3D.
 
         Args:
             coords: Per-frame coordinate arrays with shape ``(N_t, ndim)``.
-                Coordinates must already be scaled into the isotropic/model-space
-                units expected by the checkpoint.
+                Coordinates are source pixel/voxel coordinates unless already converted
+                and paired with unit spacing.
             features: Optional per-frame scalar feature arrays with shape
                 ``(N_t, F)``. If omitted, the model must have ``feat_dim=0``.
+            spacing: Source-to-model coordinate scale, one value per spatial axis.
+                Usually this is voxel size in micrometers. If None, unit spacing is
+                assumed; 3D inputs warn because anisotropic voxel spacing is common.
             mode: Tracking mode, one of ``"greedy_nodiv"``, ``"greedy"``, or
                 ``"ilp"``.
             labels: Optional unique per-frame labels. Defaults to ``1..N_t``.
-            return_details: If True, return diagnostics with candidate graph and
-                raw predictions.
+            return_details: If True, include candidate graph and raw predictions.
             edge_threshold: Minimum association score used when collecting edges
                 from window predictions.
             batch_size: Batch size for prediction. If None, uses the model default.
             progbar_class: Progress bar class to use.
             **kwargs: Additional arguments passed to the tracking algorithm.
-
-        Returns:
-            ``nx.DiGraph`` containing the point tracking result, and optionally a
-            diagnostics dict with ``candidate_graph`` and ``predictions``.
         """
-        point_features, windows, ndim = self._extract_point_windows(
+        detections = DetectionSequence.from_points(
             coords,
             features=features,
             labels=labels,
+            spacing=spacing,
+        )
+        return self.track(
+            detections,
+            mode=mode,
+            return_details=return_details,
+            edge_threshold=edge_threshold,
+            batch_size=batch_size,
             progbar_class=progbar_class,
+            **kwargs,
+        )
+
+    def track(
+        self,
+        detections: DetectionSequence,
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        progbar_class=tqdm,
+        n_workers: int = 0,
+        batch_size: int | None = None,
+        normalize_diameter: float | None = None,
+        return_details: bool = False,
+        edge_threshold: float = 0.05,
+        **kwargs,
+    ) -> TrackResult:
+        """Track one canonical detection sequence.
+
+        The model's ``inference_config`` selects the feature recipe to stack from the
+        detection sequence. ``detections.coords`` must already be in model-space
+        physical units, normally micrometers for microscopy checkpoints. Mask, point,
+        CSV, and CTC helpers construct this object by multiplying source pixel/voxel
+        coordinates by ``spacing`` and then delegate here.
+        """
+        if not isinstance(detections, DetectionSequence):
+            raise TypeError(
+                "Trackastra.track expects a DetectionSequence. Use track_masks, "
+                "track_points, track_csv, track_ctc, or construct DetectionSequence "
+                "explicitly."
+            )
+        features, windows, ndim, _feature_mode = self._extract_detection_windows(
+            detections,
+            n_workers=n_workers,
+            progbar_class=progbar_class,
+            normalize_diameter=normalize_diameter,
+            batch_size=batch_size,
         )
         predictions = self._predict_from_windows(
-            point_features,
+            features,
             windows,
             spatial_dim=ndim,
             edge_threshold=edge_threshold,
@@ -590,20 +729,31 @@ class Trackastra:
             progbar_class=progbar_class,
         )
 
+        candidate_graph = None
         if return_details:
             track_graph, candidate_graph = self._track_from_predictions(
                 predictions, mode=mode, return_candidate=True, **kwargs
             )
-            return track_graph, {
-                "candidate_graph": candidate_graph,
-                "predictions": predictions,
-            }
-        return self._track_from_predictions(predictions, mode=mode, **kwargs)
+        else:
+            track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
+        masks_tracked = (
+            apply_solution_graph_to_masks(track_graph, detections.masks)
+            if detections.masks is not None
+            else None
+        )
+        return TrackResult(
+            graph=track_graph,
+            masks=masks_tracked,
+            candidate_graph=candidate_graph,
+            predictions=predictions if return_details else None,
+            detections=detections,
+        )
 
-    def track(
+    def track_masks(
         self,
-        imgs: np.ndarray | da.Array,
+        imgs: np.ndarray | da.Array | None,
         masks: np.ndarray | da.Array,
+        spacing: tuple[float, ...] | None = None,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         normalize_imgs: bool = True,
         progbar_class=tqdm,
@@ -611,65 +761,82 @@ class Trackastra:
         batch_size: int | None = None,
         normalize_diameter: float | None = None,
         return_details: bool = False,
+        edge_threshold: float = 0.05,
         **kwargs,
-    ) -> tuple[nx.DiGraph, np.ndarray] | tuple[nx.DiGraph, np.ndarray, dict]:
-        """Track objects across time frames.
+    ) -> TrackResult:
+        """Track mask detections by first constructing a ``DetectionSequence``.
 
-        This method links segmented objects across time frames using the specified
-        tracking mode. No hyperparameters need to be chosen beyond the tracking mode.
-
-        Args:
-            imgs: Input images of shape (T,(Z),Y,X) (numpy or dask array)
-            masks: Instance segmentation masks of shape (T,(Z),Y,X).
-            mode: Tracking mode:
-                - "greedy_nodiv": Fast greedy linking without division
-                - "greedy": Fast greedy linking with division
-                - "ilp": Integer Linear Programming based linking (more accurate but slower)
-            progbar_class: Progress bar class to use.
-            n_workers: Number of worker processes for feature extraction.
-            normalize_imgs: Whether to normalize the images.
-            batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
-            normalize_diameter: If set, scale spatial WR features so the movie's
-                median equivalent diameter equals this value. If None, uses the value
-                stored in the model's inference config when present.
-            return_details: If True, additionally return a diagnostics dict with the
-                pre-solution ``candidate_graph`` (all scored edges with weights) and
-                the raw ``predictions`` (nodes + edge weights). Cheap: reuses the work
-                already done, nothing is recomputed.
-            **kwargs: Additional arguments passed to tracking algorithm.
-
-        Returns:
-            nx.DiGraph containing the tracking results.
-            np.ndarray of tracked masks of shape (T,(Z),Y,X).
-            (only if ``return_details``) dict with keys ``candidate_graph`` and
-            ``predictions``.
+        Mask centroids and geometry are measured in pixel/voxel coordinates and then
+        multiplied by ``spacing`` before model inference. Pass voxel size in model
+        units, normally micrometers. If ``spacing`` is omitted, unit spacing is assumed;
+        3D data logs a warning.
         """
-        # Pretrained-feature setup (no-op for wrfeat) now happens inside
-        # _extract_features_windows, shared with the cached validation path.
-        predictions = self._predict(
+        detections = DetectionSequence.from_masks(
             imgs,
             masks,
             normalize_imgs=normalize_imgs,
+            ndim=int(self.transformer.config["coord_dim"]),
+            spacing=spacing,
+            n_workers=n_workers,
+            progbar_class=progbar_class,
+            keep_masks=True,
+            keep_images=True,
+        )
+        return self.track(
+            detections,
+            mode=mode,
             progbar_class=progbar_class,
             n_workers=n_workers,
-            batch_size=batch_size or self.batch_size,
+            batch_size=batch_size,
             normalize_diameter=normalize_diameter,
+            return_details=return_details,
+            edge_threshold=edge_threshold,
+            **kwargs,
         )
 
-        if return_details:
-            track_graph, candidate_graph = self._track_from_predictions(
-                predictions, mode=mode, return_candidate=True, **kwargs
-            )
-        else:
-            track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
-        masks_tracked = apply_solution_graph_to_masks(track_graph, masks)
-        if return_details:
-            details = {
-                "candidate_graph": candidate_graph,
-                "predictions": predictions,
-            }
-            return track_graph, masks_tracked, details
-        return track_graph, masks_tracked
+    def track_csv(
+        self,
+        path: str | Path,
+        spacing: tuple[float, ...] | None = None,
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        **kwargs,
+    ) -> TrackResult:
+        """Track point detections from a CSV file.
+
+        CSV coordinate columns are interpreted as source pixel/voxel coordinates and
+        multiplied by ``spacing`` before model inference. If the CSV already stores
+        model units, normally micrometers, pass unit spacing explicitly.
+        """
+        detections = DetectionSequence.from_csv(path, spacing=spacing)
+        return self.track(detections, mode=mode, **kwargs)
+
+    def track_ctc(
+        self,
+        path: str | Path,
+        detection_folder: str = "SEG",
+        spacing: tuple[float, ...] | None = None,
+        mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
+        **kwargs,
+    ) -> TrackResult:
+        """Track a CTC-like sequence from disk.
+
+        CTC mask coordinates are pixel/voxel coordinates. They are multiplied by
+        ``spacing`` before model inference. Pass voxel size in model units, normally
+        micrometers; omitting spacing assumes unit spacing and warns for 3D.
+        """
+        imgs, masks, _image_path, _gt_path = load_ctc_images_masks(
+            path,
+            detection_folder=detection_folder,
+            ndim=int(self.transformer.config["coord_dim"]),
+        )
+        return self.track_masks(
+            imgs,
+            masks,
+            spacing=spacing,
+            mode=mode,
+            normalize_imgs=False,
+            **kwargs,
+        )
 
     def track_from_disk(
         self,
@@ -678,7 +845,7 @@ class Trackastra:
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         normalize_imgs: bool = True,
         **kwargs,
-    ) -> tuple[nx.DiGraph, np.ndarray]:
+    ) -> TrackResult:
         """Track objects directly from image and mask files on disk.
 
         This method supports both single tiff files and directories
@@ -698,7 +865,7 @@ class Trackastra:
             **kwargs: Additional arguments passed to tracking algorithm.
 
         Returns:
-            Tuple of (nx.DiGraph, tracked masks).
+            Tracking result object.
         """
         if not imgs_path.exists():
             raise FileNotFoundError(f"{imgs_path=} does not exist.")
@@ -740,4 +907,10 @@ class Trackastra:
                 f"Img shape {imgs.shape} and mask shape {masks.shape} do not match."
             )
 
-        return self.track(imgs, masks, mode, normalize_imgs=normalize_imgs, **kwargs)
+        return self.track_masks(
+            imgs,
+            masks,
+            mode=mode,
+            normalize_imgs=normalize_imgs,
+            **kwargs,
+        )

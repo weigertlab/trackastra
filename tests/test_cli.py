@@ -278,15 +278,27 @@ def test_predict_run_writes_and_evaluates_ctc_output(
             calls["model"] = (name, device)
             return cls()
 
-        def track(self, images, masks, **kwargs):
-            calls["track"] = (images, masks, kwargs)
-            return "graph", "masks"
+        def track(self, detections, **kwargs):
+            calls["track"] = (detections, kwargs)
+            return SimpleNamespace(
+                graph="graph",
+                masks="masks",
+                candidate_graph=None,
+                predictions=None,
+            )
+
+    class FakeDetectionSequence:
+        @classmethod
+        def from_masks(cls, images, masks, **kwargs):
+            calls["detections"] = (images, masks, kwargs)
+            return "detections"
 
     def fake_graph_to_ctc(graph, masks, outdir):
         calls["ctc"] = (graph, masks, outdir)
         (outdir / "man_track.txt").write_text("1 0 0 0\n")
 
     monkeypatch.setattr("trackastra.model.Trackastra", FakeTrackastra)
+    monkeypatch.setattr("trackastra.data.DetectionSequence", FakeDetectionSequence)
     monkeypatch.setattr(
         "trackastra.data.load_ctc_images_masks",
         lambda root, detection_folder, ndim: (
@@ -316,6 +328,8 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         overwrite=False,
         mode="greedy",
         max_distance=42,
+        spacing=None,
+        normalize_diameter=None,
         errormovie=False,
     )
 
@@ -326,12 +340,23 @@ def test_predict_run_writes_and_evaluates_ctc_output(
     assert result["TRA"].tolist() == [0.5, 0.5]
     assert result["AOGM"].tolist() == [4.0, 4.0]
     assert calls["model"] == ("trained_model", "cpu")
-    assert calls["track"][0:2] == ("images", "refined masks")
-    assert calls["track"][2] == {
-        "mode": "greedy",
-        "max_distance": 42,
+    assert calls["detections"][0:2] == ("images", "refined masks")
+    assert calls["detections"][2] == {
+        "name": "movie",
+        "ndim": 2,
+        "spacing": None,
         "normalize_imgs": False,
+        "keep_masks": True,
+        "keep_images": True,
     }
+    assert calls["track"] == (
+        "detections",
+        {
+            "mode": "greedy",
+            "max_distance": 42,
+            "normalize_diameter": None,
+        },
+    )
     model_output = tmp_path / "results" / "trained_model"
     assert calls["ctc"][2] == model_output / "movie"
     per_movie = predict_script.pd.read_csv(model_output / "movie" / "metrics.csv")

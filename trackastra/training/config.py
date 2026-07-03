@@ -96,7 +96,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
         "--feature_embed_mode",
         choices=("fourier", "mlp"),
         default=None,
-        help="feature encoder; defaults to mlp for wrfeat2 modes and fourier otherwise",
+        help="feature encoder; defaults to fourier for wrfeat and mlp otherwise",
     )
     parser.add_argument("--dropout", type=float, default=0.00)
     parser.add_argument("--num_workers", type=int, default=10)

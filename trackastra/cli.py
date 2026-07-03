@@ -128,7 +128,7 @@ def _track_from_disk(args):
             device=args.device,
         )
 
-    track_graph, masks = model.track_from_disk(
+    result = model.track_from_disk(
         args.imgs,
         args.masks,
         mode=args.mode,
@@ -141,8 +141,8 @@ def _track_from_disk(args):
         outdir = args.output_ctc
         outdir.mkdir(parents=True, exist_ok=True)
         graph_to_ctc(
-            track_graph,
-            masks,
+            result.graph,
+            result.masks,
             outdir=outdir,
         )
 
@@ -150,7 +150,7 @@ def _track_from_disk(args):
         outpath = args.output_edge_table
         outpath.parent.mkdir(parents=True, exist_ok=True)
         graph_to_edge_table(
-            graph=track_graph,
+            graph=result.graph,
             outpath=outpath,
         )
 

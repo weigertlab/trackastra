@@ -12,6 +12,14 @@ from .rope import RotaryPositionalEncoding
 
 logger = logging.getLogger(__name__)
 
+# Dimensionless period dynamic range of the spatial Fourier / RoPE spectra: the
+# shortest resolved period is `cutoff_spatial / _POS_PERIOD_RANGE` and the longest
+# is `cutoff_spatial` (= max_distance). Anchoring the short end to max_distance
+# (instead of a hardcoded 1) makes both spectrum ends scale together with the
+# voxel spacing, so a uniformly rescaled dataset sees an identical `coord * freq`
+# signal. 256 recovers the historical init exactly at max_distance == 256.
+_POS_PERIOD_RANGE = 256.0
+
 
 def _pos_embed_fourier1d_init(
     cutoff: float = 256, n: int = 32, cutoff_start: float = 1
@@ -150,10 +158,14 @@ class RelativePositionalAttention(nn.Module):
             # each part needs to be divisible by 2
             n_split = 2 * (embed_dim // (2 * (coord_dim + 1) * n_head))
 
+            # Time keeps the absolute short-period anchor (1 frame); spatial dims
+            # scale their short period with cutoff_spatial for scale invariance.
             self.rot_pos_enc = RotaryPositionalEncoding(
                 cutoffs=((cutoff_temporal,) + (cutoff_spatial,) * coord_dim),
                 n_pos=(embed_dim // n_head - coord_dim * n_split,)
                 + (n_split,) * coord_dim,
+                cutoffs_start=(1.0,)
+                + (cutoff_spatial / _POS_PERIOD_RANGE,) * coord_dim,
             )
         elif mode == "none":
             pass

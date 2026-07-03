@@ -24,7 +24,12 @@ from trackastra.data.distributed import (
     SequenceInputSpec,
     normalize_sequence_input_specs,
 )
-from trackastra.data.io import DetectionSet, TrackingSequence
+from trackastra.data.io import (
+    DetectionSequence,
+    DetectionSupervision,
+    LineageGraph,
+    TrackingSequence,
+)
 from trackastra.model import ModelConfig, TrackingTransformer
 from trackastra.training import (
     DataSplitConfig,
@@ -93,7 +98,9 @@ def test_wrfeat2_feature_dim_supports_2d_and_3d():
     assert _feature_dim(3, "wrfeat2_no_intensity") == 8
 
 
-def test_wrfeat2_defaults_to_mlp_feature_embedding():
+def test_feature_embedding_default_is_fourier_only_for_wrfeat():
+    assert _resolve_feature_embed_mode("none", None) == "mlp"
+    assert _resolve_feature_embed_mode("intensity", None) == "mlp"
     assert _resolve_feature_embed_mode("wrfeat2", None) == "mlp"
     assert _resolve_feature_embed_mode("wrfeat2_no_intensity", None) == "mlp"
     assert _resolve_feature_embed_mode("wrfeat", None) == "fourier"
@@ -111,21 +118,28 @@ def test_tracking_data_cpu_training_smoke(features, width):
         "inertia_tensor": np.tile(np.eye(2, dtype=np.float32).ravel(), (2, 1)),
         "border_dist": np.zeros((2, 1), np.float32),
     }
-    seg = DetectionSet(
+    seg = DetectionSequence(
         name="TRA",
         n_frames=2,
         coords=np.tile(np.array([[0, 0], [4, 4]], dtype=np.float32), (2, 1)),
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
-        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        gt=LineageGraph(
+            coords=np.zeros((0, 2), dtype=np.float32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            node_ids=np.zeros(0, dtype=object),
+            lineage_relation=np.eye(2, dtype=bool),
+            lineage_parents=np.full(2, -1),
+        ),
+        supervision=(
+            DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),
+        ),
     )
     batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(
@@ -158,21 +172,28 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
         "inertia_tensor": np.tile(np.eye(3, dtype=np.float32).ravel(), (2, 1)),
         "border_dist": np.zeros((2, 1), np.float32),
     }
-    seg = DetectionSet(
+    seg = DetectionSequence(
         name="TRA",
         n_frames=2,
         coords=np.tile(np.array([[0, 0, 0], [4, 4, 4]], dtype=np.float32), (2, 1)),
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features={k: np.tile(v, (2, 1)) for k, v in raw_features.items()},
-        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=3,
         detections=(seg,),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        gt=LineageGraph(
+            coords=np.zeros((0, 3), dtype=np.float32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            node_ids=np.zeros(0, dtype=object),
+            lineage_relation=np.eye(2, dtype=bool),
+            lineage_parents=np.full(2, -1),
+        ),
+        supervision=(
+            DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),
+        ),
     )
     batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(

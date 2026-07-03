@@ -18,6 +18,7 @@ from trackastra.utils import blockwise_causal_norm
 
 from .heads import HeadBilinear, HeadEdgeMLP, HeadEdgeStar, HeadSparseBilinear
 from .model_parts import (
+    _POS_PERIOD_RANGE,
     FeatureMLP,
     FeedForward,
     PositionalEncoding,
@@ -588,9 +589,13 @@ class TrackingTransformer(torch.nn.Module):
 
         self.pos_embed = None
         if not disable_abs_pos:
+            # Time keeps the absolute short-period anchor (1 frame); spatial dims
+            # scale their short period with max_distance for scale invariance.
             self.pos_embed = PositionalEncoding(
                 cutoffs=(window,) + (max_distance,) * coord_dim,
                 n_pos=(pos_embed_per_dim,) * (1 + coord_dim),
+                cutoffs_start=(1.0,)
+                + (max_distance / _POS_PERIOD_RANGE,) * coord_dim,
             )
 
         # self.pos_embed = NoPositionalEncoding(d=pos_embed_per_dim * (1 + coord_dim))

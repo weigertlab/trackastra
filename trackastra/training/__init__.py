@@ -193,9 +193,7 @@ def _resolve_feature_embed_mode(
 ) -> Literal["fourier", "mlp"]:
     if feature_embed_mode is not None:
         return feature_embed_mode
-    if features in ("wrfeat2", "wrfeat2_no_intensity"):
-        return "mlp"
-    return "fourier"
+    return "fourier" if features == "wrfeat" else "mlp"
 
 
 def _resolve_source_format(

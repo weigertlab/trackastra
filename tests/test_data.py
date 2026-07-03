@@ -14,7 +14,34 @@ from trackastra.data.dataset import (
     densify_assoc,
     warn_association_distances,
 )
-from trackastra.data.io import DetectionSet, TrackingSequence
+from trackastra.data.io import (
+    DetectionSequence,
+    DetectionSupervision,
+    LineageGraph,
+    TrackingSequence,
+)
+
+
+def _lineage_graph(relation: np.ndarray, parents: np.ndarray) -> LineageGraph:
+    return LineageGraph(
+        coords=np.zeros((0, 2), dtype=np.float32),
+        timepoints=np.zeros(0, dtype=np.int64),
+        node_ids=np.zeros(0, dtype=object),
+        lineage_relation=relation,
+        lineage_parents=parents,
+    )
+
+
+def _sequence(
+    seg: DetectionSequence, lineage_index: np.ndarray, relation: np.ndarray
+) -> TrackingSequence:
+    return TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg,),
+        gt=_lineage_graph(relation, np.full(len(relation), -1)),
+        supervision=(DetectionSupervision(lineage_index=lineage_index),),
+    )
 
 
 def test_tracking_dataset_default_window_and_features():
@@ -25,22 +52,16 @@ def test_tracking_dataset_default_window_and_features():
 
 
 def test_tracking_dataset_feature_mode_error_lists_available_options():
-    seg = DetectionSet(
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    seg = DetectionSequence(
         name="points",
         n_frames=2,
         coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
         labels=np.array([1, 1]),
         timepoints=np.array([0, 1], dtype=np.int64),
         features={"intensity": np.array([[0.25], [0.75]], dtype=np.float32)},
-        lineage_index=np.array([0, 0], dtype=np.int64),
     )
-    sequence = TrackingSequence(
-        root=Path("synthetic"),
-        ndim=2,
-        detections=(seg,),
-        lineage_relation=np.eye(1, dtype=bool),
-        lineage_parents=np.full(1, -1),
-    )
+    sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
 
     with pytest.raises(ValueError) as exc_info:
         TrackingDataset(sequence, window_size=2, features="wrfeat")
@@ -71,6 +92,24 @@ def test_validate_spatial_spacing_defaults_and_rejects_bad_values():
         validate_spatial_spacing((1, 1), 3)
     with pytest.raises(ValueError, match="positive"):
         validate_spatial_spacing((1, 0), 2)
+
+
+def test_detection_sequence_warns_on_implicit_3d_unit_spacing(caplog):
+    with caplog.at_level("WARNING", logger="trackastra.data.io"):
+        detections = DetectionSequence.from_points(
+            [np.array([[1.0, 2.0, 3.0]], dtype=np.float32)]
+        )
+
+    assert "3D detections without spacing" in caplog.text
+    assert detections.spacing == (1.0, 1.0, 1.0)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="trackastra.data.io"):
+        DetectionSequence.from_points(
+            [np.array([[1.0, 2.0, 3.0]], dtype=np.float32)],
+            spacing=(1, 1, 1),
+        )
+    assert caplog.text == ""
 
 
 def test_detection_dropout_drops_whole_lineages():
@@ -169,24 +208,27 @@ def test_collate_assoc_coo_densifies_to_dense_padding():
 
 
 def test_dataset_and_collate_preserve_matched_gt_vector():
-    seg = DetectionSet(
+    seg = DetectionSequence(
         name="points",
         n_frames=2,
         coords=np.array([[0, 0], [10, 0], [1, 0]], dtype=np.float32),
         labels=np.array([1, 1, 2]),
         timepoints=np.array([0, 1, 1], dtype=np.int64),
         features={"v": np.zeros((3, 1), dtype=np.float32)},
-        lineage_index=np.array([0, -1, 0], dtype=np.int64),
-        matched_gt=np.array([True, False, True]),
-        gt_predecessor_set_available=np.array([False, False, True]),
-        gt_successor_set_available=np.array([True, False, False]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(1, dtype=bool),
-        lineage_parents=np.full(1, -1),
+        gt=_lineage_graph(np.eye(1, dtype=bool), np.full(1, -1)),
+        supervision=(
+            DetectionSupervision(
+                lineage_index=np.array([0, -1, 0], dtype=np.int64),
+                matched_gt=np.array([True, False, True]),
+                gt_predecessor_set_available=np.array([False, False, True]),
+                gt_successor_set_available=np.array([True, False, False]),
+            ),
+        ),
     )
     sample = TrackingDataset(sequence, window_size=2, features="none")[0]
 
@@ -228,22 +270,16 @@ def test_dataset_and_collate_preserve_matched_gt_vector():
 
 
 def test_tracking_dataset_supports_none_and_intensity_features():
-    seg = DetectionSet(
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    seg = DetectionSequence(
         name="points",
         n_frames=2,
         coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
         labels=np.array([1, 1]),
         timepoints=np.array([0, 1], dtype=np.int64),
         features={"intensity": np.array([[0.25], [0.75]], dtype=np.float32)},
-        lineage_index=np.array([0, 0], dtype=np.int64),
     )
-    sequence = TrackingSequence(
-        root=Path("synthetic"),
-        ndim=2,
-        detections=(seg,),
-        lineage_relation=np.eye(1, dtype=bool),
-        lineage_parents=np.full(1, -1),
-    )
+    sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
 
     none_sample = TrackingDataset(sequence, window_size=2, features="none")[0]
     intensity_sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
@@ -258,22 +294,16 @@ def test_tracking_dataset_supports_none_and_intensity_features():
 
 
 def test_tracking_dataset_resolves_canonical_intensity_alias():
-    seg = DetectionSet(
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    seg = DetectionSequence(
         name="points",
         n_frames=2,
         coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
         labels=np.array([1, 1]),
         timepoints=np.array([0, 1], dtype=np.int64),
         features={"intensity_mean": np.array([[0.25], [0.75]], dtype=np.float32)},
-        lineage_index=np.array([0, 0], dtype=np.int64),
     )
-    sequence = TrackingSequence(
-        root=Path("synthetic"),
-        ndim=2,
-        detections=(seg,),
-        lineage_relation=np.eye(1, dtype=bool),
-        lineage_parents=np.full(1, -1),
-    )
+    sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
 
     sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
 
@@ -285,7 +315,7 @@ def test_tracking_dataset_resolves_canonical_intensity_alias():
 def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
     """One detection per frame, all the same tracklet, placed at the given x."""
     n_frames = len(xs)
-    seg = DetectionSet(
+    seg = DetectionSequence(
         name="TRA",
         n_frames=n_frames,
         coords=np.array([[x, 0.0] for x in xs], dtype=np.float32),
@@ -295,15 +325,8 @@ def _single_lineage_sequence(xs: tuple[float, ...]) -> TrackingSequence:
             "equivalent_diameter_area": np.full((n_frames, 1), 2, dtype=np.float32),
             "v": np.zeros((n_frames, 1), dtype=np.float32),
         },
-        lineage_index=np.zeros(n_frames, dtype=np.int64),
     )
-    return TrackingSequence(
-        root=Path("synthetic"),
-        ndim=2,
-        detections=(seg,),
-        lineage_relation=np.eye(1, dtype=bool),
-        lineage_parents=np.full(1, -1),
-    )
+    return _sequence(seg, np.zeros(n_frames, dtype=np.int64), np.eye(1, dtype=bool))
 
 
 def test_association_distances_deduplicate_overlapping_windows():

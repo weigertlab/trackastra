@@ -7,9 +7,14 @@ import torch
 from torch import nn
 
 
-def _pos_embed_fourier1d_init(cutoff: float = 128, n: int = 32):
-    # Maximum initial frequency is 1
-    return torch.exp(torch.linspace(0, -math.log(cutoff), n)).unsqueeze(0).unsqueeze(0)
+def _pos_embed_fourier1d_init(cutoff: float = 128, n: int = 32, cutoff_start: float = 1.0):
+    # Frequencies span periods [cutoff_start, cutoff]; the maximum initial
+    # frequency is 1 / cutoff_start (=1 for the default cutoff_start=1).
+    return (
+        torch.exp(torch.linspace(-math.log(cutoff_start), -math.log(cutoff), n))
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
 
 
 # https://github.com/cvg/LightGlue/blob/b1cd942fc4a3a824b6aedff059d84f5c31c297f6/lightglue/lightglue.py#L51
@@ -23,7 +28,12 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 class RotaryPositionalEncoding(nn.Module):
-    def __init__(self, cutoffs: tuple[float] = (256,), n_pos: tuple[int] = (32,)):
+    def __init__(
+        self,
+        cutoffs: tuple[float] = (256,),
+        n_pos: tuple[int] = (32,),
+        cutoffs_start: tuple[float] | None = None,
+    ):
         """Rotary positional encoding with given cutoff and number of frequencies for each dimension.
         number of dimension is inferred from the length of cutoffs and n_pos.
 
@@ -34,12 +44,15 @@ class RotaryPositionalEncoding(nn.Module):
         assert len(cutoffs) == len(n_pos)
         if not all(n % 2 == 0 for n in n_pos):
             raise ValueError("n_pos must be even")
+        if cutoffs_start is None:
+            cutoffs_start = (1.0,) * len(cutoffs)
+        assert len(cutoffs_start) == len(cutoffs)
 
         self._n_dim = len(cutoffs)
         # theta in RoFormer https://arxiv.org/pdf/2104.09864.pdf
         self.freqs = nn.ParameterList([
-            nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2))
-            for cutoff, n in zip(cutoffs, n_pos)
+            nn.Parameter(_pos_embed_fourier1d_init(cutoff, n // 2, cutoff_start))
+            for cutoff, n, cutoff_start in zip(cutoffs, n_pos, cutoffs_start)
         ])
 
     def get_co_si(self, coords: torch.Tensor):

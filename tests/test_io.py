@@ -9,12 +9,28 @@ import pytest
 import torch
 from tifffile import imread, imwrite
 from trackastra.data.dataset import TrackingDataset
-from trackastra.data.io import DetectionSet, TrackingSequence, load_ctc_images_masks
+from trackastra.data.io import (
+    DetectionSequence,
+    DetectionSupervision,
+    LineageGraph,
+    TrackingSequence,
+    load_ctc_images_masks,
+)
 from trackastra.utils import normalize
 
 
-def _detection_set(frames, name="TRA"):
-    """Build a flat DetectionSet from ``(timepoint, lineage_index)`` frame specs."""
+def _lineage_graph(relation: np.ndarray, parents: np.ndarray) -> LineageGraph:
+    return LineageGraph(
+        coords=np.zeros((0, 2), dtype=np.float32),
+        timepoints=np.zeros(0, dtype=np.int64),
+        node_ids=np.zeros(0, dtype=object),
+        lineage_relation=relation,
+        lineage_parents=parents,
+    )
+
+
+def _detection_sequence(frames, name="TRA"):
+    """Build flat detections and supervision from ``(timepoint, lineage_index)`` specs."""
     coords, labels, timepoints, lineage_index = [], [], [], []
     feats = {
         "equivalent_diameter_area": [],
@@ -34,15 +50,14 @@ def _detection_set(frames, name="TRA"):
             np.tile(np.eye(2, dtype=np.float32).ravel(), (n, 1))
         )
         feats["border_dist"].append(np.zeros((n, 1), np.float32))
-    return DetectionSet(
+    return DetectionSequence(
         name=name,
         n_frames=max(t for t, _ in frames) + 1,
         coords=np.concatenate(coords),
         labels=np.concatenate(labels),
         timepoints=np.concatenate(timepoints),
         features={k: np.concatenate(v) for k, v in feats.items()},
-        lineage_index=np.concatenate(lineage_index),
-    )
+    ), DetectionSupervision(lineage_index=np.concatenate(lineage_index))
 
 
 def test_tracking_sequence_from_geff_gt_nodes(monkeypatch, tmp_path):
@@ -84,9 +99,9 @@ def test_tracking_sequence_from_geff_gt_nodes(monkeypatch, tmp_path):
     )
     assert seg.spacing == (4.0, 1.0, 1.0)
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3, 0.4])
-    assert seg.lineage_index.tolist() == [0, 0, 1, 2]
-    assert sequence.lineage_parents.tolist() == [-1, 0, 0]
-    assert sequence.lineage_relation.tolist() == [
+    assert sequence.supervision[0].lineage_index.tolist() == [0, 0, 1, 2]
+    assert sequence.gt.lineage_parents.tolist() == [-1, 0, 0]
+    assert sequence.gt.lineage_relation.tolist() == [
         [True, True, True],
         [True, True, False],
         [True, False, True],
@@ -167,10 +182,11 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
     assert seg.spacing == (4.0, 1.0, 1.0)
     assert seg.timepoints.tolist() == [0, 1, 1]
     assert seg.labels.tolist() == [1, 1, 2]
-    assert seg.lineage_index.tolist() == [0, 0, -1]
-    assert seg.matched_gt.tolist() == [True, True, True]
-    assert seg.gt_predecessor_set_available.tolist() == [True, True, True]
-    assert seg.gt_successor_set_available.tolist() == [True, True, True]
+    sup = sequence.supervision[0]
+    assert sup.lineage_index.tolist() == [0, 0, -1]
+    assert sup.matched_gt.tolist() == [True, True, True]
+    assert sup.gt_predecessor_set_available.tolist() == [True, True, True]
+    assert sup.gt_successor_set_available.tolist() == [True, True, True]
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3])
     sample = TrackingDataset(sequence, window_size=2, features="intensity")[0]
     np.testing.assert_allclose(sample["features"].numpy(), [[0.1], [0.2], [0.3]])
@@ -182,14 +198,15 @@ def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path)
         match_max_distance=0.5,
         sparse_gt=True,
     )
-    assert sparse.detections[0].lineage_index.tolist() == [0, 0, -1]
-    assert sparse.detections[0].matched_gt.tolist() == [True, True, False]
-    assert sparse.detections[0].gt_predecessor_set_available.tolist() == [
+    sparse_sup = sparse.supervision[0]
+    assert sparse_sup.lineage_index.tolist() == [0, 0, -1]
+    assert sparse_sup.matched_gt.tolist() == [True, True, False]
+    assert sparse_sup.gt_predecessor_set_available.tolist() == [
         False,
         True,
         False,
     ]
-    assert sparse.detections[0].gt_successor_set_available.tolist() == [
+    assert sparse_sup.gt_successor_set_available.tolist() == [
         True,
         False,
         False,
@@ -225,14 +242,14 @@ def test_tracking_sequence_from_geff_root_multiple_csvs(monkeypatch, tmp_path):
 
     sequence = TrackingSequence.from_geff(root, spacing="auto", match_max_distance=0.5)
 
-    # one DetectionSet per csv, discovered by directory scan and sorted by name
+    # one DetectionSequence per csv, discovered by directory scan and sorted by name
     assert [d.name for d in sequence.detections] == ["a", "b"]
     a, b = sequence.detections
     # both index into the single shared GT tracklet
-    assert sequence.lineage_relation.tolist() == [[True]]
-    assert sequence.lineage_parents.tolist() == [-1]
-    assert a.lineage_index.tolist() == [0, 0]
-    assert b.lineage_index.tolist() == [0]
+    assert sequence.gt.lineage_relation.tolist() == [[True]]
+    assert sequence.gt.lineage_parents.tolist() == [-1]
+    assert sequence.supervision[0].lineage_index.tolist() == [0, 0]
+    assert sequence.supervision[1].lineage_index.tolist() == [0]
 
 
 def test_tracking_sequence_from_geff_root_without_csv_is_gt_only(monkeypatch, tmp_path):
@@ -246,10 +263,10 @@ def test_tracking_sequence_from_geff_root_without_csv_is_gt_only(monkeypatch, tm
 
     sequence = TrackingSequence.from_geff(root, spacing="auto")
 
-    # no proposals -> a single DetectionSet built from the GT nodes
+    # no proposals -> a single DetectionSequence built from the GT nodes
     assert len(sequence.detections) == 1
     gt = sequence.detections[0]
-    assert gt.lineage_index.tolist() == [0, 0]
+    assert sequence.supervision[0].lineage_index.tolist() == [0, 0]
     np.testing.assert_allclose(gt.coords, [[4, 0, 0], [8, 0, 0]])
 
 
@@ -261,8 +278,8 @@ def test_tracking_sequence_from_geff_root_requires_single_store(monkeypatch, tmp
         TrackingSequence.from_geff(root)
 
 
-def test_detection_set_is_immutable_and_validates_alignment():
-    seg = _detection_set([(0, (0, 1))])
+def test_detection_sequence_is_immutable_and_validates_alignment():
+    seg, _sup = _detection_sequence([(0, (0, 1))])
 
     with pytest.raises(ValueError):
         seg.coords[0, 0] = 10
@@ -270,24 +287,24 @@ def test_detection_set_is_immutable_and_validates_alignment():
         with pytest.raises(ValueError):
             values[0] = 10
     with pytest.raises(ValueError, match="aligned"):
-        DetectionSet(
+        DetectionSequence(
             name="TRA",
             n_frames=1,
             coords=np.zeros((2, 2)),
             labels=np.ones(1),
             timepoints=np.zeros(2),
             features={},
-            lineage_index=np.zeros(2),
         )
 
 
 def test_tracking_sequence_pickle_roundtrip_remains_immutable():
+    seg, sup = _detection_sequence([(0, (0, 1))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
-        detections=(_detection_set([(0, (0, 1))]),),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        detections=(seg,),
+        gt=_lineage_graph(np.eye(2, dtype=bool), np.full(2, -1)),
+        supervision=(sup,),
     )
 
     restored = pickle.loads(pickle.dumps(sequence))
@@ -300,13 +317,16 @@ def test_tracking_sequence_pickle_roundtrip_remains_immutable():
 
 
 def test_tracking_data_uses_lineage_relation_and_excludes_unmatched():
-    seg = _detection_set([(0, (0, -1)), (1, (1, 2))])
+    seg, sup = _detection_sequence([(0, (0, -1)), (1, (1, 2))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
-        lineage_parents=np.array([-1, 0, 0]),
+        gt=_lineage_graph(
+            np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
+            np.array([-1, 0, 0]),
+        ),
+        supervision=(sup,),
     )
 
     for mode, width in (("wrfeat", 7), ("wrfeat2", 6), ("wrfeat2_no_intensity", 5)):
@@ -331,21 +351,20 @@ def test_tracking_data_normalize_diameter_scales_window_geometry_only():
         "border_dist": np.full((4, 1), 3, np.float32),
     }
     coords = np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.float32)
-    seg = DetectionSet(
+    seg = DetectionSequence(
         name="TRA",
         n_frames=2,
         coords=coords,
         labels=np.array([1, 2, 1, 2]),
         timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
         features=features,
-        lineage_index=np.array([0, 1, 0, 1]),
     )
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        gt=_lineage_graph(np.eye(2, dtype=bool), np.full(2, -1)),
+        supervision=(DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),),
     )
 
     sample = TrackingDataset(
@@ -406,7 +425,7 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     counts = tuple(int((seg.timepoints == t).sum()) for t in range(seg.n_frames))
     assert counts == (1, 2, 2)
     assert np.array_equal(
-        sequence.lineage_relation,
+        sequence.gt.lineage_relation,
         np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
     )
     assert sample["assoc_matrix"][0, 1]
@@ -500,8 +519,8 @@ def test_tracking_sequence_from_ctc_spacing_scales_match_distance(tmp_path):
         spacing=(2, 2),
     )
 
-    assert np.all(unit.detections[0].lineage_index >= 0)
-    assert np.all(spaced.detections[0].lineage_index == -1)
+    assert np.all(unit.supervision[0].lineage_index >= 0)
+    assert np.all(spaced.supervision[0].lineage_index == -1)
 
 
 def test_tracking_sequence_from_ctc_rejects_spacing_with_spatial_downscale(tmp_path):
@@ -614,8 +633,8 @@ def test_tracking_sequence_without_gt_uses_isolated_detections(tmp_path):
     )
     sample = TrackingDataset(sequence, window_size=2)[0]
 
-    assert sequence.lineage_relation.shape == (2, 2)
-    assert np.array_equal(sequence.lineage_relation, np.eye(2, dtype=bool))
+    assert sequence.gt.lineage_relation.shape == (2, 2)
+    assert np.array_equal(sequence.gt.lineage_relation, np.eye(2, dtype=bool))
     assert torch.equal(sample["assoc_matrix"], torch.eye(2))
 
 
@@ -628,19 +647,19 @@ def test_tracking_sequence_joblib_cache_ignores_workers(tmp_path):
 
     assert loader.check_call_in_cache(root=root, n_workers=4)
     cached = loader(root=root, n_workers=4)
-    assert not cached.lineage_relation.flags.writeable
+    assert not cached.gt.lineage_relation.flags.writeable
     assert not cached.detections[0].coords.flags.writeable
-    assert np.array_equal(sequence.lineage_relation, cached.lineage_relation)
+    assert np.array_equal(sequence.gt.lineage_relation, cached.gt.lineage_relation)
 
 
 def test_tracking_data_runtime_selection_keeps_complete_lineages():
-    seg = _detection_set([(0, (0, 1, 2)), (1, (0, 1, 2))])
+    seg, sup = _detection_sequence([(0, (0, 1, 2)), (1, (0, 1, 2))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(3, dtype=bool),
-        lineage_parents=np.full(3, -1),
+        gt=_lineage_graph(np.eye(3, dtype=bool), np.full(3, -1)),
+        supervision=(sup,),
     )
 
     np.random.seed(0)
@@ -663,13 +682,13 @@ def test_tracking_data_runtime_selection_keeps_complete_lineages():
 
 @pytest.mark.parametrize("level", (1, 2, 3, 4))
 def test_tracking_data_augmentation_does_not_mutate_sequence(level):
-    seg = _detection_set([(0, (0, 1)), (1, (0, 1))])
+    seg, sup = _detection_sequence([(0, (0, 1)), (1, (0, 1))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        gt=_lineage_graph(np.eye(2, dtype=bool), np.full(2, -1)),
+        supervision=(sup,),
     )
     original = seg.features["inertia_tensor"].copy()
 
@@ -682,13 +701,13 @@ def test_tracking_data_augmentation_does_not_mutate_sequence(level):
 
 
 def test_tracking_data_position_noise_is_bounded_global_offset():
-    seg = _detection_set([(0, (0, 1)), (1, (0, 1))])
+    seg, sup = _detection_sequence([(0, (0, 1)), (1, (0, 1))])
     sequence = TrackingSequence(
         root=Path("synthetic"),
         ndim=2,
         detections=(seg,),
-        lineage_relation=np.eye(2, dtype=bool),
-        lineage_parents=np.full(2, -1),
+        gt=_lineage_graph(np.eye(2, dtype=bool), np.full(2, -1)),
+        supervision=(sup,),
     )
 
     torch.manual_seed(0)

@@ -73,7 +73,8 @@ def test_integration(name, device, batch_size):
         device=device,
     )
     imgs, masks = example_data_hela()
-    track_graph, _ = model.track(imgs, masks, batch_size=batch_size)
+    result = model.track_masks(imgs, masks, batch_size=batch_size)
+    track_graph = result.graph
     assert (len(track_graph.edges), len(track_graph.nodes)) == length_edges_nodes[name]
 
 
@@ -121,7 +122,8 @@ def test_integration_SAM2(device, batch_size):
         device=device,
     )
     imgs, masks = example_data_bacteria()
-    track_graph, _ = model.track(imgs, masks, batch_size=batch_size)
+    result = model.track_masks(imgs, masks, batch_size=batch_size)
+    track_graph = result.graph
 
     assert len(track_graph.edges) == 126
     assert len(track_graph.nodes) == 128
