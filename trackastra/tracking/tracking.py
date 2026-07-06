@@ -43,36 +43,42 @@ def track_greedy(
     solution_graph = nx.DiGraph()
     solution_graph.add_nodes_from(candidate_graph.nodes(data=True))
 
-    edges = candidate_graph.edges(data=True)
-    edges = sorted(
-        edges,
-        key=lambda edge: edge[2][edge_attr],
-        reverse=True,
-    )
-
-    for edge in tqdm(edges, desc="Greedily matched edges"):
-        node_in, node_out, features = edge
-        assert features[edge_attr] <= 1.0, (
+    # Pull edges once, in native (insertion) order, and drive the greedy loop
+    # over numpy-sorted weights + plain degree counters instead of repeatedly
+    # querying networkx edge/degree views (which dominate the solver cost).
+    edge_list = list(candidate_graph.edges(data=True))
+    if edge_list:
+        weights = np.fromiter(
+            (features[edge_attr] for _, _, features in edge_list),
+            dtype=float,
+            count=len(edge_list),
+        )
+        assert weights.max() <= 1.0, (
             "Edge weights are assumed to be normalized to [0,1]"
         )
-        # assumes sorted edges
-        if features[edge_attr] < threshold:
-            break
-        # Check whether this edge is a feasible edge to add
-        # i.e. no fusing
-        if node_out in solution_graph.nodes and solution_graph.in_degree(node_out) > 0:
-            # target node already has an incoming edge
-            continue
-        if node_in in solution_graph and solution_graph.out_degree(node_in) >= (
-            2 if allow_divisions else 1
-        ):
-            # parent node already has max number of outgoing edges
-            continue
-        # otherwise add to solution
-        copy_edge(edge, candidate_graph, solution_graph)
+        # descending by weight; stable to match sorted(..., reverse=True) ties
+        order = np.argsort(-weights, kind="stable")
 
-    # df, masks = graph_to_ctc(solution_graph, masks_original)
-    # tracks, tracks_graph, _ = graph_to_napari_tracks(solution_graph)
+        max_out_degree = 2 if allow_divisions else 1
+        in_degree: dict = {}
+        out_degree: dict = {}
+        selected = []
+        for idx in tqdm(order.tolist(), desc="Greedily matched edges"):
+            # assumes sorted edges: all remaining weights are below threshold
+            if weights[idx] < threshold:
+                break
+            node_in, node_out, features = edge_list[idx]
+            # no fusing: target already has an incoming edge
+            if in_degree.get(node_out, 0) > 0:
+                continue
+            # parent already has max number of outgoing edges
+            if out_degree.get(node_in, 0) >= max_out_degree:
+                continue
+            in_degree[node_out] = in_degree.get(node_out, 0) + 1
+            out_degree[node_in] = out_degree.get(node_in, 0) + 1
+            selected.append((node_in, node_out, features))
+
+        solution_graph.add_edges_from(selected)
 
     return solution_graph
     # TODO this should all be in a tracker class
@@ -106,7 +112,7 @@ def build_graph(
 
     if use_distance:
         weights = None
-    if weights:
+    if weights is not None:
         weights = {w[0]: w[1] for w in weights}
 
     graph = TrackGraph(G, frame_attribute="time")
@@ -137,32 +143,38 @@ def build_graph(
             logger.warning(f"No nodes in frame {t_end}")
             continue
 
-        pi = []
-        for _ni in ni:
-            pi.append(np.array(G.nodes[_ni]["coords"]))
-        pi = np.stack(pi)
-        pj = []
-        for _nj in nj:
-            pj.append(np.array(G.nodes[_nj]["coords"]))
-        pj = np.stack(pj)
+        pi = np.array([G.nodes[_ni]["coords"] for _ni in ni])
+        pj = np.array([G.nodes[_nj]["coords"] for _nj in nj])
+        nj_arr = np.asarray(nj)
 
         dists = scipy.spatial.distance.cdist(pi, pj)
 
         for _i, _ni in enumerate(ni):
-            inds = np.argsort(dists[_i])
-            neighbors = 0
-            for _j, _nj in zip(inds, np.array(nj)[inds]):
-                if max_neighbors and neighbors >= max_neighbors:
-                    break
-                dist = dists[_i, _j]
-                if spatial_cutoff is None or dist <= spatial_cutoff:
-                    if weights is None:
-                        G.add_edge(_ni, _nj, weight=1 - dist / spatial_cutoff)
+            row = dists[_i]
+            order = np.argsort(row)
+            row_sorted = row[order]
+            if spatial_cutoff is not None:
+                # sorted nearest-first; drop everything beyond the cutoff
+                keep = int(np.searchsorted(row_sorted, spatial_cutoff, side="right"))
+                order = order[:keep]
+                row_sorted = row_sorted[:keep]
+            nj_sorted = nj_arr[order].tolist()
+
+            if weights is None:
+                if max_neighbors:
+                    nj_sorted = nj_sorted[:max_neighbors]
+                    row_sorted = row_sorted[:max_neighbors]
+                for _nj, dist in zip(nj_sorted, row_sorted):
+                    G.add_edge(_ni, _nj, weight=1 - dist / spatial_cutoff)
+            else:
+                neighbors = 0
+                for _nj in nj_sorted:
+                    if max_neighbors and neighbors >= max_neighbors:
+                        break
+                    w = weights.get((_ni, _nj))
+                    if w is not None:
+                        G.add_edge(_ni, _nj, weight=w)
                         neighbors += 1
-                    else:
-                        if (_ni, _nj) in weights:
-                            G.add_edge(_ni, _nj, weight=weights[(_ni, _nj)])
-                            neighbors += 1
 
         e_added = len(G.edges) - n_edges_t
         if e_added == 0:
