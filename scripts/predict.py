@@ -44,7 +44,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode", choices=("greedy", "greedy_nodiv", "ilp"), default="greedy"
     )
-    parser.add_argument("--max-distance", type=int, default=None)
+    parser.add_argument(
+        "--spatial_cutoff",
+        dest="spatial_cutoff",
+        type=int,
+        default=None,
+    )
     parser.add_argument(
         "--spacing",
         type=float,
@@ -248,7 +253,7 @@ def predict_and_evaluate(
     outdir: Path,
     model_name: str,
     mode: str = "greedy",
-    max_distance: int | None = None,
+    spatial_cutoff: int | None = None,
     spacing: tuple[float, ...] | None = None,
     normalize_diameter: float | None = None,
     overwrite: bool = False,
@@ -298,7 +303,7 @@ def predict_and_evaluate(
             keep_masks=True,
             keep_images=True,
         )
-        track_kwargs = dict(mode=mode, max_distance=max_distance)
+        track_kwargs = dict(mode=mode, spatial_cutoff=spatial_cutoff)
         if error_report:
             track_kwargs["return_details"] = True
         result = model.track(
@@ -383,7 +388,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         outdir=args.outdir,
         model_name=model_name,
         mode=args.mode,
-        max_distance=args.max_distance,
+        spatial_cutoff=args.spatial_cutoff,
         spacing=tuple(args.spacing) if args.spacing is not None else None,
         normalize_diameter=args.normalize_diameter,
         overwrite=args.overwrite,

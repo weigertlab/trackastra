@@ -69,12 +69,13 @@ def cli():
         ),
     )
     p_track.add_argument(
-        "--max-distance",
+        "--spatial_cutoff",
+        dest="spatial_cutoff",
         type=float,
         default=None,
         help=(
-            "Maximum distance for linking cells. Defaults to the model's trained"
-            " max_distance; a lower value tightens linking, a higher value warns."
+            "Spatial cutoff for linking cells. Defaults to the model's trained"
+            " spatial_cutoff; a lower value tightens linking, a higher value warns."
         ),
     )
 
@@ -132,7 +133,7 @@ def _track_from_disk(args):
         args.imgs,
         args.masks,
         mode=args.mode,
-        max_distance=args.max_distance,
+        spatial_cutoff=args.spatial_cutoff,
         batch_size=args.batch_size,
         n_workers=args.n_workers,
     )

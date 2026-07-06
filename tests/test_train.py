@@ -67,7 +67,7 @@ from trackastra.training.losses import (
 )
 from trackastra.training.losses import (
     edge_error_counts,
-    error_rate_f1,
+    metrics_from_counts,
 )
 from trackastra.training.losses import (
     quiet_softmax_child_log_null as _quiet_softmax_child_log_null,
@@ -398,17 +398,25 @@ def test_summarize_tracking_metrics_includes_linking_and_detection():
     assert summary["val_track_f1_div"] == pytest.approx(0.64)
 
 
-def test_error_rate_f1():
-    # recall = 1 - fn = 0.5, precision = 1 - fp = 0.8 -> F1 = 2*0.4/1.3
-    assert error_rate_f1(0.5, 0.2) == pytest.approx(
-        2 * 0.8 * 0.5 / (0.8 + 0.5)
-    )
-    # perfect: no FN, no FP -> F1 = 1
-    assert error_rate_f1(0.0, 0.0) == pytest.approx(1.0)
-    # total failure: all missed and all spurious -> precision=recall=0 -> F1 = 0
-    assert error_rate_f1(1.0, 1.0) == 0.0
-    # undefined component (NaN rate) -> NaN
-    assert error_rate_f1(float("nan"), 0.2) != error_rate_f1(float("nan"), 0.2)
+def test_metrics_from_counts():
+    # TP=6, FP=2, FN=2: rates and scores from one shared triple
+    m = metrics_from_counts(tp=6, fp=2, fn=2)
+    assert m["fn"] == pytest.approx(2 / 8)  # FN / GT_pos = 1 - recall
+    assert m["fp"] == pytest.approx(2 / 8)  # FP / pred_pos = 1 - precision
+    assert m["f1"] == pytest.approx(12 / 16)
+    assert m["jaccard"] == pytest.approx(6 / 10)
+    # perfect: no FP, no FN
+    perfect = metrics_from_counts(tp=5, fp=0, fn=0)
+    assert perfect["f1"] == pytest.approx(1.0)
+    assert perfect["jaccard"] == pytest.approx(1.0)
+    assert perfect["fn"] == pytest.approx(0.0)
+    assert perfect["fp"] == pytest.approx(0.0)
+    # no edges at all -> every metric NaN
+    empty = metrics_from_counts(tp=0, fp=0, fn=0)
+    assert all(value != value for value in empty.values())
+    # F1 and Jaccard stay consistent: J == F1 / (2 - F1)
+    m2 = metrics_from_counts(tp=7, fp=3, fn=4)
+    assert m2["jaccard"] == pytest.approx(m2["f1"] / (2 - m2["f1"]))
 
 
 def test_edge_error_counts_for_division_links():
@@ -1092,7 +1100,7 @@ def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
 
     callback = TrackastraModelCheckpoint(
         tmp_path,
-        training_args={"features": "wrfeat", "max_distance": 12},
+        training_args={"features": "wrfeat", "spatial_cutoff": 12},
         monitor="val_loss",
     )
     module = FakeModule()
@@ -1104,7 +1112,7 @@ def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
 
     assert yaml.safe_load((tmp_path / "train_config.yaml").read_text()) == {
         "features": "wrfeat",
-        "max_distance": 12,
+        "spatial_cutoff": 12,
     }
     assert yaml.safe_load((tmp_path / "inference_config.yaml").read_text()) == {
         "features": "wrfeat2",
@@ -1351,6 +1359,12 @@ features: wrfeat2_no_intensity
 batch_size: 3
 detect_drop: 0.25
 augment: 4
+augment_details:
+  jitter: 2.5
+  drift: 7
+  tilt: 5
+  frame_jump: 4
+  frame_jump_p: 0.25
 tracking_frequency: 2
 model: saved-model
 normalize_diameter: 14
@@ -1370,8 +1384,16 @@ cachedir: sequence-cache
     assert train_data_config.sources[0]["kwargs"]["spacing"] == (4.0, 1.0, 1.0)
     assert train_data_config.dataset_kwargs["detect_drop"] == 0.25
     assert train_data_config.dataset_kwargs["augment"] == 4
+    assert train_data_config.dataset_kwargs["augment_details"] == {
+        "jitter": 2.5,
+        "drift": 7.0,
+        "tilt": 5.0,
+        "frame_jump": 4.0,
+        "frame_jump_p": 0.25,
+    }
     assert val_data_config.sources[0]["kwargs"]["root_or_geff"] == Path("val_a")
     assert val_data_config.dataset_kwargs["detect_drop"] == 0.0
+    assert val_data_config.dataset_kwargs["augment_details"] is None
     assert val_data_config.dataset_kwargs["position_noise"] == 0.0
     assert train_config.batch_size == 3
     assert train_config.resume is False

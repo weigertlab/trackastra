@@ -7,7 +7,9 @@ from trackastra.data.wrfeat import (
     WRFeatures,
     WRRandomAffine,
     WRRandomCrop,
+    WRRandomFrameJump,
     WRRandomMovement,
+    _rotation_matrix,
     build_windows,
 )
 
@@ -144,6 +146,55 @@ def test_wrfeat2_3d_is_derived_after_scale_augmentation():
     assert after.shape == (3, 9)
     assert not np.allclose(before[:, 0], after[:, 0])
     assert np.allclose(before[:, 1:], after[:, 1:], atol=1e-6)
+
+
+def test_rotation_matrix_axis_angle_matches_existing_xy_rotation():
+    theta = np.pi / 2
+    matrix = _rotation_matrix(theta, axis=(1, 0, 0))
+
+    np.testing.assert_allclose(
+        matrix,
+        [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+        atol=1e-7,
+    )
+
+
+def test_wr_random_affine_tilt_is_ignored_for_2d(monkeypatch):
+    raw = _wrfeat2_example()
+    draws = iter([0.0, 1.0, 0.0, 0.0])
+    monkeypatch.setattr(np.random, "uniform", lambda *args, **kwargs: next(draws))
+    augmentation = WRRandomAffine(
+        p=1,
+        degrees=0,
+        tilt_degrees=10,
+        scale=(1, 1),
+        shear=(0, 0),
+    )
+
+    augmented = augmentation(raw)
+
+    np.testing.assert_allclose(augmented.coords, raw.coords)
+
+
+def test_wr_random_frame_jump_shifts_exactly_one_frame(monkeypatch):
+    features = WRFeatures(
+        coords=np.array(
+            [[0, 0], [1, 0], [0, 10], [1, 10], [0, 20], [1, 20]],
+            dtype=np.float32,
+        ),
+        labels=np.arange(1, 7),
+        timepoints=np.array([0, 0, 1, 1, 2, 2], dtype=np.int64),
+        features={},
+    )
+
+    monkeypatch.setattr(np.random, "choice", lambda frames: 1)
+
+    augmented = WRRandomFrameJump(offset=(2, 2), p=1)(features)
+    delta = augmented.coords - features.coords
+
+    np.testing.assert_allclose(delta[features.timepoints == 0], 0)
+    np.testing.assert_allclose(delta[features.timepoints == 1], [[2, 2], [2, 2]])
+    np.testing.assert_allclose(delta[features.timepoints == 2], 0)
 
 
 def test_normalize_to_diameter_scales_feature_geometry_only():

@@ -685,7 +685,7 @@ def _training_config_from_args(
         num_decoder_layers=args.num_decoder_layers,
         dropout=args.dropout,
         window=args.window,
-        max_distance=args.max_distance,
+        spatial_cutoff=args.spatial_cutoff,
         attn_positional_bias=args.attn_positional_bias,
         attn_positional_bias_n_spatial=args.attn_positional_bias_n_spatial,
         attn_dist_mode=args.attn_dist_mode,
@@ -717,12 +717,14 @@ def _training_config_from_args(
         **base_dataset_kwargs,
         "detect_drop": args.detect_drop,
         "augment": args.augment,
-        "position_noise": args.max_distance,
+        "augment_details": args.augment_details,
+        "position_noise": args.spatial_cutoff,
     }
     val_dataset_kwargs = {
         **base_dataset_kwargs,
         "detect_drop": 0.0,
         "augment": 0,
+        "augment_details": None,
         "position_noise": 0.0,
     }
     sampler_kwargs = {

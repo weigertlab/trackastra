@@ -76,7 +76,7 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
 
         # # Spatially far entries should not influence the causal normalization
         # dist = torch.cdist(coords[0, :, 1:], coords[0, :, 1:])
-        # invalid = dist > model.config["max_distance"]
+        # invalid = dist > model.config["spatial_cutoff"]
         # A[invalid] = -torch.inf
 
         # TODO stay on device for further computation?

@@ -112,7 +112,7 @@ def test_predict_parser_reads_test_movies_from_config(tmp_path, predict_script):
 
     assert args.input_test == [Path("movie_a"), Path("movie_b")]
     assert args.detection_folders == ["SEG"]
-    assert args.max_distance is None
+    assert args.spatial_cutoff is None
     assert predict_script.parse_args(
         ["-m", "model", "-c", str(config), "-f"]
     ).overwrite
@@ -327,7 +327,7 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         outdir=tmp_path / "results",
         overwrite=False,
         mode="greedy",
-        max_distance=42,
+        spatial_cutoff=42,
         spacing=None,
         normalize_diameter=None,
         errormovie=False,
@@ -353,7 +353,7 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         "detections",
         {
             "mode": "greedy",
-            "max_distance": 42,
+            "spatial_cutoff": 42,
             "normalize_diameter": None,
         },
     )

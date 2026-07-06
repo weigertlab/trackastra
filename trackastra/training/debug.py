@@ -39,7 +39,7 @@ def loss_spike_debug_payload(
     rank: int,
     causal_norm: str,
     delta_cutoff: int,
-    max_distance: float,
+    spatial_cutoff: float,
     grad_norm_value: float | None = None,
     trigger: str = "loss",
 ) -> dict:
@@ -63,7 +63,7 @@ def loss_spike_debug_payload(
         dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
         spatial_dist = torch.cdist(coords[:, :, 1:].float(), coords[:, :, 1:].float())
         positive_forward = (A > 0.5) & (dt > 0) & (dt <= delta_cutoff) & mask_valid
-        impossible = positive_forward & (spatial_dist > max_distance)
+        impossible = positive_forward & (spatial_dist > spatial_cutoff)
 
         entries_per_sample = out["mask"].sum(dim=(1, 2)).float()
         sample_loss = loss_matrix.sum(dim=(1, 2)) / entries_per_sample.clamp_min(1)
@@ -115,7 +115,7 @@ def loss_spike_debug_payload(
                 "grad_norm": grad_norm_value,
                 "grad_threshold": GRAD_SPIKE_DEBUG_THRESHOLD,
                 "trigger": trigger,
-                "max_distance": max_distance,
+                "spatial_cutoff": spatial_cutoff,
                 "delta_cutoff": delta_cutoff,
                 "causal_norm": causal_norm,
             },

@@ -176,12 +176,18 @@ def edge_error_counts(
     return counts
 
 
-def error_rate_f1(fn_rate: float, fp_rate: float) -> float:
-    """F1 from the FN rate (1 - recall) and FP rate (1 - precision)."""
-    recall, precision = 1.0 - fn_rate, 1.0 - fp_rate
-    total = precision + recall
-    if total > 0:
-        return 2.0 * precision * recall / total
-    if recall == recall and precision == precision:
-        return 0.0
-    return float("nan")
+def metrics_from_counts(tp: float, fp: float, fn: float) -> dict[str, float]:
+    """Association quality metrics from pooled TP/FP/FN counts.
+
+    Every value derives from one consistent ``(TP, FP, FN)`` triple, so they agree
+    with each other (e.g. ``jaccard == f1 / (2 - f1)``, ``fn == 1 - recall``). Each
+    metric is ``NaN`` when its denominator is zero (no edges of that kind).
+    """
+    gt_pos = tp + fn
+    pred_pos = tp + fp
+    return {
+        "fn": fn / gt_pos if gt_pos > 0 else float("nan"),  # 1 - recall
+        "fp": fp / pred_pos if pred_pos > 0 else float("nan"),  # 1 - precision
+        "f1": 2.0 * tp / (2.0 * tp + fp + fn) if 2.0 * tp + fp + fn > 0 else float("nan"),
+        "jaccard": tp / (tp + fp + fn) if tp + fp + fn > 0 else float("nan"),
+    }

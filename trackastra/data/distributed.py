@@ -459,12 +459,12 @@ class BalancedDataModule(LightningDataModule):
         distances = association_distances(
             dataset, delta_cutoff=self.association_delta_cutoff
         )
-        for cutoff_name, max_distance in self.association_distance_cutoffs.items():
-            if max_distance is None:
+        for cutoff_name, spatial_cutoff in self.association_distance_cutoffs.items():
+            if spatial_cutoff is None:
                 continue
             warn_association_distances(
                 distances,
-                max_distance=max_distance,
+                spatial_cutoff=spatial_cutoff,
                 delta_cutoff=self.association_delta_cutoff,
                 cutoff_name=cutoff_name,
                 dataset_name=f"{split} dataset {dataset.root}",

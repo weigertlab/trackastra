@@ -83,7 +83,7 @@ def build_graph(
     nodes: dict,
     weights: tuple | None = None,
     use_distance: bool = False,
-    max_distance: int | None = None,
+    spatial_cutoff: int | None = None,
     max_neighbors: int | None = None,
     delta_t=1,
 ) -> nx.DiGraph:
@@ -155,9 +155,9 @@ def build_graph(
                 if max_neighbors and neighbors >= max_neighbors:
                     break
                 dist = dists[_i, _j]
-                if max_distance is None or dist <= max_distance:
+                if spatial_cutoff is None or dist <= spatial_cutoff:
                     if weights is None:
-                        G.add_edge(_ni, _nj, weight=1 - dist / max_distance)
+                        G.add_edge(_ni, _nj, weight=1 - dist / spatial_cutoff)
                         neighbors += 1
                     else:
                         if (_ni, _nj) in weights:

@@ -42,7 +42,7 @@ from trackastra.training.losses import (
 from trackastra.training.losses import (
     edge_count_key,
     edge_error_counts,
-    error_rate_f1,
+    metrics_from_counts,
 )
 from trackastra.training.losses import (
     quiet_softmax_child_log_null as _quiet_softmax_child_log_null,
@@ -234,7 +234,7 @@ class TrackingLightningModule(LightningModule):
             self._build_tracking_cache()
 
         tm = self._tracking_model
-        max_distance = self.model.config["max_distance"]
+        spatial_cutoff = self.model.config["spatial_cutoff"]
         rows = []
         with TemporaryDirectory() as tmpdir:
             for movie in self._tracking_cache:
@@ -245,7 +245,7 @@ class TrackingLightningModule(LightningModule):
                     batch_size=1,
                 )
                 graph = tm._track_from_predictions(
-                    predictions, mode=self.tracking_mode, max_distance=max_distance
+                    predictions, mode=self.tracking_mode, spatial_cutoff=spatial_cutoff
                 )
                 out = Path(tmpdir) / movie["name"]
                 graph_to_ctc(graph, movie["masks"], outdir=out)
@@ -460,19 +460,26 @@ class TrackingLightningModule(LightningModule):
                 batch_size=1,
             )
 
-        rates = {}
+        pooled = {}
         for key in self._EDGE_KEYS:
             num = self.all_gather(acc.get(f"{key}_num", zero)).sum()
             den = self.all_gather(acc.get(f"{key}_den", zero)).sum()
-            if den.item() == 0:
-                continue
-            rates[key] = float(num / den)
-            _emit(f"{stage}_assoc_{key}", rates[key])
-        # F1 from error rates: precision = 1 - fp rate, recall = 1 - fn rate.
-        if "fn" in rates and "fp" in rates:
-            _emit(f"{stage}_assoc_f1", self._error_rate_f1(rates["fn"], rates["fp"]))
-        if "fn_div" in rates and "fp_div" in rates:
-            _emit(f"{stage}_assoc_f1_div", self._error_rate_f1(rates["fn_div"], rates["fp_div"]))
+            pooled[key] = (float(num), float(den))
+
+        # All association metrics from one consistent (TP, FP, FN) triple per
+        # group: TP = GT_pos - FN (GT_pos is the fn denominator), FN/FP the fn/fp
+        # numerators. Metrics agree by construction (e.g. jaccard == f1 / (2 - f1));
+        # NaN (empty group) skipped.
+        def _emit_group(suffix, fn_key, fp_key):
+            fn_num, gt_pos = pooled[fn_key]
+            fp_num = pooled[fp_key][0]
+            metrics = metrics_from_counts(gt_pos - fn_num, fp_num, fn_num)
+            for name, value in metrics.items():
+                if value == value:  # skip NaN
+                    _emit(f"{stage}_assoc_{name}{suffix}", value)
+
+        _emit_group("", "fn", "fp")
+        _emit_group("_div", "fn_div", "fp_div")
 
     def _pooled_edge_threshold_rates(self, stage: str) -> list[dict[str, float | str]]:
         """Return pooled threshold-sweep association error rates for plotting."""
@@ -480,32 +487,29 @@ class TrackingLightningModule(LightningModule):
         zero = torch.zeros((), device=self.device)
         rows = []
 
-        def _rate(key: str, threshold_idx: int) -> float | None:
+        def _counts(key: str, threshold_idx: int) -> tuple[float, float]:
             num_key = self._edge_count_key(key, threshold_idx, "num")
             den_key = self._edge_count_key(key, threshold_idx, "den")
             num = self.all_gather(acc.get(num_key, zero)).sum()
             den = self.all_gather(acc.get(den_key, zero)).sum()
-            if den.item() == 0:
-                return None
-            return float(num / den)
+            return float(num), float(den)
 
         for threshold_idx, threshold in enumerate(self._EDGE_PLOT_THRESHOLDS):
             for edge_type, fn_key, fp_key in (
                 ("regular", "fn", "fp"),
                 ("division", "fn_div", "fp_div"),
             ):
-                fn_rate = _rate(fn_key, threshold_idx)
-                fp_rate = _rate(fp_key, threshold_idx)
-                if fn_rate is None or fp_rate is None:
+                fn_num, gt_pos = _counts(fn_key, threshold_idx)
+                fp_num, pred_pos = _counts(fp_key, threshold_idx)
+                if gt_pos == 0 or pred_pos == 0:
                     continue
+                metrics = metrics_from_counts(gt_pos - fn_num, fp_num, fn_num)
                 rows.append(
                     {
                         "stage": stage,
                         "edge_type": edge_type,
                         "threshold": float(threshold),
-                        "fn": fn_rate,
-                        "fp": fp_rate,
-                        "f1": self._error_rate_f1(fn_rate, fp_rate),
+                        **metrics,
                     }
                 )
         return rows
@@ -593,11 +597,6 @@ class TrackingLightningModule(LightningModule):
         self.logger.experiment.log({"assoc_errors": _wandb.Image(fig)})
         plt.close(fig)
 
-    @staticmethod
-    def _error_rate_f1(fn_rate, fp_rate):
-        """F1 from the FN rate (1 - recall) and FP rate (1 - precision)."""
-        return error_rate_f1(fn_rate, fp_rate)
-
     def _spike_debug_dir(self) -> Path:
         if self.loss_spike_debug_dir is not None:
             return Path(self.loss_spike_debug_dir)
@@ -651,7 +650,7 @@ class TrackingLightningModule(LightningModule):
             rank=rank,
             causal_norm=self.causal_norm,
             delta_cutoff=self.delta_cutoff,
-            max_distance=float(self.model.config["max_distance"]),
+            spatial_cutoff=float(self.model.config["spatial_cutoff"]),
             grad_norm_value=grad_norm_value,
             trigger=trigger,
         )

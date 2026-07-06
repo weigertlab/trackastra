@@ -31,6 +31,33 @@ def _restore_input_config_items(items: list[Any] | None) -> list[Any] | None:
     return restored
 
 
+def _parse_augment_details(value: Any) -> dict[str, float] | None:
+    """Restore and validate the augment_details mapping from YAML/CLI input."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = ast.literal_eval(value)
+        except (SyntaxError, ValueError) as e:
+            raise ValueError(f"augment_details must be a mapping, got {value!r}") from e
+    if not isinstance(value, dict):
+        raise ValueError(f"augment_details must be a mapping, got {type(value).__name__}")
+    unknown = set(value) - {"jitter", "drift", "tilt", "frame_jump", "frame_jump_p"}
+    if unknown:
+        raise ValueError(
+            f"Unknown augment_details keys {sorted(unknown)}; "
+            "supported keys are ['drift', 'frame_jump', 'frame_jump_p', "
+            "'jitter', 'tilt']"
+        )
+    result = {}
+    for key, raw in value.items():
+        try:
+            result[key] = float(raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"augment_details.{key} must be numeric, got {raw!r}") from e
+    return result
+
+
 def create_train_parser() -> configargparse.ArgumentParser:
     """Create the Trackastra training parser without parsing args."""
     parser = configargparse.ArgumentParser(
@@ -85,7 +112,13 @@ def create_train_parser() -> configargparse.ArgumentParser:
     parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--downscale_temporal", type=int, default=1)
     parser.add_argument("--downscale_spatial", type=int, default=1)
-    parser.add_argument("--max_distance", type=int, default=256)
+    parser.add_argument(
+        "--spatial_cutoff",
+        dest="spatial_cutoff",
+        type=int,
+        default=256,
+        help="Hard spatial radius in model coordinates for attention and tracking.",
+    )
     parser.add_argument("--normalize_diameter", type=float, default=None)
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
@@ -213,6 +246,15 @@ def create_train_parser() -> configargparse.ArgumentParser:
         help="compute/log the (expensive) full-model grad norm only every N epochs",
     )
     parser.add_argument("--augment", type=int, default=3)
+    parser.add_argument(
+        "--augment_details",
+        type=_parse_augment_details,
+        default=None,
+        help=(
+            "Optional mapping overriding preset augmentation magnitudes: "
+            "jitter, drift, tilt, frame_jump, frame_jump_p."
+        ),
+    )
     parser.add_argument(
         "--detect_drop",
         type=float,

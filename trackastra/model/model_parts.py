@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 # Dimensionless period dynamic range of the spatial Fourier / RoPE spectra: the
 # shortest resolved period is `cutoff_spatial / _POS_PERIOD_RANGE` and the longest
-# is `cutoff_spatial` (= max_distance). Anchoring the short end to max_distance
+# is `cutoff_spatial` (= spatial_cutoff). Anchoring the short end to spatial_cutoff
 # (instead of a hardcoded 1) makes both spectrum ends scale together with the
 # voxel spacing, so a uniformly rescaled dataset sees an identical `coord * freq`
-# signal. 256 recovers the historical init exactly at max_distance == 256.
+# signal. 256 recovers the historical init exactly at spatial_cutoff == 256.
 _POS_PERIOD_RANGE = 256.0
 
 

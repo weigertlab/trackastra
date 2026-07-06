@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -24,6 +26,77 @@ logger = logging.getLogger(__name__)
 
 FeatureMode = Literal["none", "intensity", "wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
 _FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
+
+
+@dataclass(frozen=True)
+class AugmentationConfig:
+    """Resolved local coordinate augmentation preset and model-unit magnitudes."""
+
+    preset: int = 0
+    jitter: float = 3.0
+    drift: float = 10.0
+    tilt: float = 0.0
+    frame_jump: float = 0.0
+    frame_jump_p: float = 0.0
+
+    @classmethod
+    def from_details(
+        cls,
+        preset: int,
+        details: Mapping[str, float] | None = None,
+    ) -> AugmentationConfig:
+        if preset not in range(5):
+            raise ValueError("augment must be between 0 and 4")
+        values = {
+            "preset": preset,
+            "jitter": 3.0,
+            "drift": 10.0,
+            "tilt": 0.0,
+            "frame_jump": 0.0,
+            "frame_jump_p": 0.0,
+        }
+        if details is not None:
+            unknown = set(details) - {
+                "jitter",
+                "drift",
+                "tilt",
+                "frame_jump",
+                "frame_jump_p",
+            }
+            if unknown:
+                raise ValueError(
+                    f"Unknown augment_details keys {sorted(unknown)}; "
+                    "supported keys are ['drift', 'frame_jump', 'frame_jump_p', "
+                    "'jitter', 'tilt']"
+                )
+            values.update(details)
+        jitter = float(values["jitter"])
+        drift = float(values["drift"])
+        tilt = float(values["tilt"])
+        frame_jump = float(values["frame_jump"])
+        frame_jump_p = float(values["frame_jump_p"])
+        if not np.isfinite(jitter) or jitter < 0:
+            raise ValueError(f"augment_details.jitter must be non-negative, got {jitter}")
+        if not np.isfinite(drift) or drift < 0:
+            raise ValueError(f"augment_details.drift must be non-negative, got {drift}")
+        if not np.isfinite(tilt) or tilt < 0:
+            raise ValueError(f"augment_details.tilt must be non-negative, got {tilt}")
+        if not np.isfinite(frame_jump) or frame_jump < 0:
+            raise ValueError(
+                f"augment_details.frame_jump must be non-negative, got {frame_jump}"
+            )
+        if not np.isfinite(frame_jump_p) or not 0 <= frame_jump_p <= 1:
+            raise ValueError(
+                f"augment_details.frame_jump_p must be in [0, 1], got {frame_jump_p}"
+            )
+        return cls(
+            preset=preset,
+            jitter=jitter,
+            drift=drift,
+            tilt=tilt,
+            frame_jump=frame_jump,
+            frame_jump_p=frame_jump_p,
+        )
 
 
 def _feature_properties_for_sequence(sequence: TrackingSequence) -> set[str]:
@@ -169,17 +242,20 @@ def _normalize_diameter_factor(
     return wrfeat.normalize_diameter_factor(features, normalize_diameter)
 
 
-def _wr_augmenter(level: int):
-    # TEMP scale-invariance check: WRRandomOffset/WRRandomMovement perturb coords
-    # by absolute magnitudes in model units, so a rescaled dataset sees different
-    # relative jitter. Hardcode the biohub2 factor (max_distance 104 / reference
-    # 256) to test the hypothesis; generalize to max_distance / 256 later.
-    coord_scale = 104 / 256
-    jitter = (-3.0 * coord_scale, 3.0 * coord_scale)
-    drift = (-10.0 * coord_scale, 10.0 * coord_scale)
+def _wr_augmenter(config: AugmentationConfig):
+    level = config.preset
+    jitter = (-config.jitter, config.jitter)
+    drift = (-config.drift, config.drift)
+    frame_jump = (-config.frame_jump, config.frame_jump)
     common = [
         wrfeat.WRRandomFlip(p=0.5),
-        wrfeat.WRRandomAffine(p=0.8, degrees=180, scale=(2 / 3, 1.5), shear=(0.1, 0.1)),
+        wrfeat.WRRandomAffine(
+            p=0.8,
+            degrees=180,
+            tilt_degrees=config.tilt,
+            scale=(2 / 3, 1.5),
+            shear=(0.1, 0.1),
+        ),
     ]
     if level == 1:
         augmentations = common
@@ -198,6 +274,7 @@ def _wr_augmenter(level: int):
             *common,
             wrfeat.WRRandomBrightness(p=0.8),
             wrfeat.WRRandomMovement(offset=drift, p=0.3),
+            wrfeat.WRRandomFrameJump(offset=frame_jump, p=config.frame_jump_p),
             wrfeat.WRRandomOffset(p=0.8, offset=jitter),
         ]
     else:
@@ -223,6 +300,7 @@ class TrackingDataset(Dataset):
         window_size: int = 4,
         features: FeatureMode = "wrfeat2",
         augment: int = 0,
+        augment_details: Mapping[str, float] | AugmentationConfig | None = None,
         position_noise: float = 0.0,
         max_detections: int | None = None,
         detect_drop: float = 0.0,
@@ -237,8 +315,11 @@ class TrackingDataset(Dataset):
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
         _validate_feature_mode(sequence, features)
-        if augment not in range(5):
-            raise ValueError("augment must be between 0 and 4")
+        augment_config = (
+            augment_details
+            if isinstance(augment_details, AugmentationConfig)
+            else AugmentationConfig.from_details(augment, augment_details)
+        )
         if position_noise < 0:
             raise ValueError("position_noise must be non-negative")
         if max_detections is not None and max_detections < window_size:
@@ -254,6 +335,7 @@ class TrackingDataset(Dataset):
         self.features = features
         self.ndim = sequence.ndim
         self.augment = augment
+        self.augment_config = augment_config
         self.position_noise = position_noise
         self.max_detections = max_detections
         self.detect_drop = detect_drop
@@ -266,7 +348,7 @@ class TrackingDataset(Dataset):
                 self.scale_factor,
                 normalize_diameter,
             )
-        self.augmenter = _wr_augmenter(augment)
+        self.augmenter = _wr_augmenter(augment_config)
         self.windows = tuple(
             (seg_index, start)
             for seg_index, seg in enumerate(sequence.detections)
@@ -311,7 +393,7 @@ class TrackingDataset(Dataset):
         return coords, labels, timepoints, features, association
 
     def _window_matched_gt(self, index: int) -> np.ndarray:
-        seg, supervision, sl = self._window_slice(index)
+        _seg, supervision, sl = self._window_slice(index)
         if supervision.matched_gt is None:
             return np.ones(sl.stop - sl.start, dtype=bool)
         return supervision.matched_gt[sl].copy()
@@ -319,7 +401,7 @@ class TrackingDataset(Dataset):
     def _window_gt_link_set_availability(
         self, index: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        seg, supervision, sl = self._window_slice(index)
+        _seg, supervision, sl = self._window_slice(index)
         n = sl.stop - sl.start
         predecessor = (
             np.ones(n, dtype=bool)
@@ -462,13 +544,13 @@ def association_distances(dataset: TrackingDataset, delta_cutoff: int) -> np.nda
 
 def warn_association_distances(
     distances: np.ndarray,
-    max_distance: float,
+    spatial_cutoff: float,
     delta_cutoff: int,
     cutoff_name: str,
     dataset_name: str,
 ) -> None:
     """Warn when labeled associations cannot pass an inference distance cutoff."""
-    exceeds = distances > max_distance
+    exceeds = distances > spatial_cutoff
     n_exceeds = int(exceeds.sum())
     if n_exceeds == 0:
         return
@@ -482,7 +564,7 @@ def warn_association_distances(
         100 * n_exceeds / len(distances),
         delta_cutoff,
         cutoff_name,
-        max_distance,
+        spatial_cutoff,
         np.quantile(distances, 0.99),
         distances.max(),
     )

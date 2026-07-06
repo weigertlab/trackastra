@@ -634,12 +634,21 @@ def _shear_matrix(shy: float, shx: float):
     return np.array([[1, 0, 0], [0, 1 + shx * shy, shy], [0, shx, 1]])
 
 
-def _rotation_matrix(theta: float):
-    return np.array([
-        [1, 0, 0],
-        [0, np.cos(theta), -np.sin(theta)],
-        [0, np.sin(theta), np.cos(theta)],
+def _rotation_matrix(theta: float, axis: tuple[float, float, float] = (1, 0, 0)):
+    """Return a 3D axis-angle rotation matrix in coordinate order."""
+    axis = np.asarray(axis, dtype=np.float64)
+    norm = np.linalg.norm(axis)
+    if norm == 0:
+        raise ValueError("rotation axis must be non-zero")
+    axis = axis / norm
+    a0, a1, a2 = axis
+    K = np.array([
+        [0, -a2, a1],
+        [a2, 0, -a0],
+        [-a1, a0, 0],
     ])
+    eye = np.eye(3)
+    return eye + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
 
 
 def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
@@ -690,17 +699,19 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
 
 
 class WRRandomAffine(WRBaseAugmentation):
-    """Apply rotation, shear, and an isotropic log-uniform spatial scale."""
+    """Apply rotation, optional 3D tilt, shear, and isotropic log-uniform scale."""
 
     def __init__(
         self,
         degrees: float = 10,
+        tilt_degrees: float = 0,
         scale: float = (0.9, 1.1),
         shear: float = (0.1, 0.1),
         p: float = 0.5,
     ):
         super().__init__(p)
         self.degrees = degrees if degrees is not None else 0
+        self.tilt_degrees = tilt_degrees if tilt_degrees is not None else 0
         self.scale = scale if scale is not None else (1, 1)
         self.shear = shear if shear is not None else (0, 0)
         if self.scale[0] <= 0 or self.scale[1] < self.scale[0]:
@@ -708,6 +719,12 @@ class WRRandomAffine(WRBaseAugmentation):
 
     def _augment(self, features: WRFeatures):
         degrees = np.random.uniform(-self.degrees, self.degrees) / 180 * np.pi
+        rotation = _rotation_matrix(degrees)
+        if features.ndim == 3 and self.tilt_degrees:
+            tilt = np.random.uniform(-self.tilt_degrees, self.tilt_degrees) / 180 * np.pi
+            psi = np.random.uniform(-np.pi, np.pi)
+            tilt_axis = (0, np.cos(psi), np.sin(psi))
+            rotation = rotation @ _rotation_matrix(tilt, axis=tilt_axis)
         # A linear draw from (0.5, 2) is biased toward zooming in (mean 1.25).
         # A single log-uniform draw makes reciprocal zooms equally likely and
         # avoids unrealistic independent stretching of each spatial axis.
@@ -716,7 +733,7 @@ class WRRandomAffine(WRBaseAugmentation):
         shx = np.random.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
-            _rotation_matrix(degrees)
+            rotation
             @ _scale_matrix(scale, scale, scale)
             @ _shear_matrix(shy, shx)
         )
@@ -837,6 +854,30 @@ class WRRandomOffset(WRBaseAugmentation):
     def _augment(self, features: WRFeatures):
         offset = np.random.uniform(*self.offset, features.coords.shape)
         coords = features.coords + offset
+        return WRFeatures(
+            coords=coords,
+            labels=features.labels,
+            timepoints=features.timepoints,
+            features=features.features,
+        )
+
+
+class WRRandomFrameJump(WRBaseAugmentation):
+    """Shift exactly one frame in a window by one shared spatial offset."""
+
+    def __init__(self, offset: tuple[float, float] = (0, 0), p: float = 0.0):
+        super().__init__(p)
+        self.offset = offset
+
+    def _augment(self, features: WRFeatures):
+        frames = np.unique(features.timepoints)
+        if len(frames) == 0:
+            return features
+        frame = np.random.choice(frames)
+        frame_mask = features.timepoints == frame
+        offset = np.random.uniform(*self.offset, features.coords.shape[-1])
+        coords = features.coords.copy()
+        coords[frame_mask] += offset
         return WRFeatures(
             coords=coords,
             labels=features.labels,

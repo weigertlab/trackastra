@@ -68,10 +68,10 @@ class TrackResult:
     detections: DetectionSequence
 
 
-def _resolve_inference_max_distance(trained: float, requested: float | None) -> float:
+def _resolve_inference_spatial_cutoff(trained: float, requested: float | None) -> float:
     """Resolve the candidate-graph distance against the model's trained radius.
 
-    Defaults to the trained ``max_distance`` (the radius the model's attention was
+    Defaults to the trained ``spatial_cutoff`` (the radius the model's attention was
     masked to). A lower request is honoured as-is (tighter linking); a higher request
     is honoured but warned, since edges beyond the trained radius were masked out during
     training and cannot be scored.
@@ -80,7 +80,8 @@ def _resolve_inference_max_distance(trained: float, requested: float | None) -> 
         return trained
     if requested > trained:
         logger.warning(
-            "Requested max_distance=%g exceeds the model's trained max_distance=%g; "
+            "Requested spatial_cutoff=%g exceeds the model's trained "
+            "spatial_cutoff=%g; "
             "candidate edges beyond the trained radius were masked during training and "
             "cannot be scored.",
             requested,
@@ -588,6 +589,7 @@ class Trackastra:
         predictions,
         mode: Literal["greedy_nodiv", "greedy", "ilp"] = "greedy",
         use_distance: bool = False,
+        spatial_cutoff: int | None = None,
         max_distance: int | None = None,
         max_neighbors: int | None = None,
         delta_t: int = 1,
@@ -601,8 +603,15 @@ class Trackastra:
         # Spatial radius and neighbour count default to the values the model was
         # trained with (stored in its config) so inference matches training.
         config = self.transformer.config
-        max_distance = _resolve_inference_max_distance(
-            config["max_distance"], max_distance
+        if max_distance is not None:
+            if spatial_cutoff is not None:
+                raise ValueError("Use either spatial_cutoff or max_distance, not both")
+            logger.warning(
+                "max_distance is deprecated for tracking; use spatial_cutoff instead."
+            )
+            spatial_cutoff = max_distance
+        spatial_cutoff = _resolve_inference_spatial_cutoff(
+            config["spatial_cutoff"], spatial_cutoff
         )
         if max_neighbors is None:
             # config["max_neighbors"] is a (lo, hi) pair; the tracking candidate
@@ -613,7 +622,7 @@ class Trackastra:
             nodes=nodes,
             weights=weights,
             use_distance=use_distance,
-            max_distance=max_distance,
+            spatial_cutoff=spatial_cutoff,
             max_neighbors=max_neighbors,
             delta_t=delta_t,
         )

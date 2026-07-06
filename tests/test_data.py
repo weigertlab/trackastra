@@ -6,6 +6,7 @@ import pytest
 import torch
 from trackastra.data import apply_spatial_spacing, validate_spatial_spacing
 from trackastra.data.dataset import (
+    AugmentationConfig,
     TrackingDataset,
     _sample_detection_keep_indices,
     _sample_neighborhood_indices,
@@ -49,6 +50,56 @@ def test_tracking_dataset_default_window_and_features():
 
     assert params["window_size"].default == 4
     assert params["features"].default == "wrfeat2"
+
+
+def test_tracking_dataset_augment_details_override_jitter_and_drift():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    seg = DetectionSequence(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={},
+    )
+    sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
+
+    dataset = TrackingDataset(
+        sequence,
+        window_size=2,
+        features="none",
+        augment=3,
+        augment_details={"jitter": 2.5, "drift": 7.0, "tilt": 5.0},
+    )
+
+    assert dataset.augment_config == AugmentationConfig(
+        preset=3,
+        jitter=2.5,
+        drift=7.0,
+        tilt=5.0,
+    )
+
+
+def test_tracking_dataset_augment_details_reject_unknown_keys():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    seg = DetectionSequence(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={},
+    )
+    sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
+
+    with pytest.raises(ValueError, match="Unknown augment_details keys"):
+        TrackingDataset(
+            sequence,
+            window_size=2,
+            features="none",
+            augment=3,
+            augment_details={"rotate": 1.0},
+        )
 
 
 def test_tracking_dataset_feature_mode_error_lists_available_options():
@@ -357,9 +408,9 @@ def test_association_distances_use_runtime_model_units():
 def test_association_distance_warning_ignores_values_at_cutoff(caplog):
     warn_association_distances(
         np.array([3.0, 10.0]),
-        max_distance=10,
+        spatial_cutoff=10,
         delta_cutoff=1,
-        cutoff_name="max_distance",
+        cutoff_name="spatial_cutoff",
         dataset_name="test dataset",
     )
     assert caplog.text == ""
@@ -371,9 +422,9 @@ def test_association_distance_warning_reports_exceedances(caplog):
     with caplog.at_level(logging.WARNING):
         warn_association_distances(
             np.array([3.0, 10.0]),
-            max_distance=5,
+            spatial_cutoff=5,
             delta_cutoff=1,
-            cutoff_name="max_distance",
+            cutoff_name="spatial_cutoff",
             dataset_name="test dataset",
         )
     assert "1/2 (50.00%)" in caplog.text
