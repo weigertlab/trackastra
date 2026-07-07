@@ -183,17 +183,59 @@ def _sample_neighborhood_indices(
     timepoints: np.ndarray,
     association: np.ndarray,
     max_detections: int,
+    matched_gt: np.ndarray | None = None,
 ) -> np.ndarray:
-    last = np.flatnonzero(timepoints == timepoints.max())
-    if len(last) <= max_detections:
-        return np.arange(len(coords))
-    anchor = last[np.random.randint(len(last))]
-    distances = np.linalg.norm(coords[last] - coords[anchor], axis=1)
-    seeds = last[np.argsort(distances, kind="stable")[:max_detections]]
-    _, component = connected_components(
-        csr_matrix(np.logical_or(association, association.T)), directed=False
+    """Sample a per-frame-bounded neighborhood around a GT-seeded track.
+
+    Seeds on a ground-truth detection in the last frame, then walks backward one
+    frame at a time. In every frame it forces the parents (all earlier-frame
+    detections associated with anything kept so far, i.e. the full ancestor set)
+    so no backward GT link is ever severed, and tops the frame up to
+    ``max_detections`` with the spatially nearest remaining detections as
+    context/negatives. Forward branches beyond the budget may be dropped.
+
+    ``matched_gt`` (``lineage_index >= 0``) marks the GT-annotated detections used
+    for seeding; without it, or when a frame has none, seeding falls back to any
+    detection in the last frame.
+    """
+    n = len(coords)
+    if n == 0:
+        return np.arange(0)
+    frames = np.unique(timepoints)
+    last_idx = np.flatnonzero(timepoints == frames[-1])
+    gt_last = (
+        last_idx[matched_gt[last_idx].astype(bool)]
+        if matched_gt is not None
+        else last_idx
     )
-    return np.flatnonzero(np.isin(component, np.unique(component[seeds])))
+    pool = gt_last if len(gt_last) else last_idx
+    seed = pool[np.random.randint(len(pool))]
+
+    keep_mask = np.zeros(n, dtype=bool)
+    ref_points = coords[[seed]]
+    for t in frames[::-1]:
+        idx_t = np.flatnonzero(timepoints == t)
+        kept_idx = np.flatnonzero(keep_mask)
+        forced = (
+            idx_t[association[np.ix_(idx_t, kept_idx)].any(axis=1)]
+            if len(kept_idx)
+            else idx_t[:0]
+        )
+        if t == frames[-1]:
+            forced = np.union1d(forced, [seed])
+        keep_mask[forced] = True
+        if len(forced) < max_detections:
+            rest = idx_t[~np.isin(idx_t, forced)]
+            if len(rest):
+                distances = np.linalg.norm(
+                    coords[rest][:, None, :] - ref_points[None, :, :], axis=2
+                ).min(axis=1)
+                order = np.argsort(distances, kind="stable")
+                take = rest[order[: max_detections - len(forced)]]
+                keep_mask[take] = True
+        if len(forced):
+            ref_points = coords[forced]
+    return np.flatnonzero(keep_mask)
 
 
 def _sample_detection_keep_indices(
@@ -349,10 +391,16 @@ class TrackingDataset(Dataset):
                 normalize_diameter,
             )
         self.augmenter = _wr_augmenter(augment_config)
+        # With sparse ground truth, timepoints can start above 0 and contain
+        # gaps, so a window's time range [start, start + window_size) may hold
+        # no detections. Drop those empty windows; they carry no supervision and
+        # would crash downstream sampling (e.g. timepoints.max() on empty).
         self.windows = tuple(
             (seg_index, start)
             for seg_index, seg in enumerate(sequence.detections)
             for start in range(seg.n_frames - window_size + 1)
+            if np.searchsorted(seg.timepoints, start + window_size, side="left")
+            > np.searchsorted(seg.timepoints, start, side="left")
         )
         self.n_objects = tuple(
             self._window_object_count(index) for index in range(len(self))
@@ -459,6 +507,7 @@ class TrackingDataset(Dataset):
                 feature.timepoints,
                 association,
                 self.max_detections,
+                matched_gt=matched_gt,
             )
             if len(keep) < len(feature):
                 feature = _subset_features(feature, keep)
