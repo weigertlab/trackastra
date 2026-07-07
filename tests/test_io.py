@@ -100,7 +100,22 @@ def test_tracking_sequence_from_geff_gt_nodes(monkeypatch, tmp_path):
     assert seg.spacing == (4.0, 1.0, 1.0)
     np.testing.assert_allclose(seg.features["intensity"].ravel(), [0.1, 0.2, 0.3, 0.4])
     assert sequence.supervision[0].lineage_index.tolist() == [0, 0, 1, 2]
+    assert sequence.supervision[0].gt_node_index.tolist() == [0, 1, 2, 3]
     assert sequence.gt.lineage_parents.tolist() == [-1, 0, 0]
+    assert sequence.gt.node_in_degree.tolist() == [0, 1, 1, 1]
+    assert sequence.gt.node_out_degree.tolist() == [1, 2, 0, 0]
+    assert sequence.gt.node_predecessor_set_available.tolist() == [
+        False,
+        True,
+        True,
+        True,
+    ]
+    assert sequence.gt.node_successor_set_available.tolist() == [
+        True,
+        True,
+        False,
+        False,
+    ]
     assert sequence.gt.lineage_relation.tolist() == [
         [True, True, True],
         [True, True, False],
@@ -428,6 +443,9 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
         sequence.gt.lineage_relation,
         np.array([[1, 1, 1], [1, 1, 0], [1, 0, 1]], dtype=bool),
     )
+    assert sequence.supervision[0].gt_node_index.tolist() == [0, 1, 2, 3, 4]
+    assert sequence.gt.node_in_degree.tolist() == [0, 1, 1, 1, 1]
+    assert sequence.gt.node_out_degree.tolist() == [2, 1, 1, 0, 0]
     assert sample["assoc_matrix"][0, 1]
     assert sample["assoc_matrix"][0, 2]
     assert not sample["assoc_matrix"][1, 2]

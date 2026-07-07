@@ -57,6 +57,7 @@ class ModelConfig:
     sparse_knn_mode: Literal["global", "per_frame", "next_frame"] = "per_frame"
     logit_norm: bool = True
     head_mode: Literal["bilinear", "sparse_bilinear", "edge_star", "edge_mlp"] | None = None
+    edge_mlp_dim: int | None = None
     causal_norm: Literal["none", "linear", "softmax", "quiet_softmax"] = "quiet_softmax"
     architecture_version: Literal[1, 2] = 2
     disable_abs_pos: bool = False
@@ -85,6 +86,7 @@ class ModelConfig:
             "sparse_knn_mode": self.sparse_knn_mode,
             "logit_norm": self.logit_norm,
             "head_mode": self.head_mode,
+            "edge_mlp_dim": self.edge_mlp_dim,
             "causal_norm": self.causal_norm,
             "architecture_version": self.architecture_version,
             "disable_abs_pos": self.disable_abs_pos,
@@ -417,6 +419,7 @@ class TrackingTransformer(torch.nn.Module):
         edge_star_dim: int = 128,
         edge_star_n_heads: int = 4,
         edge_star_n_blocks: int = 1,
+        edge_mlp_dim: int | None = None,
         feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
@@ -498,6 +501,7 @@ class TrackingTransformer(torch.nn.Module):
             edge_star_dim=edge_star_dim,
             edge_star_n_heads=edge_star_n_heads,
             edge_star_n_blocks=edge_star_n_blocks,
+            edge_mlp_dim=edge_mlp_dim,
             architecture_version=architecture_version,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
@@ -570,9 +574,14 @@ class TrackingTransformer(torch.nn.Module):
                 dropout=dropout,
             )
         elif head_mode == "edge_mlp":
-            # edge_mlp_dim fixed at the head default (64); reuses the model dropout,
-            # so it adds no new TrackingTransformer hyperparameter.
-            self.head = HeadEdgeMLP(d_model, logit_norm=logit_norm, dropout=dropout)
+            # edge_mlp_dim defaults to d_model // 2 so the head width scales with the
+            # model rather than a fixed constant; reuses the model dropout.
+            self.head = HeadEdgeMLP(
+                d_model,
+                edge_mlp_dim=edge_mlp_dim if edge_mlp_dim is not None else d_model // 2,
+                logit_norm=logit_norm,
+                dropout=dropout,
+            )
         else:
             head_cls = (
                 HeadSparseBilinear if head_mode == "sparse_bilinear" else HeadBilinear

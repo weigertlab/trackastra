@@ -333,6 +333,45 @@ def _division_count(association: np.ndarray, timepoints: np.ndarray) -> int:
     return int((block_sums.max(dim=0)[0] == 2).sum().item())
 
 
+def _add_bincount(total: np.ndarray, values: np.ndarray) -> np.ndarray:
+    counts = np.bincount(values)
+    if len(counts) > len(total):
+        total = np.pad(total, (0, len(counts) - len(total)))
+    total[: len(counts)] += counts
+    return total
+
+
+def _node_degree_counts(sequence: TrackingSequence) -> tuple[np.ndarray, np.ndarray]:
+    gt = sequence.gt
+    if (
+        gt is None
+        or gt.node_in_degree is None
+        or gt.node_out_degree is None
+        or sequence.supervision is None
+    ):
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty
+
+    in_counts = np.zeros(0, dtype=np.int64)
+    out_counts = np.zeros(0, dtype=np.int64)
+    for supervision in sequence.supervision:
+        if supervision is None or supervision.gt_node_index is None:
+            continue
+        gt_node_index = supervision.gt_node_index
+        valid = gt_node_index >= 0
+        valid_in = valid.copy()
+        valid_out = valid.copy()
+        if supervision.gt_predecessor_set_available is not None:
+            valid_in &= supervision.gt_predecessor_set_available
+        if supervision.gt_successor_set_available is not None:
+            valid_out &= supervision.gt_successor_set_available
+        in_counts = _add_bincount(in_counts, gt.node_in_degree[gt_node_index[valid_in]])
+        out_counts = _add_bincount(
+            out_counts, gt.node_out_degree[gt_node_index[valid_out]]
+        )
+    return in_counts, out_counts
+
+
 class TrackingDataset(Dataset):
     """Runtime temporal windows over an immutable tracking sequence."""
 
@@ -407,6 +446,9 @@ class TrackingDataset(Dataset):
         )
         self.n_divs = tuple(
             self._window_division_count(index) for index in range(len(self))
+        )
+        self.node_in_degree_counts, self.node_out_degree_counts = _node_degree_counts(
+            sequence
         )
         self.feat_dim = self._infer_feature_dim()
 

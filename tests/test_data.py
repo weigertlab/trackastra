@@ -320,6 +320,46 @@ def test_dataset_and_collate_preserve_matched_gt_vector():
     ]
 
 
+def test_tracking_dataset_counts_node_degrees_per_detection_stream():
+    seg = DetectionSequence(
+        name="points",
+        n_frames=4,
+        coords=np.array(
+            [[0, 0], [1, 0], [2, 0], [3, 0], [30, 0]], dtype=np.float32
+        ),
+        labels=np.array([1, 1, 1, 1, 2]),
+        timepoints=np.array([0, 1, 2, 3, 3], dtype=np.int64),
+        features={},
+    )
+    gt = LineageGraph(
+        coords=np.array([[0, 0], [1, 0], [2, 0], [3, 0]], dtype=np.float32),
+        timepoints=np.array([0, 1, 2, 3], dtype=np.int64),
+        node_ids=np.arange(4),
+        lineage_relation=np.eye(1, dtype=bool),
+        lineage_parents=np.array([-1], dtype=np.int64),
+        node_in_degree=np.array([0, 1, 2, 1], dtype=np.int64),
+        node_out_degree=np.array([1, 0, 3, 2], dtype=np.int64),
+    )
+    supervision = DetectionSupervision(
+        lineage_index=np.array([0, 0, 0, 0, -1], dtype=np.int64),
+        gt_node_index=np.array([0, 1, 2, 3, -1], dtype=np.int64),
+        gt_predecessor_set_available=np.array([False, True, True, False, False]),
+        gt_successor_set_available=np.array([True, False, True, True, False]),
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic"),
+        ndim=2,
+        detections=(seg, seg),
+        gt=gt,
+        supervision=(supervision, supervision),
+    )
+
+    dataset = TrackingDataset(sequence, window_size=2, features="none")
+
+    assert dataset.node_in_degree_counts.tolist() == [0, 2, 2]
+    assert dataset.node_out_degree_counts.tolist() == [0, 2, 2, 2]
+
+
 def test_tracking_dataset_supports_none_and_intensity_features():
     lineage_index = np.array([0, 0], dtype=np.int64)
     seg = DetectionSequence(

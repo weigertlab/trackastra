@@ -503,6 +503,9 @@ class DetectionSupervision:
             and is excluded from the association target. Many detections of the
             same cell across frames share one ``lineage_index``. This is the only
             field the training target strictly requires.
+        gt_node_index: (M,) for each detection, the matched GT node index in
+            :class:`LineageGraph`, or ``-1`` for unmatched detections. This is
+            aligned to GT-node arrays such as ``node_in_degree``.
         matched_gt: (M,) ``True`` where the detection was matched to a GT object.
             Redundant: equal to ``lineage_index >= 0``. ``None`` if unused.
         gt_predecessor_set_available: (M,) ``True`` where the complete set of
@@ -516,6 +519,7 @@ class DetectionSupervision:
     """
 
     lineage_index: np.ndarray
+    gt_node_index: np.ndarray | None = None
     matched_gt: np.ndarray | None = None
     gt_predecessor_set_available: np.ndarray | None = None
     gt_successor_set_available: np.ndarray | None = None
@@ -526,6 +530,14 @@ class DetectionSupervision:
             raise ValueError("lineage_index may only use -1 for unmatched detections")
         object.__setattr__(self, "lineage_index", lineage_index)
         n = len(lineage_index)
+        if self.gt_node_index is not None:
+            gt_node_index = _immutable_array(self.gt_node_index, ndim=1).astype(np.int64)
+            if len(gt_node_index) != n:
+                raise ValueError("gt_node_index must be aligned with lineage_index")
+            if np.any(gt_node_index < -1):
+                raise ValueError("gt_node_index may only use -1 for unmatched detections")
+            gt_node_index.setflags(write=False)
+            object.__setattr__(self, "gt_node_index", gt_node_index)
         for field in (
             "matched_gt",
             "gt_predecessor_set_available",
@@ -548,6 +560,7 @@ class DetectionSupervision:
             type(self),
             (
                 self.lineage_index,
+                self.gt_node_index,
                 self.matched_gt,
                 self.gt_predecessor_set_available,
                 self.gt_successor_set_available,
@@ -598,14 +611,18 @@ class LineageGraph:
 
     Per-detection arrays (length N = number of GT detections, all row-aligned)
     are a self-contained snapshot of the GT detections. They exist so GT can be
-    matched to a detection stream and traced back / visualized; the
-    training/inference path does not read them:
+    matched to a detection stream and traced back / visualized:
         coords: (N, ndim) object centroids, scaled by ``spacing``.
         source_coords: (N, ndim) the same centroids in raw pixel units, before
             ``spacing`` is applied. ``None`` if not provided.
         timepoints: (N,) frame index of each detection.
         node_ids: (N,) a stable identifier per detection (e.g. a ``(t, label)``
             pair or a source graph node id) to trace it back to its origin.
+        node_in_degree: (N,) observed incoming direct GT edges per node.
+        node_out_degree: (N,) observed outgoing direct GT edges per node.
+        node_predecessor_set_available: (N,) ``True`` where the complete incoming
+            GT edge set is known for that node. ``None`` if unavailable.
+        node_successor_set_available: (N,) same for outgoing GT edges.
 
     Attributes:
         spacing: physical pixel spacing per spatial axis, or ``None`` for unit
@@ -621,6 +638,10 @@ class LineageGraph:
     lineage_parents: np.ndarray
     spacing: tuple[float, ...] | None = None
     source_coords: np.ndarray | None = None
+    node_in_degree: np.ndarray | None = None
+    node_out_degree: np.ndarray | None = None
+    node_predecessor_set_available: np.ndarray | None = None
+    node_successor_set_available: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         coords = _immutable_array(self.coords, ndim=2)
@@ -643,6 +664,27 @@ class LineageGraph:
         object.__setattr__(self, "node_ids", node_ids)
         object.__setattr__(self, "lineage_relation", relation)
         object.__setattr__(self, "lineage_parents", parents)
+        n_nodes = len(coords)
+        for field in ("node_in_degree", "node_out_degree"):
+            values = getattr(self, field)
+            if values is None:
+                continue
+            array = _immutable_array(values, ndim=1).astype(np.int64)
+            if len(array) != n_nodes:
+                raise ValueError(f"{field} must be aligned with GT nodes")
+            if np.any(array < 0):
+                raise ValueError(f"{field} must be non-negative")
+            array.setflags(write=False)
+            object.__setattr__(self, field, array)
+        for field in ("node_predecessor_set_available", "node_successor_set_available"):
+            values = getattr(self, field)
+            if values is None:
+                continue
+            array = _immutable_array(values, ndim=1).astype(bool)
+            if len(array) != n_nodes:
+                raise ValueError(f"{field} must be aligned with GT nodes")
+            array.setflags(write=False)
+            object.__setattr__(self, field, array)
         if self.spacing is not None:
             object.__setattr__(
                 self, "spacing", validate_spatial_spacing(self.spacing, coords.shape[1])
@@ -664,6 +706,10 @@ class LineageGraph:
                 self.lineage_parents,
                 self.spacing,
                 self.source_coords,
+                self.node_in_degree,
+                self.node_out_degree,
+                self.node_predecessor_set_available,
+                self.node_successor_set_available,
             ),
         )
 
@@ -708,6 +754,10 @@ class TrackingSequence:
                     raise ValueError("DetectionSupervision must align with detections")
                 if np.any(sup.lineage_index >= len(self.gt.lineage_relation)):
                     raise ValueError("DetectionSupervision references an unknown lineage")
+                if sup.gt_node_index is not None and np.any(
+                    sup.gt_node_index >= len(self.gt.coords)
+                ):
+                    raise ValueError("DetectionSupervision references an unknown GT node")
         elif any(sup is not None for sup in supervision):
             raise ValueError("supervision requires a gt LineageGraph")
         object.__setattr__(self, "root", Path(self.root))
@@ -1001,6 +1051,47 @@ def _isolated_tracks(masks: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=("label", "t1", "t2", "parent"))
 
 
+def _ctc_node_index(masks: np.ndarray) -> dict[tuple[int, int], int]:
+    index = {}
+    for t, mask in enumerate(masks):
+        for prop in regionprops(mask):
+            index[(t, int(prop.label))] = len(index)
+    return index
+
+
+def _ctc_node_degrees(
+    masks: np.ndarray, tracks: pd.DataFrame | None
+) -> tuple[np.ndarray, np.ndarray]:
+    node_index = _ctc_node_index(masks)
+    in_degree = np.zeros(len(node_index), dtype=np.int64)
+    out_degree = np.zeros(len(node_index), dtype=np.int64)
+    if tracks is None:
+        return in_degree, out_degree
+
+    tracks_by_label = {int(row.label): row for row in tracks.itertuples()}
+    for row in tracks.itertuples():
+        label = int(row.label)
+        for t in range(int(row.t1), int(row.t2)):
+            source = node_index.get((t, label))
+            target = node_index.get((t + 1, label))
+            if source is None or target is None:
+                continue
+            out_degree[source] += 1
+            in_degree[target] += 1
+        if row.parent == 0:
+            continue
+        parent = tracks_by_label.get(int(row.parent))
+        if parent is None:
+            continue
+        source = node_index.get((int(parent.t2), int(row.parent)))
+        target = node_index.get((int(row.t1), label))
+        if source is None or target is None:
+            continue
+        out_degree[source] += 1
+        in_degree[target] += 1
+    return in_degree, out_degree
+
+
 def _lineage_arrays(
     tracks: pd.DataFrame,
 ) -> tuple[dict[int, int], np.ndarray, np.ndarray]:
@@ -1029,6 +1120,10 @@ def _lineage_graph_from_masks(
     lineage_relation: np.ndarray,
     lineage_parents: np.ndarray,
     spacing: tuple[float, ...],
+    node_in_degree: np.ndarray | None = None,
+    node_out_degree: np.ndarray | None = None,
+    node_predecessor_set_available: np.ndarray | None = None,
+    node_successor_set_available: np.ndarray | None = None,
 ) -> LineageGraph:
     source_coords = []
     timepoints = []
@@ -1059,6 +1154,10 @@ def _lineage_graph_from_masks(
         lineage_parents=lineage_parents,
         spacing=spacing,
         source_coords=source_coords,
+        node_in_degree=node_in_degree,
+        node_out_degree=node_out_degree,
+        node_predecessor_set_available=node_predecessor_set_available,
+        node_successor_set_available=node_successor_set_available,
     )
 
 
@@ -1262,6 +1361,10 @@ def _tracking_sequence_from_geff_graph(
             lineage_parents=np.zeros(0, dtype=np.int64),
             spacing=spacing,
             source_coords=np.zeros((0, ndim), dtype=np.float32),
+            node_in_degree=np.zeros(0, dtype=np.int64),
+            node_out_degree=np.zeros(0, dtype=np.int64),
+            node_predecessor_set_available=np.zeros(0, dtype=bool),
+            node_successor_set_available=np.zeros(0, dtype=bool),
         )
         return sequence_type(
             root=root,
@@ -1271,6 +1374,7 @@ def _tracking_sequence_from_geff_graph(
             supervision=(
                 DetectionSupervision(
                     lineage_index=np.zeros(0, dtype=np.int64),
+                    gt_node_index=np.zeros(0, dtype=np.int64),
                     matched_gt=np.zeros(0, dtype=bool),
                 ),
             ),
@@ -1282,6 +1386,21 @@ def _tracking_sequence_from_geff_graph(
     lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
         graph, node_times
     )
+    gt_predecessor_available, gt_successor_available = _geff_gt_link_set_availability(
+        graph, node_times
+    )
+    gt_node_in_degree = np.asarray(
+        [graph.in_degree(node) for node in nodes], dtype=np.int64
+    )
+    gt_node_out_degree = np.asarray(
+        [graph.out_degree(node) for node in nodes], dtype=np.int64
+    )
+    gt_node_predecessor_set_available = np.asarray(
+        [gt_predecessor_available[node] for node in nodes], dtype=bool
+    )
+    gt_node_successor_set_available = np.asarray(
+        [gt_successor_available[node] for node in nodes], dtype=bool
+    )
     gt = LineageGraph(
         coords=gt_coords,
         timepoints=gt_timepoints,
@@ -1290,9 +1409,10 @@ def _tracking_sequence_from_geff_graph(
         lineage_parents=lineage_parents,
         spacing=spacing,
         source_coords=gt_source_coords,
-    )
-    gt_predecessor_available, gt_successor_available = _geff_gt_link_set_availability(
-        graph, node_times
+        node_in_degree=gt_node_in_degree,
+        node_out_degree=gt_node_out_degree,
+        node_predecessor_set_available=gt_node_predecessor_set_available,
+        node_successor_set_available=gt_node_successor_set_available,
     )
 
     detection_sequences = []
@@ -1312,6 +1432,7 @@ def _tracking_sequence_from_geff_graph(
         supervision.append(
             DetectionSupervision(
                 lineage_index=lineage_index,
+                gt_node_index=np.arange(len(nodes), dtype=np.int64),
                 matched_gt=np.ones(len(gt_coords), dtype=bool),
             )
         )
@@ -1341,6 +1462,7 @@ def _tracking_sequence_from_geff_graph(
                 feature_columns=src_feature_columns,
             )
             lineage_index = np.full(len(coords), -1, dtype=np.int64)
+            gt_node_index = np.full(len(coords), -1, dtype=np.int64)
             gt_predecessor_set_available = np.ones(len(coords), dtype=bool)
             gt_successor_set_available = np.ones(len(coords), dtype=bool)
             if sparse_gt:
@@ -1356,8 +1478,10 @@ def _tracking_sequence_from_geff_graph(
                 )
                 for prop_local, gt_local, _distance in matches:
                     prop_global = prop_idx[prop_local]
+                    gt_global = gt_idx[gt_local]
                     gt_node = nodes[gt_idx[gt_local]]
                     lineage_index[prop_global] = lineage_map[gt_node]
+                    gt_node_index[prop_global] = gt_global
                     if sparse_gt:
                         gt_predecessor_set_available[prop_global] = (
                             gt_predecessor_available[gt_node]
@@ -1381,6 +1505,7 @@ def _tracking_sequence_from_geff_graph(
             supervision.append(
                 DetectionSupervision(
                     lineage_index=lineage_index,
+                    gt_node_index=gt_node_index,
                     matched_gt=matched_gt,
                     gt_predecessor_set_available=gt_predecessor_set_available,
                     gt_successor_set_available=gt_successor_set_available,
@@ -1643,7 +1768,20 @@ def _load_ctc_sequence(
         lineage_relation = np.eye(next_index, dtype=bool)
         lineage_parents = np.full(next_index, -1, dtype=np.int64)
 
-    gt = _lineage_graph_from_masks(gt_masks, lineage_relation, lineage_parents, spacing)
+    gt_node_index_by_id = _ctc_node_index(gt_masks)
+    node_in_degree, node_out_degree = _ctc_node_degrees(
+        gt_masks, tracks if use_gt else None
+    )
+    gt = _lineage_graph_from_masks(
+        gt_masks,
+        lineage_relation,
+        lineage_parents,
+        spacing,
+        node_in_degree=node_in_degree,
+        node_out_degree=node_out_degree,
+        node_predecessor_set_available=np.ones(len(node_in_degree), dtype=bool),
+        node_successor_set_available=np.ones(len(node_out_degree), dtype=bool),
+    )
     detections = []
     supervision = []
     for folder, detection_path in zip(resolved_folders, detection_paths):
@@ -1699,6 +1837,7 @@ def _load_ctc_sequence(
             spacing=spacing,
         )
         indices_per_frame = []
+        gt_node_indices_per_frame = []
         for t, feature in enumerate(frame_features_raw):
             if isolated_indices is None:
                 indices = np.array(
@@ -1716,14 +1855,32 @@ def _load_ctc_sequence(
                     ],
                     dtype=np.int64,
                 )
+            gt_node_indices = np.array(
+                [
+                    gt_node_index_by_id.get((t, matches[t].get(int(label), -1)), -1)
+                    for label in feature.labels
+                ],
+                dtype=np.int64,
+            )
             indices_per_frame.append(indices)
+            gt_node_indices_per_frame.append(gt_node_indices)
         lineage_index = (
             np.concatenate(indices_per_frame)
             if indices_per_frame
             else np.zeros(0, dtype=np.int64)
         )
+        gt_node_index = (
+            np.concatenate(gt_node_indices_per_frame)
+            if gt_node_indices_per_frame
+            else np.zeros(0, dtype=np.int64)
+        )
         detections.append(detection_sequence)
-        supervision.append(DetectionSupervision(lineage_index=lineage_index))
+        supervision.append(
+            DetectionSupervision(
+                lineage_index=lineage_index,
+                gt_node_index=gt_node_index,
+            )
+        )
     return sequence_type(
         root=root,
         ndim=ndim,
