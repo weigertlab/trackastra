@@ -4,7 +4,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import dask.array as da
 import networkx as nx
@@ -41,6 +41,9 @@ try:
     PRETRAINED_FEATS_INSTALLED = True
 except ImportError:
     PRETRAINED_FEATS_INSTALLED = False
+
+if TYPE_CHECKING:
+    from ..tracking import ILPConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -594,6 +597,7 @@ class Trackastra:
         max_neighbors: int | None = None,
         delta_t: int = 1,
         return_candidate: bool = False,
+        ilp_config: "ILPConfig | str | None" = None,
         **kwargs,
     ) -> nx.DiGraph | tuple[nx.DiGraph, nx.DiGraph]:
         logger.info("Running greedy tracker")
@@ -633,7 +637,7 @@ class Trackastra:
         elif mode == "ilp":
             from trackastra.tracking.ilp import track_ilp
 
-            solution = track_ilp(candidate_graph, ilp_config="gt", **kwargs)
+            solution = track_ilp(candidate_graph, ilp_config=ilp_config, **kwargs)
         else:
             raise ValueError(f"Tracking mode {mode} does not exist.")
         if return_candidate:
@@ -651,6 +655,7 @@ class Trackastra:
         edge_threshold: float = 0.05,
         batch_size: int | None = None,
         progbar_class=tqdm,
+        ilp_config: "ILPConfig | str | None" = None,
         **kwargs,
     ) -> TrackResult:
         """Track point detections.
@@ -678,6 +683,9 @@ class Trackastra:
                 from window predictions.
             batch_size: Batch size for prediction. If None, uses the model default.
             progbar_class: Progress bar class to use.
+            ilp_config: ILP cost configuration, used only when ``mode="ilp"``. Either an
+                ``ILPConfig`` instance, a preset name from ``ILP_CONFIGS`` (e.g.
+                ``"gt"``), or None for the default ``"gt"`` preset.
             **kwargs: Additional arguments passed to the tracking algorithm.
         """
         detections = DetectionSequence.from_points(
@@ -693,6 +701,7 @@ class Trackastra:
             edge_threshold=edge_threshold,
             batch_size=batch_size,
             progbar_class=progbar_class,
+            ilp_config=ilp_config,
             **kwargs,
         )
 
@@ -706,6 +715,7 @@ class Trackastra:
         normalize_diameter: float | None = None,
         return_details: bool = False,
         edge_threshold: float = 0.05,
+        ilp_config: "ILPConfig | str | None" = None,
         **kwargs,
     ) -> TrackResult:
         """Track one canonical detection sequence.
@@ -741,10 +751,16 @@ class Trackastra:
         candidate_graph = None
         if return_details:
             track_graph, candidate_graph = self._track_from_predictions(
-                predictions, mode=mode, return_candidate=True, **kwargs
+                predictions,
+                mode=mode,
+                return_candidate=True,
+                ilp_config=ilp_config,
+                **kwargs,
             )
         else:
-            track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
+            track_graph = self._track_from_predictions(
+                predictions, mode=mode, ilp_config=ilp_config, **kwargs
+            )
         masks_tracked = (
             apply_solution_graph_to_masks(track_graph, detections.masks)
             if detections.masks is not None
@@ -771,6 +787,7 @@ class Trackastra:
         normalize_diameter: float | None = None,
         return_details: bool = False,
         edge_threshold: float = 0.05,
+        ilp_config: "ILPConfig | str | None" = None,
         **kwargs,
     ) -> TrackResult:
         """Track mask detections by first constructing a ``DetectionSequence``.
@@ -800,6 +817,7 @@ class Trackastra:
             normalize_diameter=normalize_diameter,
             return_details=return_details,
             edge_threshold=edge_threshold,
+            ilp_config=ilp_config,
             **kwargs,
         )
 

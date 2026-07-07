@@ -1,5 +1,6 @@
 # ruff: noqa: F401
 
+from .ilp import ILP_CONFIGS, ILPConfig
 from .track_graph import TrackGraph
 from .tracking import (
     build_graph,

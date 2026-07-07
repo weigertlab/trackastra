@@ -25,5 +25,7 @@ if __name__ == "__main__":
 
     model = build_model(model_config, train_dataset)
     trainer = build_trainer(train_config)
-
-    trainer.fit(model, train_dataset, val_dataset)
+    
+    
+    if train_config.epochs > 0:
+        trainer.fit(model, train_dataset, val_dataset)

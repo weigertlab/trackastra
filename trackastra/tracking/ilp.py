@@ -1,82 +1,101 @@
 import logging
 import time
-from types import SimpleNamespace
+from dataclasses import dataclass, fields
+from pathlib import Path
 
 import networkx as nx
 import yaml
 
-try:
-    import motile
-except ModuleNotFoundError:
-    raise ModuleNotFoundError(
-        "For tracking with an ILP, please conda install the optional `motile`"
-        " dependency following https://funkelab.github.io/motile/install.html."
-    )
-
-
 logger = logging.getLogger(__name__)
 
-ILP_CONFIGS = {
-    "gt": SimpleNamespace(
-        nodeW=0,
-        nodeC=-10,  # take all nodes
-        edgeW=-1,
-        edgeC=0,
-        appearC=0.25,
-        disappearC=0.5,
-        splitC=0.25,
-    ),
-    "deepcell_gt": SimpleNamespace(
-        nodeW=0,
-        nodeC=-10,  # take all nodes
-        edgeW=-1,
-        edgeC=0,
-        appearC=0.25,
-        disappearC=0.5,
-        splitC=1,
-    ),
-    "deepcell_gt_tuned": SimpleNamespace(
-        nodeW=0,
-        nodeC=-10,  # take all nodes
-        edgeW=-1,
-        edgeC=0,
-        appearC=0.5,
-        disappearC=0.5,
-        splitC=1,
-    ),
-    "deepcell_res_tuned": SimpleNamespace(
-        nodeW=0,
-        nodeC=0.25,
-        edgeW=-1,
-        edgeC=-0.25,
-        appearC=0.25,
-        disappearC=0.25,
-        splitC=1.0,
+
+def _require_motile():
+    """Import the optional ``motile`` dependency, with an install hint on failure."""
+    try:
+        import motile
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "For tracking with an ILP, please conda install the optional `motile`"
+            " dependency following https://funkelab.github.io/motile/install.html."
+        )
+    return motile
+
+
+@dataclass(frozen=True)
+class ILPConfig:
+    """Weights and constants for the motile ILP tracking costs.
+
+    Each ``*_w`` weight scales a per-detection/per-edge ``weight`` attribute and each
+    ``*_c`` constant is a fixed cost added when the corresponding indicator is selected.
+    Negative costs encourage selection. Defaults reproduce the ``"gt"`` preset.
+    """
+
+    node_w: float = 0.0
+    node_c: float = -10.0  # strongly negative -> select all nodes
+    edge_w: float = -1.0
+    edge_c: float = 0.0
+    appear_c: float = 0.25
+    disappear_c: float = 0.5
+    split_c: float = 0.25
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "ILPConfig":
+        """Load an ILP config from a YAML file whose keys are field names."""
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        allowed = {f.name for f in fields(cls)}
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unknown ILP config keys {sorted(unknown)}; allowed {sorted(allowed)}."
+            )
+        return cls(**data)
+
+
+ILP_CONFIGS: dict[str, ILPConfig] = {
+    "gt": ILPConfig(),
+    "deepcell_gt": ILPConfig(split_c=1.0),
+    "deepcell_gt_tuned": ILPConfig(appear_c=0.5, split_c=1.0),
+    "deepcell_res_tuned": ILPConfig(
+        node_c=0.25, edge_c=-0.25, disappear_c=0.25, split_c=1.0
     ),
 }
+
+
+def _resolve_ilp_config(ilp_config: "ILPConfig | str | None") -> ILPConfig:
+    if ilp_config is None:
+        return ILP_CONFIGS["gt"]
+    if isinstance(ilp_config, ILPConfig):
+        return ilp_config
+    try:
+        return ILP_CONFIGS[ilp_config]
+    except KeyError:
+        raise ValueError(
+            f"Unknown ILP config {ilp_config!r}. Choose from {list(ILP_CONFIGS)}"
+            " or pass an ILPConfig instance."
+        )
 
 
 def track_ilp(
     candidate_graph,
     allow_divisions: bool = True,
-    ilp_config: str = "gt",
-    params_file: str | None = None,
-    **kwargs,
+    ilp_config: "ILPConfig | str | None" = None,
 ) -> nx.DiGraph:
     if len(candidate_graph) == 0:
         return candidate_graph
 
+    motile = _require_motile()
+    config = _resolve_ilp_config(ilp_config)
     candidate_graph_motile = motile.TrackGraph(candidate_graph, frame_attribute="time")
 
-    ilp, _used_costs = solve_full_ilp(
+    solver = solve_full_ilp(
         candidate_graph_motile,
         allow_divisions=allow_divisions,
-        mode=ilp_config,
-        params_file=params_file,
+        config=config,
     )
-    print_solution_stats(ilp, candidate_graph_motile)
+    print_solution_stats(solver, candidate_graph_motile)
 
-    graph = solution_to_graph(ilp, candidate_graph_motile)
+    graph = solution_to_graph(solver, candidate_graph_motile)
 
     return graph
 
@@ -84,66 +103,37 @@ def track_ilp(
 def solve_full_ilp(
     graph,
     allow_divisions: bool,
-    mode: str,
-    params_file: str | None,
+    config: ILPConfig,
 ):
+    motile = _require_motile()
+    logger.info(f"Using ILP config {config}")
     solver = motile.Solver(graph)
-    if params_file:
-        with open(params_file) as f:
-            p = yaml.safe_load(f)
-        # TODO more checks
-        p = SimpleNamespace(**p)
-        logger.info(f"Using ILP parameters {p}")
-    else:
-        try:
-            p = ILP_CONFIGS[mode]
-            logger.info(f"Using `{mode}` ILP config.")
-        except KeyError:
-            raise ValueError(
-                f"Unknown ILP mode {mode}. Choose from {list(ILP_CONFIGS.keys())} or"
-                " supply custom parameters via `params_file` argument."
-            )
 
-    # Add costs
-    used_costs = SimpleNamespace()
-
-    # NODES
     solver.add_cost(
-        motile.costs.NodeSelection(weight=p.nodeW, constant=p.nodeC, attribute="weight")
+        motile.costs.NodeSelection(
+            weight=config.node_w, constant=config.node_c, attribute="weight"
+        )
     )
-    used_costs.nodeW = p.nodeW
-    used_costs.nodeC = p.nodeC
-
-    # EDGES
     solver.add_cost(
-        motile.costs.EdgeSelection(weight=p.edgeW, constant=p.edgeC, attribute="weight")
+        motile.costs.EdgeSelection(
+            weight=config.edge_w, constant=config.edge_c, attribute="weight"
+        )
     )
-    used_costs.edgeW = p.edgeW
-    used_costs.edgeC = p.edgeC
-
-    # APPEAR
-    solver.add_cost(motile.costs.Appear(constant=p.appearC))
-    used_costs.appearC = p.appearC
-
-    # DISAPPEAR
-    solver.add_cost(motile.costs.Disappear(constant=p.disappearC))
-    used_costs.disappearC = p.disappearC
-
-    # DIVISION
+    solver.add_cost(motile.costs.Appear(constant=config.appear_c))
+    solver.add_cost(motile.costs.Disappear(constant=config.disappear_c))
     if allow_divisions:
-        solver.add_cost(motile.costs.Split(constant=p.splitC))
-        used_costs.splitC = p.splitC
+        solver.add_cost(motile.costs.Split(constant=config.split_c))
 
-    # Add constraints
     solver.add_constraint(motile.constraints.MaxParents(1))
     solver.add_constraint(motile.constraints.MaxChildren(2 if allow_divisions else 1))
 
     solver.solve()
 
-    return solver, vars(used_costs)
+    return solver
 
 
 def solution_to_graph(solver, base_graph) -> nx.DiGraph:
+    motile = _require_motile()
     new_graph = nx.DiGraph()
     node_indicators = solver.get_variables(motile.variables.NodeSelected)
     edge_indicators = solver.get_variables(motile.variables.EdgeSelected)
@@ -162,6 +152,7 @@ def solution_to_graph(solver, base_graph) -> nx.DiGraph:
 
 
 def print_solution_stats(solver, graph, gt_graph=None):
+    motile = _require_motile()
     time.sleep(0.1)  # to wait for ilpy prints
     print(
         f"\nCandidate graph\t\t{len(graph.nodes):3} nodes\t{len(graph.edges):3} edges"
