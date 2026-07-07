@@ -899,6 +899,8 @@ class TrackingLightningModule(LightningModule):
             {
                 # real (non-pad) detections summed over the batch
                 "detections_per_batch": float((~batch["padding_mask"].bool()).sum()),
+                # supervised directed association decisions (loss_mask) over the batch
+                "supervised_per_batch": float(out["mask"].sum()),
                 "padding_fraction": out["padding_fraction"],
             },
             on_step=True,
