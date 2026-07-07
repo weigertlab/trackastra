@@ -50,6 +50,7 @@ from trackastra.training import (
     create_train_parser,
     load_model_from_path,
     load_sequences,
+    node_degree_class_weights,
     normalize_source_specs,
     parse_train_args,
     parse_training_config,
@@ -1212,6 +1213,68 @@ def test_build_trainer_facade_fits_domain_datasets(monkeypatch, tmp_path):
     )
 
 
+def test_fit_injects_node_degree_weights_when_node_loss_positive(monkeypatch, tmp_path):
+    created_modules = []
+
+    class FakeLightningModule:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created_modules.append(self)
+
+    class FakeTrainer:
+        def __init__(self, **kwargs):
+            pass
+
+        def fit(self, *args, **kwargs):
+            return "fit-result"
+
+    class FakeSubDataset:
+        node_in_degree_counts = np.array([4, 400], dtype=np.int64)
+        node_out_degree_counts = np.array([8, 400, 4], dtype=np.int64)
+
+    class FakeBundle:
+        def __init__(self):
+            self.datasets = [FakeSubDataset()]
+
+        def dataloader(self, **kwargs):
+            return "loader"
+
+    monkeypatch.setattr(
+        training_api, "_tracking_lightning_module_class", lambda: FakeLightningModule
+    )
+    monkeypatch.setattr(training_api, "_lightning_trainer_class", lambda: FakeTrainer)
+
+    facade = build_trainer(
+        TrainConfig(
+            epochs=1,
+            warmup_epochs=1,
+            logger="none",
+            outdir=tmp_path,
+            mixed_precision=False,
+            loss_kwargs={"delta_cutoff": 1, "causal_norm": "none", "node_loss": 0.5},
+            tracking_kwargs={"tracking_frequency": 0},
+            runtime_kwargs={
+                "lightning_runtime": LightningTrainerRuntime(
+                    logdir=tmp_path,
+                    logger=False,
+                    callbacks=[],
+                    profiler=None,
+                    run_name="run",
+                )
+            },
+        )
+    )
+    facade.fit("model", FakeBundle(), FakeBundle())
+
+    kwargs = created_modules[0].kwargs
+    assert kwargs["node_loss"] == 0.5
+    assert kwargs["node_in_weights"].shape == (2,)
+    assert kwargs["node_out_weights"].shape == (3,)
+    # rarer classes get more weight; each vector is mean-normalized to 1
+    assert float(kwargs["node_in_weights"][0]) > float(kwargs["node_in_weights"][1])
+    assert abs(float(kwargs["node_out_weights"].mean()) - 1.0) < 1e-5
+
+
 def test_trainer_fit_returns_without_lightning_when_epochs_zero(monkeypatch):
     created_modules = []
     created_trainers = []
@@ -1730,3 +1793,71 @@ def test_train_dry_run(download_gt_example_ctc):
     result = os.system(cmd)
 
     assert result == 0
+
+
+def test_node_degree_class_weights_properties():
+    # class 0 much rarer than class 1 -> weight[0] > weight[1]; mean normalized to 1.
+    weights = node_degree_class_weights(np.array([4, 400], dtype=np.int64), 2)
+    assert torch.isfinite(weights).all()
+    assert weights.shape == (2,)
+    assert abs(float(weights.mean()) - 1.0) < 1e-5
+    assert float(weights[0]) > float(weights[1])
+    # zero count stays finite (the 1 + sqrt(n) guard) and gets the largest weight.
+    zero = node_degree_class_weights(np.array([0, 100, 25], dtype=np.int64), 3)
+    assert torch.isfinite(zero).all()
+    assert float(zero.argmax()) == 0
+
+
+def test_node_degree_loss_masks_unobservable_and_censored():
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=4,
+        d_model=32,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        node_head=True,
+        attn_positional_bias="none",
+    )
+    lm = TrackingLightningModule(model, node_loss=1.0, delta_cutoff=2)
+
+    torch.manual_seed(0)
+    out_logits = torch.randn(1, 3, 3, requires_grad=True)
+    in_logits = torch.randn(1, 3, 2, requires_grad=True)
+    batch = {
+        "node_out_degree": torch.tensor([[1, 1, 0]]),
+        "node_in_degree": torch.tensor([[0, 1, 1]]),
+    }
+    succ = torch.ones(1, 3, dtype=torch.bool)
+    pred = torch.ones(1, 3, dtype=torch.bool)
+    # timepoints 0,1,2 -> mask_time[i,j] = 0 < t_j - t_i <= 2
+    t = torch.tensor([[0, 1, 2]])
+    dt = t.unsqueeze(1) - t.unsqueeze(2)
+    mask_time = (dt > 0) & (dt <= 2)
+    mask_invalid = torch.zeros(1, 3, 3, dtype=torch.bool)
+
+    out_ce, in_ce = lm._node_degree_loss(
+        out_logits, in_logits, batch, succ, pred, mask_time, mask_invalid
+    )
+    # node 2 has no later node -> out-degree unobservable; node 0 has no earlier node
+    # -> in-degree unobservable. Perturbing those masked logits must not move the loss.
+    with torch.no_grad():
+        out_logits[0, 2] += 100.0  # masked out node
+        in_logits[0, 0] += 100.0  # masked in node
+    out_ce2, in_ce2 = lm._node_degree_loss(
+        out_logits, in_logits, batch, succ, pred, mask_time, mask_invalid
+    )
+    assert torch.allclose(out_ce, out_ce2)
+    assert torch.allclose(in_ce, in_ce2)
+
+    # censoring a node via the availability flag also removes it from the loss.
+    pred_censored = pred.clone()
+    pred_censored[0, 1] = False
+    _out_ce, in_ce_censored = lm._node_degree_loss(
+        out_logits, in_logits, batch, succ, pred_censored, mask_time, mask_invalid
+    )
+    with torch.no_grad():
+        in_logits[0, 1] += 100.0  # now-censored node
+    _out_ce, in_ce_censored2 = lm._node_degree_loss(
+        out_logits, in_logits, batch, succ, pred_censored, mask_time, mask_invalid
+    )
+    assert torch.allclose(in_ce_censored, in_ce_censored2)

@@ -3,6 +3,8 @@
 from .ilp import ILP_CONFIGS, ILPConfig
 from .track_graph import TrackGraph
 from .tracking import (
+    GREEDY_CONFIGS,
+    GreedyConfig,
     build_graph,
     track_greedy,
 )

@@ -451,6 +451,50 @@ def build_model(
     return TrackingTransformer(**model_config.transformer_kwargs())
 
 
+def pooled_node_degree_counts(bundle: Any) -> tuple[Any, Any]:
+    """Pad-and-sum per-dataset node in/out degree bincounts over a dataset bundle."""
+    import numpy as np
+
+    def _pool(attr: str):
+        total = np.zeros(0, dtype=np.int64)
+        for ds in getattr(bundle, "datasets", []):
+            counts = getattr(ds, attr, None)
+            if counts is None or len(counts) == 0:
+                continue
+            counts = np.asarray(counts, dtype=np.int64)
+            if len(counts) > len(total):
+                total = np.pad(total, (0, len(counts) - len(total)))
+            total[: len(counts)] += counts
+        return total
+
+    return _pool("node_in_degree_counts"), _pool("node_out_degree_counts")
+
+
+def node_degree_class_weights(counts: Any, num_classes: int) -> Any:
+    """Class weights ``1 / (1 + sqrt(n_c))`` normalized to mean 1.
+
+    Counts are truncated/zero-padded to ``num_classes``; a nonzero count beyond the
+    head's class range (e.g. a merge in in-degree) is warned about, not silently kept.
+    """
+    import numpy as np
+    import torch
+
+    counts = np.asarray(counts, dtype=np.float64)
+    if len(counts) > num_classes and counts[num_classes:].sum() > 0:
+        logger.warning(
+            "Node-degree counts have %d samples in classes >= %d (beyond the head's "
+            "%d classes); these are dropped from the class weights.",
+            int(counts[num_classes:].sum()),
+            num_classes,
+            num_classes,
+        )
+    fixed = np.zeros(num_classes, dtype=np.float64)
+    fixed[: min(num_classes, len(counts))] = counts[:num_classes]
+    weights = 1.0 / (1.0 + np.sqrt(fixed))
+    weights = weights / weights.mean()
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def resolve_model_checkpoint_reference(path: Path | str) -> tuple[Path, Path | None]:
     """Resolve a model folder and optional checkpoint path from a user path."""
     path = Path(path).expanduser()
@@ -603,9 +647,24 @@ class TrackastraTrainer:
             )
 
         runtime = self._runtime()
+        module_kwargs = self._lightning_module_kwargs(model)
+        if module_kwargs.get("node_loss", 0) > 0:
+            in_counts, out_counts = pooled_node_degree_counts(train_dataset)
+            module_kwargs["node_in_weights"] = node_degree_class_weights(in_counts, 2)
+            module_kwargs["node_out_weights"] = node_degree_class_weights(out_counts, 3)
+            logger.info(
+                "Node in-degree class weights: %s (counts=%s)",
+                module_kwargs["node_in_weights"].tolist(),
+                in_counts.tolist(),
+            )
+            logger.info(
+                "Node out-degree class weights: %s (counts=%s)",
+                module_kwargs["node_out_weights"].tolist(),
+                out_counts.tolist(),
+            )
         lightning_module = build_or_resume_lightning_module(
             _tracking_lightning_module_class(),
-            self._lightning_module_kwargs(model),
+            module_kwargs,
             logdir=runtime.logdir,
             resume=self.config.resume,
         )
@@ -698,6 +757,7 @@ def _training_config_from_args(
         architecture_version=args.architecture_version,
         disable_abs_pos=args.disable_abs_pos,
         disable_input_norm=args.disable_input_norm,
+        node_head=args.node_loss > 0,
         model_path=Path(args.model) if args.model is not None else None,
     )
     sequence_kwargs = {
@@ -799,6 +859,7 @@ def _training_config_from_args(
             "loss_norm": args.loss_norm,
             "focal_loss_gamma": args.focal_loss_gamma,
             "div_upweight": args.div_upweight,
+            "node_loss": args.node_loss,
         },
         tracking_kwargs={
             "tracking_frequency": args.tracking_frequency,

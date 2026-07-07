@@ -29,7 +29,12 @@ from ..data.wrfeat import (
     normalize_to_diameter,
     transform_feature_geometry,
 )
-from ..tracking import apply_solution_graph_to_masks, build_graph, track_greedy
+from ..tracking import (
+    apply_solution_graph_to_masks,
+    build_graph,
+    track_greedy,
+)
+from ..tracking.tracking import _resolve_greedy_config
 from ..utils import normalize
 from .model import TrackingTransformer
 from .predict import predict_windows
@@ -43,7 +48,7 @@ except ImportError:
     PRETRAINED_FEATS_INSTALLED = False
 
 if TYPE_CHECKING:
-    from ..tracking import ILPConfig
+    from ..tracking import GreedyConfig, ILPConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -587,6 +592,26 @@ class Trackastra:
         )
         return point_features, windows, ndim
 
+    def _check_node_priors(self, mode, greedy_config, ilp_config) -> None:
+        """Raise if node-degree priors are requested but the model has no node heads."""
+        if bool(getattr(self.transformer, "node_head", False)):
+            return
+        if mode in ("greedy", "greedy_nodiv"):
+            cfg = _resolve_greedy_config(greedy_config)
+            lam = (cfg.lam_appear, cfg.lam_disappear, cfg.lam_split)
+        elif mode == "ilp":
+            from trackastra.tracking.ilp import _resolve_ilp_config
+
+            cfg = _resolve_ilp_config(ilp_config)
+            lam = (cfg.lam_appear, cfg.lam_disappear, cfg.lam_split)
+        else:
+            return
+        if any(lam):
+            raise ValueError(
+                f"{mode} node-degree priors (lam_*) require a model trained with "
+                "node_head=True; this model has no node-degree heads."
+            )
+
     def _track_from_predictions(
         self,
         predictions,
@@ -598,6 +623,7 @@ class Trackastra:
         delta_t: int = 1,
         return_candidate: bool = False,
         ilp_config: "ILPConfig | str | None" = None,
+        greedy_config: "GreedyConfig | str | None" = None,
         **kwargs,
     ) -> nx.DiGraph | tuple[nx.DiGraph, nx.DiGraph]:
         logger.info("Running greedy tracker")
@@ -630,10 +656,13 @@ class Trackastra:
             max_neighbors=max_neighbors,
             delta_t=delta_t,
         )
+        self._check_node_priors(mode, greedy_config, ilp_config)
         if mode == "greedy":
-            solution = track_greedy(candidate_graph)
+            solution = track_greedy(candidate_graph, config=greedy_config)
         elif mode == "greedy_nodiv":
-            solution = track_greedy(candidate_graph, allow_divisions=False)
+            solution = track_greedy(
+                candidate_graph, allow_divisions=False, config=greedy_config
+            )
         elif mode == "ilp":
             from trackastra.tracking.ilp import track_ilp
 
@@ -656,6 +685,7 @@ class Trackastra:
         batch_size: int | None = None,
         progbar_class=tqdm,
         ilp_config: "ILPConfig | str | None" = None,
+        greedy_config: "GreedyConfig | str | None" = None,
         **kwargs,
     ) -> TrackResult:
         """Track point detections.
@@ -702,6 +732,7 @@ class Trackastra:
             batch_size=batch_size,
             progbar_class=progbar_class,
             ilp_config=ilp_config,
+            greedy_config=greedy_config,
             **kwargs,
         )
 
@@ -716,6 +747,7 @@ class Trackastra:
         return_details: bool = False,
         edge_threshold: float = 0.05,
         ilp_config: "ILPConfig | str | None" = None,
+        greedy_config: "GreedyConfig | str | None" = None,
         **kwargs,
     ) -> TrackResult:
         """Track one canonical detection sequence.
@@ -755,11 +787,16 @@ class Trackastra:
                 mode=mode,
                 return_candidate=True,
                 ilp_config=ilp_config,
+                greedy_config=greedy_config,
                 **kwargs,
             )
         else:
             track_graph = self._track_from_predictions(
-                predictions, mode=mode, ilp_config=ilp_config, **kwargs
+                predictions,
+                mode=mode,
+                ilp_config=ilp_config,
+                greedy_config=greedy_config,
+                **kwargs,
             )
         masks_tracked = (
             apply_solution_graph_to_masks(track_graph, detections.masks)

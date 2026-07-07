@@ -99,9 +99,12 @@ class TrackingLightningModule(LightningModule):
         div_upweight: float = 20,
         grad_log_every_n_epochs: int = 10,
         log_edge_rates: bool = True,
+        node_loss: float = 0.0,
+        node_in_weights=None,
+        node_out_weights=None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(ignore=["model", "node_in_weights", "node_out_weights"])
         self.grad_log_every_n_epochs = grad_log_every_n_epochs
         # pre-solver association FP/FN by link type (regular vs division); accumulated
         # per epoch and pooled across DDP ranks at epoch end (see _log_edge_error_rates)
@@ -144,6 +147,23 @@ class TrackingLightningModule(LightningModule):
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.div_upweight = div_upweight
+        # Auxiliary node in/out-degree loss. node_loss==0 disables it entirely (and
+        # requires no node head on the model). The class-weight vectors are registered
+        # as buffers so they follow the module to its device; None -> unweighted CE.
+        self.node_loss = node_loss
+        if node_loss > 0 and not getattr(self.model, "node_head", False):
+            raise ValueError(
+                "node_loss > 0 requires a model built with node_head=True"
+            )
+        self.register_buffer(
+            "node_in_weights",
+            None if node_in_weights is None else torch.as_tensor(node_in_weights).float(),
+        )
+        self.register_buffer(
+            "node_out_weights",
+            None if node_out_weights is None else torch.as_tensor(node_out_weights).float(),
+        )
+        self._node_violation_warned = False
         self.loss_spike_debug_dir: Path | None = None
         self._loss_spike_debug_counts: dict[tuple[str, str, int], int] = {}
         self._loss_spike_debug_total = 0
@@ -289,6 +309,83 @@ class TrackingLightningModule(LightningModule):
         """
         return edge_error_counts(A, prob, timepoints, mask, gt_division, thresholds)
 
+    @staticmethod
+    def _masked_ce(logits, target, valid, weight):
+        """Weighted cross-entropy over the valid nodes; 0 if none are valid."""
+        if not bool(valid.any()):
+            return logits.new_zeros(())
+        return torch.nn.functional.cross_entropy(
+            logits[valid].float(), target[valid], weight=weight
+        )
+
+    def _node_degree_loss(
+        self,
+        out_logits,
+        in_logits,
+        batch,
+        succ_avail,
+        pred_avail,
+        mask_time,
+        mask_invalid,
+    ):
+        """Weighted CE for out-degree (source rep) and in-degree (target rep).
+
+        Valid = GT link-set available AND target in the head's class range AND the
+        node is observable in-window (has a candidate successor/predecessor within
+        delta_cutoff). Observability reuses ``mask_time & ~mask_invalid`` so it is
+        automatically sparsity- and delta-consistent with the edge supervision.
+        """
+        if "node_out_degree" not in batch or "node_in_degree" not in batch:
+            raise KeyError(
+                "node_loss > 0 but the batch has no node_in/out_degree targets; the "
+                "training GT (LineageGraph) does not carry node degrees"
+            )
+        out_tgt = batch["node_out_degree"]
+        in_tgt = batch["node_in_degree"]
+        succ_avail = succ_avail.bool()
+        pred_avail = pred_avail.bool()
+
+        valid_pair = mask_time & ~mask_invalid
+        obs_out = valid_pair.any(dim=-1)  # source has a candidate successor in-window
+        obs_in = valid_pair.any(dim=-2)  # target has a candidate predecessor in-window
+
+        valid_out = succ_avail & (out_tgt >= 0) & (out_tgt <= 2) & obs_out
+        valid_in = pred_avail & (in_tgt >= 0) & (in_tgt <= 1) & obs_in
+
+        if not self._node_violation_warned:
+            n_bad = int(
+                ((out_tgt > 2) & succ_avail).sum() + ((in_tgt > 1) & pred_avail).sum()
+            )
+            if n_bad:
+                logger.warning(
+                    "Dropping %d node(s) with out-degree>2 or in-degree>1 "
+                    "(merge / over-division) from the node loss",
+                    n_bad,
+                )
+                self._node_violation_warned = True
+
+        out_ce = self._masked_ce(out_logits, out_tgt, valid_out, self.node_out_weights)
+        in_ce = self._masked_ce(in_logits, in_tgt, valid_in, self.node_in_weights)
+        return out_ce, in_ce
+
+    def _log_node_losses(self, stage: str, out: dict, batch_size: int) -> None:
+        """Log node in/out-degree losses and their sum (losses only)."""
+        if self.node_loss <= 0 or out.get("node_loss_out") is None:
+            return
+        out_ce = out["node_loss_out"]
+        in_ce = out["node_loss_in"]
+        self.log_dict(
+            {
+                f"{stage}_node_loss": out_ce + in_ce,
+                f"{stage}_node_loss_out": out_ce,
+                f"{stage}_node_loss_in": in_ce,
+            },
+            on_step=stage == "train",
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+
     def _common_step(self, batch):
         feats = batch["features"]
         coords = batch["coords"]
@@ -300,7 +397,14 @@ class TrackingLightningModule(LightningModule):
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
 
-        A_pred, neighbor_mask = self.model(coords, feats, padding_mask=padding_mask)
+        out_degree_logits = None
+        in_degree_logits = None
+        if self.node_loss > 0:
+            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = self.model(
+                coords, feats, padding_mask=padding_mask, return_node_logits=True
+            )
+        else:
+            A_pred, neighbor_mask = self.model(coords, feats, padding_mask=padding_mask)
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
@@ -398,6 +502,20 @@ class TrackingLightningModule(LightningModule):
         else:
             loss = _reduce_matrix_loss(loss_before_reduce, mask)
 
+        node_loss_out = None
+        node_loss_in = None
+        if self.node_loss > 0:
+            node_loss_out, node_loss_in = self._node_degree_loss(
+                out_degree_logits,
+                in_degree_logits,
+                batch,
+                gt_successor_set_available,
+                gt_predecessor_set_available,
+                mask_time,
+                mask_invalid,
+            )
+            loss = loss + self.node_loss * (node_loss_out + node_loss_in)
+
         edge_counts = None
         if self.log_edge_rates:
             with torch.no_grad():
@@ -428,6 +546,8 @@ class TrackingLightningModule(LightningModule):
             mask_time=mask_time,
             mask_valid=mask_valid,
             edge_counts=edge_counts,
+            node_loss_out=node_loss_out,
+            node_loss_in=node_loss_in,
         )
 
     def _accumulate_edge_counts(self, stage, counts):
@@ -887,6 +1007,7 @@ class TrackingLightningModule(LightningModule):
             sync_dist=True,
             batch_size=batch["coords"].shape[0],
         )
+        self._log_node_losses("train", out, batch["coords"].shape[0])
 
         # self.train_loss.append(loss)
 
@@ -956,6 +1077,7 @@ class TrackingLightningModule(LightningModule):
             sync_dist=True,
             batch_size=batch["coords"].shape[0],
         )
+        self._log_node_losses("val", out, batch["coords"].shape[0])
 
         self._accumulate_edge_counts("val", out["edge_counts"])
 

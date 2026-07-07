@@ -199,6 +199,65 @@ def test_dense_and_sparse_share_state_dict():
         assert torch.equal(value, sparse.state_dict()[key])
 
 
+def _node_head_model(**overrides):
+    kwargs = dict(
+        coord_dim=2,
+        feat_dim=4,
+        d_model=32,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        attn_positional_bias="none",
+    )
+    kwargs.update(overrides)
+    return TrackingTransformer(**kwargs)
+
+
+def _node_head_inputs(n=9, seed=0):
+    torch.manual_seed(seed)
+    coords = torch.rand(2, n, 3)
+    coords[..., 0] = torch.randint(0, 3, (2, n)).float()
+    return coords, torch.rand(2, n, 4)
+
+
+def test_node_head_forward_shapes():
+    model = _node_head_model(node_head=True)
+    coords, feats = _node_head_inputs()
+    out = model(coords, feats, return_node_logits=True)
+    assert len(out) == 4
+    _A, _nbr, out_logits, in_logits = out
+    assert out_logits.shape == (2, coords.shape[1], 3)
+    assert in_logits.shape == (2, coords.shape[1], 2)
+
+
+def test_node_head_disabled_is_backward_compatible():
+    disabled = _node_head_model()  # node_head defaults to False
+    assert not any("degree_head" in k for k in disabled.state_dict())
+    coords, feats = _node_head_inputs()
+    out = disabled(coords, feats)
+    assert len(out) == 2  # unchanged (A, neighbor_mask)
+    with pytest.raises(RuntimeError):
+        disabled(coords, feats, return_node_logits=True)
+
+
+def test_node_head_survives_save_load(tmp_path):
+    model = _node_head_model(node_head=True)
+    model.save(tmp_path)
+    loaded = TrackingTransformer.from_folder(tmp_path)
+    assert loaded.config["node_head"] is True
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, loaded.state_dict()[key])
+
+
+def test_node_head_receives_gradients():
+    model = _node_head_model(node_head=True)
+    coords, feats = _node_head_inputs()
+    _A, _nbr, out_logits, in_logits = model(coords, feats, return_node_logits=True)
+    (out_logits.sum() + in_logits.sum()).backward()
+    for head in (model.out_degree_head, model.in_degree_head):
+        grads = [p.grad for p in head.parameters()]
+        assert all(g is not None and g.abs().sum() > 0 for g in grads)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + Triton")
 def test_sparse_model_forward_backward_cuda():
     torch.manual_seed(0)

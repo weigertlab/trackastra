@@ -72,6 +72,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "matches this value. Defaults to the model train config when present."
         ),
     )
+    parser.add_argument(
+        "--node_prior",
+        type=float,
+        default=0.0,
+        help=(
+            "Single weight (lambda) applied to all node-degree priors "
+            "(appear/disappear/split) in greedy or ILP tracking. 0 disables them "
+            "(default). Requires a model trained with node_head=True."
+        ),
+    )
     parser.add_argument("-f", "--overwrite", action="store_true")
     parser.add_argument(
         "--errormovie",
@@ -260,11 +270,22 @@ def predict_and_evaluate(
     print_results: bool = True,
     errormovie: bool = False,
     error_report: bool = False,
-    link_breakdown: bool = False,
+    link_breakdown: bool = True,
+    node_prior: float = 0.0,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
     from trackastra.data import DetectionSequence, load_ctc_images_masks
-    from trackastra.tracking import graph_to_ctc
+    from trackastra.tracking import GreedyConfig, ILPConfig, graph_to_ctc
+
+    # A single lambda drives all three node-degree priors (appear/disappear/split)
+    # for whichever solver `mode` selects. 0 -> current behavior (no config passed).
+    node_prior_kwargs: dict = {}
+    if node_prior != 0:
+        lam = dict(lam_appear=node_prior, lam_disappear=node_prior, lam_split=node_prior)
+        if mode in ("greedy", "greedy_nodiv"):
+            node_prior_kwargs["greedy_config"] = GreedyConfig(**lam)
+        elif mode == "ilp":
+            node_prior_kwargs["ilp_config"] = ILPConfig(**lam)
 
     rows = []
     used_names: set[str] = set()
@@ -303,7 +324,7 @@ def predict_and_evaluate(
             keep_masks=True,
             keep_images=True,
         )
-        track_kwargs = dict(mode=mode, spatial_cutoff=spatial_cutoff)
+        track_kwargs = dict(mode=mode, spatial_cutoff=spatial_cutoff, **node_prior_kwargs)
         if error_report:
             track_kwargs["return_details"] = True
         result = model.track(
@@ -322,7 +343,10 @@ def predict_and_evaluate(
         evaluated = evaluate_ctc(gt_path, output_path, return_matched=need_matched)
         values, matched = evaluated if need_matched else (evaluated, None)
         if link_breakdown and matched is not None:
-            values = {**values, **link_type_breakdown(matched)}
+            try:
+                values = {**values, **link_type_breakdown(matched)}
+            except Exception as error:
+                print(f"Could not compute division link breakdown for {name}: {error}")
 
         if error_report:
             try:
@@ -361,7 +385,7 @@ def predict_and_evaluate(
     results = pd.concat([results, pd.DataFrame([mean])], ignore_index=True)
     results.to_csv(outdir / model_name / "metrics.csv", index=False)
     if print_results:
-        print(results.to_string(index=False, float_format=lambda value: f"{value:.6f}"))
+        print(results.to_string(index=False, float_format=lambda value: f"{value:.4f}"))
     return results
 
 
@@ -394,6 +418,7 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         overwrite=args.overwrite,
         errormovie=args.errormovie,
         error_report=getattr(args, "error_report", False),
+        node_prior=args.node_prior,
     )
 
 

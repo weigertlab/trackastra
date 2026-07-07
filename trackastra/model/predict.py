@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
+def predict(
+    batch: list[dict], model: TrackingTransformer
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
     """Predict association scores between objects in a batch of windows.
 
     Args:
@@ -23,7 +25,9 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
         model: TrackingTransformer model to use for prediction.
 
     Returns:
-        Array of association scores between objects.
+        ``(A, p_out, p_in)``: the ``(B, N, N)`` association scores, and - when the
+        model has node-degree heads - the per-node out-degree probabilities
+        ``(B, N, 3)`` and in-degree probabilities ``(B, N, 2)`` (else ``None``).
     """
     # feats = torch.stack([torch.from_numpy(b["features"]) for b in batch])
     # coords = torch.stack([torch.from_numpy(b["coords"]) for b in batch])
@@ -61,8 +65,21 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
 
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
+    want_node = bool(getattr(model, "node_head", False))
+    p_out = p_in = None
     with torch.no_grad():
-        if pretrained_feats is None:
+        if want_node:
+            # pretrained-feats models don't accept return_node_logits; guarded by the
+            # `node_head` flag on the default transformer only.
+            A, _, out_logits, in_logits = model(
+                coords,
+                features=feats,
+                padding_mask=padding_mask,
+                return_node_logits=True,
+            )
+            p_out = torch.softmax(out_logits.float(), dim=-1).detach().cpu().numpy()
+            p_in = torch.softmax(in_logits.float(), dim=-1).detach().cpu().numpy()
+        elif pretrained_feats is None:
             A, _ = model(coords, features=feats, padding_mask=padding_mask)
         else:
             A, _ = model(
@@ -82,7 +99,7 @@ def predict(batch: list[dict], model: TrackingTransformer) -> np.ndarray:
         # TODO stay on device for further computation?
         A = A.detach().cpu().numpy()
 
-    return A
+    return A, p_out, p_in
 
 
 def predict_windows(
@@ -157,6 +174,15 @@ def predict_windows(
     # per write and was the dominant cost of this loop.
     edge_rows, edge_cols, edge_w, edge_a = [], [], [], []
 
+    # Per-node degree-probability accumulators (only when the model has node heads).
+    # A detection appears in several overlapping windows; pool its softmax degree
+    # probabilities with the same window weighting used for edges, then convert to
+    # per-node log-odds attached to node_properties.
+    have_node = bool(getattr(model, "node_head", False))
+    p_out_acc = np.zeros((max_id, 3), dtype=np.float64) if have_node else None
+    p_in_acc = np.zeros((max_id, 2), dtype=np.float64) if have_node else None
+    node_w_acc = np.zeros(max_id, dtype=np.float64) if have_node else None
+
     for t in progbar_class(
         range(0, len(windows), batch_size),
         desc="Computing associations",
@@ -168,11 +194,25 @@ def predict_windows(
             logger.warning(f"No detections in window {t} - {t + batch_size}, skipping")
             continue
 
-        A_batch = predict(batch, model)
+        A_batch, p_out_batch, p_in_batch = predict(batch, model)
 
         for i, A in enumerate(A_batch):
             timepoints = batch[i]["timepoints"].numpy()
             labels = batch[i]["labels"].numpy()
+
+            n_real = len(timepoints)
+            if have_node and p_out_batch is not None:
+                # window weight per node (= edge weighting evaluated at the node time)
+                t_mid = t + (model.config["window"] - 1) / 2
+                w_node = np.exp(-intra_window_weight * (timepoints - t_mid) ** 2)
+                gids = np.fromiter(
+                    (time_labels_to_id[(tt, la)] for tt, la in zip(timepoints, labels)),
+                    dtype=np.int64,
+                    count=n_real,
+                )
+                np.add.at(p_out_acc, gids, w_node[:, None] * p_out_batch[i][:n_real])
+                np.add.at(p_in_acc, gids, w_node[:, None] * p_in_batch[i][:n_real])
+                np.add.at(node_w_acc, gids, w_node)
 
             dt = timepoints[None, :] - timepoints[:, None]
             time_mask = np.logical_and(dt <= delta_t, dt > 0)
@@ -233,6 +273,24 @@ def predict_windows(
         )
     else:
         weights = tuple()
+
+    if have_node:
+        # Mean-pool the accumulated degree probabilities and attach per-node log-odds
+        # (a = has-parent vs appear, c = continue vs end, s = divide vs single-child).
+        # Nodes never seen in a window keep no prior (downstream defaults to 0).
+        eps = 1e-8
+        seen = node_w_acc > 0
+        cnt = np.where(seen, node_w_acc, 1.0)[:, None]
+        lp_out = np.log(np.clip(p_out_acc / cnt, eps, 1.0))
+        lp_in = np.log(np.clip(p_in_acc / cnt, eps, 1.0))
+        a = lp_in[:, 1] - lp_in[:, 0]
+        c = lp_out[:, 1] - lp_out[:, 0]
+        s = lp_out[:, 2] - lp_out[:, 1]
+        for gid, node in enumerate(node_properties):
+            if seen[gid]:
+                node["a"] = float(a[gid])
+                node["c"] = float(c[gid])
+                node["s"] = float(s[gid])
 
     results = dict()
     results["nodes"] = node_properties

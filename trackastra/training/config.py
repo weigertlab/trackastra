@@ -240,6 +240,13 @@ def create_train_parser() -> configargparse.ArgumentParser:
     )
     parser.add_argument("--div_upweight", type=float, default=2)
     parser.add_argument(
+        "--node_loss",
+        type=float,
+        default=0.0,
+        help="weight (lambda) of the auxiliary node in/out-degree loss; 0 disables "
+        "the node heads entirely (default: %(default)s)",
+    )
+    parser.add_argument(
         "--grad_log_every_n_epochs",
         type=int,
         default=10,

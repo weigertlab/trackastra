@@ -10,11 +10,13 @@ import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
 from trackastra.model import Trackastra, TrackingTransformer
 from trackastra.tracking import (
+    GreedyConfig,
     graph_to_ctc,
     graph_to_napari_tracks,
     track_greedy,
     write_to_geff,
 )
+from trackastra.tracking.ilp import ILPConfig, track_ilp
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
@@ -224,6 +226,113 @@ def test_greedy_retains_isolated_detections():
     assert set(result.nodes) == {0, 1, 2}
     assert set(result.edges) == {(0, 1)}
     assert result.nodes[2] == {"time": 0, "label": 2}
+
+
+def _division_candidate(s_parent: float) -> nx.DiGraph:
+    """Parent at t0 with two candidate children at t1 (a division candidate)."""
+    g = nx.DiGraph()
+    for n, t in ((0, 0), (1, 1), (2, 1)):
+        g.add_node(n, time=t, label=1, a=0.0, c=0.0, s=(s_parent if n == 0 else 0.0))
+    g.add_edge(0, 1, weight=0.9)
+    g.add_edge(0, 2, weight=0.8)
+    return g
+
+
+def test_greedy_node_prior_default_matches_plain_threshold():
+    # zero-weight GreedyConfig reproduces the plain threshold greedy, incl. dropping
+    # a sub-threshold edge, even when node priors are present on the graph.
+    g = _division_candidate(-5.0)
+    g.add_node(3, time=1, label=2, a=0.0, c=0.0, s=0.0)
+    g.add_edge(0, 3, weight=0.3)  # below default 0.5
+    default = track_greedy(g)
+    configured = track_greedy(g, config=GreedyConfig())
+    assert set(default.edges) == set(configured.edges) == {(0, 1), (0, 2)}
+
+
+def test_greedy_lam_split_suppresses_unlikely_division():
+    # strong "will not divide" prior (s << 0) + lam_split > 0 drops the 2nd child.
+    suppressed = track_greedy(_division_candidate(-5.0), config=GreedyConfig(lam_split=1.0))
+    assert suppressed.out_degree(0) == 1
+    # confident division prior keeps both children.
+    kept = track_greedy(_division_candidate(5.0), config=GreedyConfig(lam_split=1.0))
+    assert kept.out_degree(0) == 2
+
+
+def test_ilp_default_and_no_node_attributes():
+    # ILP with default (zero lam) config works on a graph without a/c/s attributes.
+    g = nx.DiGraph()
+    for n, t in ((0, 0), (1, 1), (2, 1)):
+        g.add_node(n, time=t, label=1, weight=1)
+    g.add_edge(0, 1, weight=0.9)
+    g.add_edge(0, 2, weight=0.8)
+    solution = track_ilp(g, ilp_config=ILPConfig())
+    assert solution.out_degree(0) == 2
+
+
+def test_ilp_lam_split_suppresses_unlikely_division():
+    g = _division_candidate(-5.0)
+    for n in g.nodes:
+        g.nodes[n]["weight"] = 1
+    assert track_ilp(g, ilp_config=ILPConfig()).out_degree(0) == 2
+    assert track_ilp(g, ilp_config=ILPConfig(lam_split=2.0)).out_degree(0) == 1
+
+
+def _node_head_point_model():
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=2,
+        window=2,
+        causal_norm="none",
+        node_head=True,
+    )
+    return Trackastra(
+        transformer=transformer,
+        inference_config={"features": "none"},
+        device="cpu",
+        batch_size=1,
+    )
+
+
+def test_track_points_with_node_head_and_greedy_prior_runs():
+    model = _node_head_point_model()
+    coords = [
+        np.array([[0.0, 0.0]], dtype=np.float32),
+        np.array([[1.0, 1.0]], dtype=np.float32),
+    ]
+    kw = dict(progbar_class=lambda iterable, **_kwargs: iterable, return_details=True)
+    # node priors get attached to the candidate graph nodes during prediction
+    result = model.track_points(coords, greedy_config=GreedyConfig(lam_split=1.0), **kw)
+    assert set(result.graph.nodes) == {0, 1}
+    assert all(
+        {"a", "c", "s"} <= set(result.candidate_graph.nodes[n]) for n in (0, 1)
+    )
+
+
+def test_node_prior_without_node_head_raises():
+    # plain (no node_head) model + nonzero greedy prior weight must raise.
+    transformer = TrackingTransformer(
+        coord_dim=2, feat_dim=0, d_model=16, nhead=2,
+        num_encoder_layers=0, num_decoder_layers=0, pos_embed_per_dim=2,
+        window=2, causal_norm="none",
+    )
+    model = Trackastra(
+        transformer=transformer, inference_config={"features": "none"},
+        device="cpu", batch_size=1,
+    )
+    with pytest.raises(ValueError, match="node_head=True"):
+        model.track_points(
+            coords=[
+                np.array([[0.0, 0.0]], dtype=np.float32),
+                np.array([[1.0, 1.0]], dtype=np.float32),
+            ],
+            greedy_config=GreedyConfig(lam_split=1.0),
+            progbar_class=lambda iterable, **_kwargs: iterable,
+        )
 
 
 @pytest.mark.parametrize(

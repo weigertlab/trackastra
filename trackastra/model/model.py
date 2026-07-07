@@ -62,6 +62,7 @@ class ModelConfig:
     architecture_version: Literal[1, 2] = 2
     disable_abs_pos: bool = False
     disable_input_norm: bool = False
+    node_head: bool = False
     model_path: Path | None = None
 
     def transformer_kwargs(self) -> dict[str, Any]:
@@ -91,6 +92,7 @@ class ModelConfig:
             "architecture_version": self.architecture_version,
             "disable_abs_pos": self.disable_abs_pos,
             "disable_input_norm": self.disable_input_norm,
+            "node_head": self.node_head,
         }
 
 
@@ -389,6 +391,16 @@ def _migrate_legacy_state_dict(state: OrderedDict) -> OrderedDict:
     return state
 
 
+def _make_node_head(d_model: int, num_classes: int) -> nn.Module:
+    """Small per-node classifier: LayerNorm -> Linear -> GELU -> Linear."""
+    return nn.Sequential(
+        nn.LayerNorm(d_model),
+        nn.Linear(d_model, d_model),
+        nn.GELU(),
+        nn.Linear(d_model, num_classes),
+    )
+
+
 class TrackingTransformer(torch.nn.Module):
     def __init__(
         self,
@@ -424,6 +436,7 @@ class TrackingTransformer(torch.nn.Module):
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
         disable_input_norm: bool = False,
+        node_head: bool = False,
         max_distance: int | None = None,
     ):
         super().__init__()
@@ -505,6 +518,7 @@ class TrackingTransformer(torch.nn.Module):
             architecture_version=architecture_version,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
+            node_head=node_head,
         )
         self.architecture_version = architecture_version
         self.attn_mode = attn_mode
@@ -588,6 +602,15 @@ class TrackingTransformer(torch.nn.Module):
             )
             self.head = head_cls(d_model, logit_norm=logit_norm, dropout=dropout)
 
+        # Optional auxiliary node-event heads. Built only when enabled, so a disabled
+        # model has no extra parameters and existing checkpoints load strict. The
+        # out-degree head reads the source (encoder) representation x, the in-degree
+        # head the target (decoder) representation y; see forward().
+        self.node_head = node_head
+        if node_head:
+            self.out_degree_head = _make_node_head(d_model, 3)
+            self.in_degree_head = _make_node_head(d_model, 2)
+
         if feature_embed_mode == "fourier":
             if feat_embed_per_dim > 1:
                 self.feat_embed = PositionalEncoding(
@@ -618,7 +641,9 @@ class TrackingTransformer(torch.nn.Module):
 
         # self.pos_embed = NoPositionalEncoding(d=pos_embed_per_dim * (1 + coord_dim))
 
-    def forward(self, coords, features=None, padding_mask=None):
+    def forward(
+        self, coords, features=None, padding_mask=None, return_node_logits=False
+    ):
         assert coords.ndim == 3 and coords.shape[-1] in (3, 4)
         _B, _N, _D = coords.shape
 
@@ -716,6 +741,18 @@ class TrackingTransformer(torch.nn.Module):
             bi = torch.arange(b, device=nbr_idx.device).view(b, 1, 1).expand_as(nbr_idx)
             ni = torch.arange(n, device=nbr_idx.device).view(1, n, 1).expand_as(nbr_idx)
             neighbor_mask[bi[v], ni[v], nbr_idx[v]] = True
+
+        if return_node_logits:
+            if not self.node_head:
+                raise RuntimeError(
+                    "return_node_logits=True requires the model to be built with "
+                    "node_head=True"
+                )
+            # out-degree from the source rep x, in-degree from the target rep y
+            out_degree_logits = self.out_degree_head(x)  # (B, N, 3)
+            in_degree_logits = self.in_degree_head(y)  # (B, N, 2)
+            return A, neighbor_mask, out_degree_logits, in_degree_logits
+
         return A, neighbor_mask
 
     def normalize_output(

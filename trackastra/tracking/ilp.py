@@ -37,6 +37,12 @@ class ILPConfig:
     appear_c: float = 0.25
     disappear_c: float = 0.5
     split_c: float = 0.25
+    # Weights on the per-node degree log-odds (graph attributes a/c/s, produced when
+    # the model has node-degree heads). All zero (default) reproduces the fixed-cost
+    # ILP exactly; nonzero requires those node attributes to be present.
+    lam_appear: float = 0.0
+    lam_disappear: float = 0.0
+    lam_split: float = 0.0
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ILPConfig":
@@ -119,10 +125,28 @@ def solve_full_ilp(
             weight=config.edge_w, constant=config.edge_c, attribute="weight"
         )
     )
-    solver.add_cost(motile.costs.Appear(constant=config.appear_c))
-    solver.add_cost(motile.costs.Disappear(constant=config.disappear_c))
+    # Node-degree priors layer per-node costs (weight * node attribute) on top of the
+    # fixed constants. The attribute is only wired when the weight is nonzero, so a
+    # zero weight neither changes the cost nor requires the a/c/s node attributes.
+    # Sign: linearizing max sum log p(degree) onto motile's indicators puts +a on
+    # Appear, +c on Disappear, -s on Split (see plans/node_loss.md).
+    def _event_cost(cost_cls, constant, weight, attribute):
+        if weight != 0:
+            return cost_cls(weight=weight, attribute=attribute, constant=constant)
+        return cost_cls(constant=constant)
+
+    solver.add_cost(
+        _event_cost(motile.costs.Appear, config.appear_c, config.lam_appear, "a")
+    )
+    solver.add_cost(
+        _event_cost(
+            motile.costs.Disappear, config.disappear_c, config.lam_disappear, "c"
+        )
+    )
     if allow_divisions:
-        solver.add_cost(motile.costs.Split(constant=config.split_c))
+        solver.add_cost(
+            _event_cost(motile.costs.Split, config.split_c, -config.lam_split, "s")
+        )
 
     solver.add_constraint(motile.constraints.MaxParents(1))
     solver.add_constraint(motile.constraints.MaxChildren(2 if allow_divisions else 1))

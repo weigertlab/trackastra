@@ -505,6 +505,28 @@ class TrackingDataset(Dataset):
         )
         return predecessor, successor
 
+    def _window_node_degrees(self, index: int):
+        """True direct in/out degrees per window node, or ``None`` if unavailable.
+
+        Degrees are looked up from the GT lineage via ``gt_node_index``; unmatched
+        detections (``gt_node_index == -1``) get ``-1`` (undefined), masked downstream.
+        """
+        _seg, supervision, sl = self._window_slice(index)
+        gt = self.sequence.gt
+        if (
+            gt is None
+            or gt.node_in_degree is None
+            or gt.node_out_degree is None
+            or supervision.gt_node_index is None
+        ):
+            return None
+        gt_node_index = supervision.gt_node_index[sl]
+        matched = gt_node_index >= 0
+        idx = np.where(matched, gt_node_index, 0)
+        node_in_degree = np.where(matched, gt.node_in_degree[idx], -1).astype(np.int64)
+        node_out_degree = np.where(matched, gt.node_out_degree[idx], -1).astype(np.int64)
+        return node_in_degree, node_out_degree
+
     def _window_object_count(self, index: int) -> int:
         _seg, _supervision, sl = self._window_slice(index)
         count = sl.stop - sl.start
@@ -536,6 +558,7 @@ class TrackingDataset(Dataset):
         gt_predecessor_set_available, gt_successor_set_available = (
             self._window_gt_link_set_availability(index)
         )
+        node_degrees = self._window_node_degrees(index)
         feature = wrfeat.WRFeatures(
             coords=coords,
             labels=labels,
@@ -557,6 +580,8 @@ class TrackingDataset(Dataset):
                 matched_gt = matched_gt[keep]
                 gt_predecessor_set_available = gt_predecessor_set_available[keep]
                 gt_successor_set_available = gt_successor_set_available[keep]
+                if node_degrees is not None:
+                    node_degrees = (node_degrees[0][keep], node_degrees[1][keep])
 
         if self.detect_drop and np.random.rand() < self.detect_drop:
             keep = _sample_detection_keep_indices(
@@ -568,6 +593,8 @@ class TrackingDataset(Dataset):
                 matched_gt = matched_gt[keep]
                 gt_predecessor_set_available = gt_predecessor_set_available[keep]
                 gt_successor_set_available = gt_successor_set_available[keep]
+                if node_degrees is not None:
+                    node_degrees = (node_degrees[0][keep], node_degrees[1][keep])
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
@@ -599,6 +626,9 @@ class TrackingDataset(Dataset):
             "window_start": torch.tensor(window_start, dtype=torch.long),
             "dataset_index": torch.tensor(self.dataset_index, dtype=torch.long),
         }
+        if node_degrees is not None:
+            result["node_in_degree"] = torch.from_numpy(node_degrees[0]).long()
+            result["node_out_degree"] = torch.from_numpy(node_degrees[1]).long()
         if return_all:
             result["supervision_mask"] = association_supervision_mask(
                 result["timepoints"],
@@ -704,6 +734,10 @@ def collate_sequence_padding(batch):
         "matched_gt": False,
         "gt_predecessor_set_available": False,
         "gt_successor_set_available": False,
+        # -1 sentinel (distinct from real degrees 0/1/2); padded nodes are masked
+        # out of the node loss anyway via padding_mask / availability flags.
+        "node_in_degree": -1,
+        "node_out_degree": -1,
         # There are real timepoints with t=0; pad with -1 to distinguish from those.
         "timepoints": -1,
     }
