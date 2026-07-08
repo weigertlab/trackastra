@@ -108,6 +108,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
     )
     parser.add_argument("--input_train", type=str, nargs="+")
     parser.add_argument("--input_val", type=str, nargs="+")
+    parser.add_argument("--input_test", type=str, nargs="+")
     parser.add_argument("--slice_pct_train", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--slice_pct_val", type=float, nargs=2, default=(0.0, 1.0))
     parser.add_argument("--downscale_temporal", type=int, default=1)
@@ -247,6 +248,14 @@ def create_train_parser() -> configargparse.ArgumentParser:
         "the node heads entirely (default: %(default)s)",
     )
     parser.add_argument(
+        "--consistency_weight",
+        type=float,
+        default=0.0,
+        help="weight of the degree-consistency loss pulling the edge-implied "
+        "out-degree toward the node head's prediction (needs --node_loss>0); 0 "
+        "disables it (default: %(default)s)",
+    )
+    parser.add_argument(
         "--grad_log_every_n_epochs",
         type=int,
         default=10,
@@ -364,6 +373,7 @@ def parse_train_args(
     args, unknown_args = parser.parse_known_args()
     args.input_train = _restore_input_config_items(args.input_train)
     args.input_val = _restore_input_config_items(args.input_val)
+    args.input_test = _restore_input_config_items(args.input_test)
 
     allowed_unknown = ["input_test"]
     if not set(a.split("=")[0].strip("-") for a in unknown_args).issubset(

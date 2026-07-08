@@ -185,56 +185,68 @@ def _sample_neighborhood_indices(
     max_detections: int,
     matched_gt: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Sample a per-frame-bounded neighborhood around a GT-seeded track.
+    """Sample a per-frame spatial crop around a GT seed, closed under GT lineage.
 
-    Seeds on a ground-truth detection in the last frame, then walks backward one
-    frame at a time. In every frame it forces the parents (all earlier-frame
-    detections associated with anything kept so far, i.e. the full ancestor set)
-    so no backward GT link is ever severed, and tops the frame up to
-    ``max_detections`` with the spatially nearest remaining detections as
-    context/negatives. Forward branches beyond the budget may be dropped.
+    Picks a random ground-truth (``matched_gt``) detection as the seed, keeps the
+    ``max_detections`` detections nearest the seed in every frame (the spatial crop,
+    a density-adaptive box around the seeded cell), then completes every GT lineage
+    that intersects the crop so no GT link is ever severed. Because completion pulls
+    a kept parent's whole component in, divisions on the crop's lineages are kept
+    intact (both daughters together); non-GT detections act as distractors/negatives.
+
+    Unlike a directional backward/forward walk, the closure is orientation-free: a
+    GT detection that only enters as a distractor still has its full in-window
+    lineage restored, so the kept set never contains a partial lineage.
 
     ``matched_gt`` (``lineage_index >= 0``) marks the GT-annotated detections used
-    for seeding; without it, or when a frame has none, seeding falls back to any
-    detection in the last frame.
+    for seeding; without it, or when there are none, any detection may seed.
     """
     n = len(coords)
     if n == 0:
         return np.arange(0)
-    frames = np.unique(timepoints)
-    last_idx = np.flatnonzero(timepoints == frames[-1])
-    gt_last = (
-        last_idx[matched_gt[last_idx].astype(bool)]
-        if matched_gt is not None
-        else last_idx
+    matched = (
+        matched_gt.astype(bool) if matched_gt is not None else np.ones(n, dtype=bool)
     )
-    pool = gt_last if len(gt_last) else last_idx
+    gt = np.flatnonzero(matched)
+    pool = gt if len(gt) else np.arange(n)
     seed = pool[np.random.randint(len(pool))]
 
-    keep_mask = np.zeros(n, dtype=bool)
-    ref_points = coords[[seed]]
-    for t in frames[::-1]:
-        idx_t = np.flatnonzero(timepoints == t)
-        kept_idx = np.flatnonzero(keep_mask)
-        forced = (
-            idx_t[association[np.ix_(idx_t, kept_idx)].any(axis=1)]
-            if len(kept_idx)
-            else idx_t[:0]
+    # GT lineage components, computed on the matched-node submatrix only: non-GT
+    # detections carry no association (``_association_target`` fills GT rows/cols
+    # only), so this scales with the number of GT nodes, not the total detection
+    # count -- essential when sparse-GT over-detection makes a window mostly junk.
+    if len(gt):
+        sub = association[np.ix_(gt, gt)]
+        _, gt_comp = connected_components(
+            csr_matrix(np.logical_or(sub, sub.T)), directed=False
         )
-        if t == frames[-1]:
-            forced = np.union1d(forced, [seed])
-        keep_mask[forced] = True
-        if len(forced) < max_detections:
-            rest = idx_t[~np.isin(idx_t, forced)]
-            if len(rest):
-                distances = np.linalg.norm(
-                    coords[rest][:, None, :] - ref_points[None, :, :], axis=2
-                ).min(axis=1)
-                order = np.argsort(distances, kind="stable")
-                take = rest[order[: max_detections - len(forced)]]
-                keep_mask[take] = True
-        if len(forced):
-            ref_points = coords[forced]
+        anchor = gt[gt_comp == gt_comp[np.searchsorted(gt, seed)]]
+    else:
+        gt_comp = np.zeros(0, dtype=np.int64)
+        anchor = np.array([seed])
+    anchor_mask = np.zeros(n, dtype=bool)
+    anchor_mask[anchor] = True
+
+    # Spatial crop: per frame, the max_detections detections nearest (min distance)
+    # to the seed lineage's node(s) in that frame -- so after a division both
+    # daughters anchor their own distractors -- falling back to the whole lineage
+    # track when it is absent from a frame.
+    keep_mask = np.zeros(n, dtype=bool)
+    for t in np.unique(timepoints):
+        idx_t = np.flatnonzero(timepoints == t)
+        if len(idx_t) <= max_detections:
+            keep_mask[idx_t] = True
+            continue
+        anchor_t = idx_t[anchor_mask[idx_t]]
+        ref = coords[anchor_t] if len(anchor_t) else coords[anchor]
+        d = np.linalg.norm(coords[idx_t][:, None, :] - ref[None, :, :], axis=2).min(1)
+        keep_mask[idx_t[np.argpartition(d, max_detections)[:max_detections]]] = True
+
+    # Close under GT lineage: any lineage the crop touched is kept whole, so a kept
+    # detection never has an association pointing outside the kept set.
+    if len(gt):
+        hit = np.unique(gt_comp[keep_mask[gt]])
+        keep_mask[gt[np.isin(gt_comp, hit)]] = True
     return np.flatnonzero(keep_mask)
 
 

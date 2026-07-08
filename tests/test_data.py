@@ -198,34 +198,97 @@ def test_detection_dropout_always_keeps_one_lineage():
     assert set(keep.tolist()) in ({0, 1, 2}, {3, 4, 5})
 
 
+def _no_severed_links(keep, assoc):
+    keep_set = set(keep.tolist())
+    return all(
+        set(np.flatnonzero(assoc[i]).tolist()) <= keep_set for i in keep
+    )
+
+
 def test_neighborhood_sampling_keeps_whole_lineages(monkeypatch):
-    # 3 first-frame cells, budget 2: keep the 2 closest seeds' full lineages only.
+    # 3 lineages, budget 2: the crop around the seed keeps the 2 nearest per frame,
+    # then lineage closure keeps those whole and drops the far lineage entirely.
     coords = np.array(
         [[0, 0], [1, 0], [100, 0], [0, 0], [1, 0], [100, 0]], dtype=np.float32
     )
     timepoints = np.array([0, 0, 0, 1, 1, 1])
     labels = np.array([1, 2, 3, 1, 2, 3])
     assoc = labels[:, None] == labels[None, :]
-    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # anchor = first seed
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # seed = detection 0
 
     keep = _sample_neighborhood_indices(coords, timepoints, assoc, max_detections=2)
 
     assert len(keep) == 4
     assert 2 not in keep and 5 not in keep  # far lineage dropped whole
-    # no association of a kept detection points outside the kept set (no severed link)
-    keep_set = set(keep.tolist())
-    for i in keep:
-        assert set(np.flatnonzero(assoc[i]).tolist()) <= keep_set
+    assert _no_severed_links(keep, assoc)
 
 
 def test_neighborhood_sampling_leaves_small_first_frame_unchanged():
     coords = np.zeros((3, 2), dtype=np.float32)
-    timepoints = np.arange(3)  # one detection in the first frame
+    timepoints = np.arange(3)  # one detection per frame, all within budget
     assoc = np.eye(3, dtype=bool)
 
     keep = _sample_neighborhood_indices(coords, timepoints, assoc, max_detections=3)
 
     assert np.array_equal(keep, np.arange(3))
+
+
+def test_neighborhood_sampling_keeps_both_division_daughters(monkeypatch):
+    # Parent (frame 0) divides into two daughters (frame 1); budget 1 per frame.
+    # The crop can only catch one daughter, but lineage closure restores the other.
+    coords = np.array(
+        [[0, 0], [10, 0], [0, 1], [0, 2], [0, 1.5]], dtype=np.float32
+    )
+    timepoints = np.array([0, 0, 1, 1, 1])
+    matched_gt = np.array([True, False, True, True, False])  # 1 and 4 are junk
+    assoc = np.zeros((5, 5), dtype=bool)
+    for i, j in [(0, 2), (0, 3)]:  # parent -> both daughters
+        assoc[i, j] = assoc[j, i] = True
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # seed = parent (pool[0])
+
+    keep = _sample_neighborhood_indices(
+        coords, timepoints, assoc, max_detections=1, matched_gt=matched_gt
+    )
+
+    assert set(keep.tolist()) == {0, 2, 3}  # both daughters kept, junk dropped
+    assert _no_severed_links(keep, assoc)
+
+
+def test_neighborhood_sampling_completes_a_distractor_lineage(monkeypatch):
+    # Seed lineage A; a node of lineage B enters the crop only as a distractor.
+    # Closure must pull in the rest of B so no partial lineage survives.
+    coords = np.array(
+        [[0, 0], [1, 0], [0, 0], [5, 0], [0.1, 0]], dtype=np.float32
+    )
+    timepoints = np.array([0, 0, 1, 1, 1])
+    matched_gt = np.array([True, True, True, True, False])  # 4 is junk
+    assoc = np.zeros((5, 5), dtype=bool)
+    for i, j in [(0, 2), (1, 3)]:  # A: 0-2, B: 1-3
+        assoc[i, j] = assoc[j, i] = True
+    monkeypatch.setattr(np.random, "randint", lambda _n: 0)  # seed = A (pool[0] == 0)
+
+    keep = _sample_neighborhood_indices(
+        coords, timepoints, assoc, max_detections=2, matched_gt=matched_gt
+    )
+
+    # frame 0 (<=budget) keeps both A0 and the distractor B0; closure restores B1.
+    assert {0, 2}.issubset(keep) and {1, 3}.issubset(keep)
+    assert _no_severed_links(keep, assoc)
+
+
+def test_neighborhood_sampling_seeds_only_from_gt():
+    # A single GT detection amid junk must always survive: it is the only seed,
+    # so it is nearest to itself and always kept.
+    coords = np.array([[0, 0], [50, 0], [0, 0], [50, 0]], dtype=np.float32)
+    timepoints = np.array([0, 0, 1, 1])
+    matched_gt = np.array([False, True, False, False])
+    assoc = np.eye(4, dtype=bool)
+
+    for _ in range(10):
+        keep = _sample_neighborhood_indices(
+            coords, timepoints, assoc, max_detections=1, matched_gt=matched_gt
+        )
+        assert 1 in keep
 
 
 def test_collate_assoc_coo_densifies_to_dense_padding():

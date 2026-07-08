@@ -100,6 +100,7 @@ class TrackingLightningModule(LightningModule):
         grad_log_every_n_epochs: int = 10,
         log_edge_rates: bool = True,
         node_loss: float = 0.0,
+        consistency_weight: float = 0.0,
         node_in_weights=None,
         node_out_weights=None,
     ):
@@ -151,6 +152,13 @@ class TrackingLightningModule(LightningModule):
         # requires no node head on the model). The class-weight vectors are registered
         # as buffers so they follow the module to its device; None -> unweighted CE.
         self.node_loss = node_loss
+        # Degree-consistency: pull the edge-implied out-degree toward the node head's
+        # prediction (node head teaches edges). Needs the node head, hence node_loss>0.
+        self.consistency_weight = consistency_weight
+        if consistency_weight > 0 and node_loss <= 0:
+            raise ValueError(
+                "consistency_weight > 0 requires node_loss > 0 (needs the node head)"
+            )
         if node_loss > 0 and not getattr(self.model, "node_head", False):
             raise ValueError(
                 "node_loss > 0 requires a model built with node_head=True"
@@ -318,6 +326,37 @@ class TrackingLightningModule(LightningModule):
             logits[valid].float(), target[valid], weight=weight
         )
 
+    @staticmethod
+    def _node_div_counts(out_logits, out_tgt, valid, thresholds):
+        """Thresholded node-division (out-degree==2) FN/FP counts.
+
+        Mirrors ``edge_error_counts``: the division class is the positive, thresholded
+        on ``P(out-degree==2)``. Returns raw num/den counts (not rates) keyed like the
+        edge counts so they pool across steps/ranks and feed the same F1 and FN/FP
+        sweep plot. FN denominator = GT div nodes, FP denominator = predicted div.
+        """
+        p_div = out_logits.float().softmax(-1)[..., 2]
+        v = valid.bool()
+        gt = (out_tgt == 2) & v
+        gt_den = gt.sum().float()
+        base_only = tuple(thresholds) == (0.5,)
+        counts = {}
+        for ti, t in enumerate(thresholds):
+            pred = (p_div >= t) & v
+            values = {
+                "node_div_fn_num": (gt & ~pred).sum().float(),
+                "node_div_fn_den": gt_den,
+                "node_div_fp_num": (pred & ~gt).sum().float(),
+                "node_div_fp_den": pred.sum().float(),
+            }
+            if abs(t - 0.5) < 1e-12:
+                counts.update(values)
+            if not base_only:
+                for key, value in values.items():
+                    name, part = key.rsplit("_", 1)
+                    counts[edge_count_key(name, ti, part)] = value
+        return counts
+
     def _node_degree_loss(
         self,
         out_logits,
@@ -366,7 +405,55 @@ class TrackingLightningModule(LightningModule):
 
         out_ce = self._masked_ce(out_logits, out_tgt, valid_out, self.node_out_weights)
         in_ce = self._masked_ce(in_logits, in_tgt, valid_in, self.node_in_weights)
-        return out_ce, in_ce
+        node_div_counts = None
+        if self.log_edge_rates:
+            with torch.no_grad():
+                node_div_counts = self._node_div_counts(
+                    out_logits, out_tgt, valid_out, self._EDGE_PLOT_THRESHOLDS
+                )
+        return out_ce, in_ce, node_div_counts
+
+    def _degree_consistency_loss(
+        self, A_pred, out_logits, succ_avail, timepoints, mask, mask_invalid
+    ):
+        """Pull the edge-implied out-degree toward the node head's expected out-degree.
+
+        The edge-implied out-degree of a source is the sum of its predicted forward
+        edge probabilities over candidate successors (row block-sum of ``prob``); the
+        node-head expected out-degree is ``E[deg] = p1 + 2*p2`` under the out-degree
+        softmax. MSE between them, with the node side detached so the (stronger)
+        division head teaches the edge head, not the reverse.
+
+        Scored only on sources whose GT successor set is *available* (complete), the
+        same gate as ``valid_out`` in the node loss. This matters on sparse GT: a
+        censored source (e.g. a sparse track start/boundary) has an untrained node
+        out-degree, and the supervision mask -- being a per-pair ``OR`` of endpoint
+        availability -- can still leak some of its edges in, so observability alone
+        would pull edges toward an unreliable target. Only the out-degree is
+        constrained: under causal_norm the in-degree (column) is already ~normalized,
+        so it carries no division signal.
+        """
+        if self.causal_norm != "none":
+            prob = blockwise_causal_norm_batched(
+                A_pred.float(),
+                timepoints,
+                mode=self.causal_norm,
+                mask_invalid=mask_invalid,
+            )
+        else:
+            prob = torch.sigmoid(A_pred.float())
+        prob = prob * mask  # forward, in-window, supervised candidate pairs only
+
+        edge_out = prob.sum(dim=-1)  # (B, N) expected number of children
+        p_out = out_logits.float().softmax(-1)
+        node_out = (p_out[..., 1] + 2.0 * p_out[..., 2]).detach()
+
+        # source has a supervised candidate successor AND a complete (available) GT
+        # successor set -> its out-degree target is trustworthy
+        obs_out = succ_avail.bool() & mask.bool().any(dim=-1)
+        if not bool(obs_out.any()):
+            return A_pred.new_zeros(())
+        return ((edge_out - node_out)[obs_out] ** 2).mean()
 
     def _log_node_losses(self, stage: str, out: dict, batch_size: int) -> None:
         """Log node in/out-degree losses and their sum (losses only)."""
@@ -374,12 +461,15 @@ class TrackingLightningModule(LightningModule):
             return
         out_ce = out["node_loss_out"]
         in_ce = out["node_loss_in"]
+        losses = {
+            f"{stage}_node_loss": out_ce + in_ce,
+            f"{stage}_node_loss_out": out_ce,
+            f"{stage}_node_loss_in": in_ce,
+        }
+        if out.get("consistency_loss") is not None:
+            losses[f"{stage}_consistency_loss"] = out["consistency_loss"]
         self.log_dict(
-            {
-                f"{stage}_node_loss": out_ce + in_ce,
-                f"{stage}_node_loss_out": out_ce,
-                f"{stage}_node_loss_in": in_ce,
-            },
+            losses,
             on_step=stage == "train",
             on_epoch=True,
             sync_dist=True,
@@ -504,8 +594,10 @@ class TrackingLightningModule(LightningModule):
 
         node_loss_out = None
         node_loss_in = None
+        node_div_counts = None
+        consistency_loss = None
         if self.node_loss > 0:
-            node_loss_out, node_loss_in = self._node_degree_loss(
+            node_loss_out, node_loss_in, node_div_counts = self._node_degree_loss(
                 out_degree_logits,
                 in_degree_logits,
                 batch,
@@ -515,6 +607,17 @@ class TrackingLightningModule(LightningModule):
                 mask_invalid,
             )
             loss = loss + self.node_loss * (node_loss_out + node_loss_in)
+
+        if out_degree_logits is not None and self.consistency_weight > 0:
+            consistency_loss = self._degree_consistency_loss(
+                A_pred,
+                out_degree_logits,
+                gt_successor_set_available,
+                timepoints,
+                mask,
+                mask_invalid,
+            )
+            loss = loss + self.consistency_weight * consistency_loss
 
         edge_counts = None
         if self.log_edge_rates:
@@ -536,6 +639,8 @@ class TrackingLightningModule(LightningModule):
                     division_tracks,
                     thresholds=self._EDGE_PLOT_THRESHOLDS,
                 )
+                if node_div_counts is not None:
+                    edge_counts.update(node_div_counts)
 
         return dict(
             loss=loss,
@@ -548,6 +653,7 @@ class TrackingLightningModule(LightningModule):
             edge_counts=edge_counts,
             node_loss_out=node_loss_out,
             node_loss_in=node_loss_in,
+            consistency_loss=consistency_loss,
         )
 
     def _accumulate_edge_counts(self, stage, counts):
@@ -601,8 +707,28 @@ class TrackingLightningModule(LightningModule):
         _emit_group("", "fn", "fp")
         _emit_group("_div", "fn_div", "fp_div")
 
-    def _pooled_edge_threshold_rates(self, stage: str) -> list[dict[str, float | str]]:
-        """Return pooled threshold-sweep association error rates for plotting."""
+        # Node-division (out-degree==2) quality, pooled like the edge counts. Emitted
+        # as {stage}_node_div_{f1,jaccard,fn,fp} to parallel the edge _div metrics.
+        if self.node_loss > 0:
+            fn_num = float(self.all_gather(acc.get("node_div_fn_num", zero)).sum())
+            gt_pos = float(self.all_gather(acc.get("node_div_fn_den", zero)).sum())
+            fp_num = float(self.all_gather(acc.get("node_div_fp_num", zero)).sum())
+            if gt_pos > 0:
+                metrics = metrics_from_counts(gt_pos - fn_num, fp_num, fn_num)
+                for name, value in metrics.items():
+                    if value == value:  # skip NaN
+                        _emit(f"{stage}_node_div_{name}", value)
+
+    def _pooled_class_threshold_rates(
+        self, stage: str, classes: list[tuple[str, str, str]]
+    ) -> list[dict[str, float | str]]:
+        """Pooled threshold-sweep FN/FP rates for the given classes.
+
+        ``classes`` is a list of ``(label, fn_key, fp_key)``; each pooled row carries
+        ``fn`` (= 1 - recall) and ``fp`` (= 1 - precision) for one class at one
+        threshold. all_gather runs for every (threshold, class) in fixed order so the
+        collective cannot deadlock across DDP ranks.
+        """
         acc = self._edge_counts.get(stage, {})
         zero = torch.zeros((), device=self.device)
         rows = []
@@ -615,10 +741,7 @@ class TrackingLightningModule(LightningModule):
             return float(num), float(den)
 
         for threshold_idx, threshold in enumerate(self._EDGE_PLOT_THRESHOLDS):
-            for edge_type, fn_key, fp_key in (
-                ("regular", "fn", "fp"),
-                ("division", "fn_div", "fp_div"),
-            ):
+            for label, fn_key, fp_key in classes:
                 fn_num, gt_pos = _counts(fn_key, threshold_idx)
                 fp_num, pred_pos = _counts(fp_key, threshold_idx)
                 if gt_pos == 0 or pred_pos == 0:
@@ -627,15 +750,20 @@ class TrackingLightningModule(LightningModule):
                 rows.append(
                     {
                         "stage": stage,
-                        "edge_type": edge_type,
+                        "class": label,
                         "threshold": float(threshold),
                         **metrics,
                     }
                 )
         return rows
 
-    def _log_assoc_error_plot(self) -> None:
-        """Log a compact FN/FP threshold-sweep plot for train and validation."""
+    def _log_fnfp_plot(self, classes, colors, class_labels, axis, title, log_key):
+        """Log a compact FN/FP threshold-sweep plot for train and validation.
+
+        Shared by the association (edge) and node error plots. ``classes`` selects the
+        pooled counts; ``class_labels`` maps a class label to its human name; ``axis``
+        is ``(xlabel, ylabel)``. A faint swept curve plus a marker at threshold 0.5.
+        """
         if (
             not self.log_edge_rates
             or not isinstance(self.logger, WandbLogger)
@@ -645,7 +773,7 @@ class TrackingLightningModule(LightningModule):
 
         rows = []
         for stage in ("train", "val"):
-            rows.extend(self._pooled_edge_threshold_rates(stage))
+            rows.extend(self._pooled_class_threshold_rates(stage, classes))
         if not self.trainer.is_global_zero or not rows:
             return
 
@@ -653,22 +781,15 @@ class TrackingLightningModule(LightningModule):
         import wandb as _wandb
 
         fig, ax = plt.subplots(figsize=(5.0, 4.0), dpi=150)
-        colors = {"regular": "tab:blue", "division": "tab:red"}
         linestyles = {"train": "-", "val": "--"}
         markers = {"train": "o", "val": "s"}
-        labels = {
-            ("train", "regular"): "train non-div",
-            ("train", "division"): "train div",
-            ("val", "regular"): "val non-div",
-            ("val", "division"): "val div",
-        }
 
         for stage in ("train", "val"):
-            for edge_type in ("regular", "division"):
+            for label, _fn_key, _fp_key in classes:
                 group = [
                     row
                     for row in rows
-                    if row["stage"] == stage and row["edge_type"] == edge_type
+                    if row["stage"] == stage and row["class"] == label
                 ]
                 if not group:
                     continue
@@ -678,14 +799,15 @@ class TrackingLightningModule(LightningModule):
                 current = [
                     row for row in group if abs(float(row["threshold"]) - 0.5) < 1e-12
                 ]
+                legend = f"{stage} {class_labels[label]}"
                 ax.plot(
                     xs,
                     ys,
-                    color=colors[edge_type],
+                    color=colors[label],
                     linestyle=linestyles[stage],
                     linewidth=1.0,
                     alpha=0.35,
-                    label=None if current else labels[(stage, edge_type)],
+                    label=None if current else legend,
                     zorder=1,
                 )
                 if current:
@@ -693,18 +815,18 @@ class TrackingLightningModule(LightningModule):
                     ax.scatter(
                         row["fn"],
                         row["fp"],
-                        color=colors[edge_type],
+                        color=colors[label],
                         marker=markers[stage],
                         edgecolor="black",
                         linewidth=0.5,
                         s=42,
-                        label=labels[(stage, edge_type)],
+                        label=legend,
                         zorder=2,
                     )
 
-        ax.set_xlabel("missed links (FN / GT links)")
-        ax.set_ylabel("wrong proposed links (FP / predicted links)")
-        ax.set_title(f"Association errors, epoch {self.current_epoch}")
+        ax.set_xlabel(axis[0])
+        ax.set_ylabel(axis[1])
+        ax.set_title(f"{title}, epoch {self.current_epoch}")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         for spine in ax.spines.values():
@@ -714,8 +836,40 @@ class TrackingLightningModule(LightningModule):
         if handles:
             ax.legend(handles, legend_labels, frameon=False, fontsize=8)
         fig.tight_layout()
-        self.logger.experiment.log({"assoc_errors": _wandb.Image(fig)})
+        self.logger.experiment.log({log_key: _wandb.Image(fig)})
         plt.close(fig)
+
+    def _log_assoc_error_plot(self) -> None:
+        """Log the edge (association) FN/FP threshold-sweep plot."""
+        self._log_fnfp_plot(
+            classes=[("regular", "fn", "fp"), ("division", "fn_div", "fp_div")],
+            colors={"regular": "tab:blue", "division": "tab:red"},
+            class_labels={"regular": "non-div", "division": "div"},
+            axis=(
+                "missed links (FN / GT links)",
+                "wrong proposed links (FP / predicted links)",
+            ),
+            title="Association errors",
+            log_key="assoc_errors",
+        )
+
+    def _log_node_error_plot(self) -> None:
+        """Log the node-degree FN/FP threshold-sweep plot (division class for now)."""
+        if self.node_loss <= 0:
+            return
+        # One class today (division = out-degree 2); the list generalizes to the full
+        # (in, out) degree combos if we add their counts later.
+        self._log_fnfp_plot(
+            classes=[("div", "node_div_fn", "node_div_fp")],
+            colors={"div": "tab:red"},
+            class_labels={"div": "div (out=2)"},
+            axis=(
+                "missed nodes (FN / GT nodes)",
+                "wrong proposed nodes (FP / predicted nodes)",
+            ),
+            title="Node degree errors",
+            log_key="node_errors",
+        )
 
     def _spike_debug_dir(self) -> Path:
         if self.loss_spike_debug_dir is not None:
@@ -1016,12 +1170,21 @@ class TrackingLightningModule(LightningModule):
         self._bn_log.append(
             (int(batch["coords"].shape[0]), int(batch["coords"].shape[1]))
         )
+        n_windows = batch["coords"].shape[0]
+        # total frames in the batch = windows * frames-per-window
+        n_frames = n_windows * self.model.config["window"]
+        detections_per_batch = float((~batch["padding_mask"].bool()).sum())
+        supervised_per_batch = float(out["mask"].sum())
         self.log_dict(
             {
                 # real (non-pad) detections summed over the batch
-                "detections_per_batch": float((~batch["padding_mask"].bool()).sum()),
+                "detections_per_batch": detections_per_batch,
+                # ... averaged per frame in the batch
+                "detections_per_frame": detections_per_batch / n_frames,
                 # supervised directed association decisions (loss_mask) over the batch
-                "supervised_per_batch": float(out["mask"].sum()),
+                "supervised_per_batch": supervised_per_batch,
+                # ... averaged per frame in the batch
+                "supervised_per_frame": supervised_per_batch / n_frames,
                 "padding_fraction": out["padding_fraction"],
             },
             on_step=True,
@@ -1093,6 +1256,7 @@ class TrackingLightningModule(LightningModule):
 
         self._log_edge_error_rates("val")
         self._log_assoc_error_plot()
+        self._log_node_error_plot()
 
         # Hack to make lightning progress bars with loss values persistent
         print(" ")

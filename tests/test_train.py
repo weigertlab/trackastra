@@ -679,6 +679,119 @@ def test_common_step_masks_pairs_with_available_gt_link_sets():
     ]
 
 
+def test_common_step_emits_node_div_counts():
+    # node 0 (t=0) divides -> out-degree 2; node 1 (t=0) has one successor. Both are
+    # observable; nodes 2,3 (t=1) have no successor so are not scored. The model
+    # predicts division for both node 0 (TP) and node 1 (FP), giving TP=1/FP=1/FN=0.
+    class FixedNodeModel(torch.nn.Module):
+        node_head = True
+
+        def forward(
+            self, coords, features, padding_mask=None, return_node_logits=False
+        ):
+            A = torch.zeros((1, 4, 4))
+            out_logits = torch.zeros((1, 4, 3))
+            out_logits[0, 0, 2] = 10.0  # node 0 -> predicted division (GT div: TP)
+            out_logits[0, 1, 2] = 10.0  # node 1 -> predicted division (GT non-div: FP)
+            in_logits = torch.zeros((1, 4, 2))
+            if return_node_logits:
+                return A, None, out_logits, in_logits
+            return A, None
+
+    module = TrackingLightningModule(
+        FixedNodeModel(), causal_norm="none", node_loss=1.0, delta_cutoff=2
+    )
+    batch = {
+        "features": torch.zeros((1, 4, 1)),
+        "coords": torch.zeros((1, 4, 2)),
+        "assoc_coo": torch.zeros((0, 3), dtype=torch.int32),
+        "timepoints": torch.tensor([[0, 0, 1, 1]]),
+        "padding_mask": torch.zeros((1, 4), dtype=torch.bool),
+        "gt_predecessor_set_available": torch.tensor([[False, False, True, True]]),
+        "gt_successor_set_available": torch.tensor([[True, True, False, False]]),
+        "node_out_degree": torch.tensor([[2, 1, 0, 0]]),
+        "node_in_degree": torch.tensor([[0, 0, 1, 1]]),
+    }
+
+    counts = module._common_step(batch)["edge_counts"]
+    assert counts["node_div_fn_num"].item() == 0  # GT division node 0 is detected
+    assert counts["node_div_fn_den"].item() == 1  # one GT division node
+    assert counts["node_div_fp_num"].item() == 1  # node 1 wrongly called a division
+    assert counts["node_div_fp_den"].item() == 2  # two predicted divisions
+
+    from trackastra.training.losses import metrics_from_counts
+
+    m = metrics_from_counts(1, 1, 0)  # TP, FP, FN
+    assert abs(m["f1"] - 2 / 3) < 1e-6
+    assert abs(m["jaccard"] - 0.5) < 1e-6
+
+
+def test_degree_consistency_loss_teaches_edges_from_node_head():
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=4,
+        d_model=32,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        node_head=True,
+        attn_positional_bias="none",
+    )
+    lm = TrackingLightningModule(
+        model, causal_norm="none", node_loss=1.0, consistency_weight=1.0, delta_cutoff=2
+    )
+    # source 0 (t=0) has two candidate successors (t=1); edges each carry prob 0.3, so
+    # the edge-implied out-degree is 0.6, while the node head confidently says 2.
+    A_pred = torch.zeros(1, 3, 3, requires_grad=True)
+    with torch.no_grad():
+        A_pred[0, 0, 1] = torch.logit(torch.tensor(0.3))
+        A_pred[0, 0, 2] = torch.logit(torch.tensor(0.3))
+    out_logits = torch.zeros(1, 3, 3, requires_grad=True)
+    with torch.no_grad():
+        out_logits[0, 0, 2] = 10.0  # node 0 -> confident division (out-degree 2)
+    timepoints = torch.tensor([[0, 1, 1]])
+    mask = torch.zeros(1, 3, 3)
+    mask[0, 0, 1] = 1
+    mask[0, 0, 2] = 1
+    mask_invalid = torch.zeros(1, 3, 3, dtype=torch.bool)
+    succ_avail = torch.ones(1, 3, dtype=torch.bool)
+
+    loss = lm._degree_consistency_loss(
+        A_pred, out_logits, succ_avail, timepoints, mask, mask_invalid
+    )
+    assert abs(loss.detach().item() - (0.6 - 2.0) ** 2) < 1e-3
+
+    loss.backward()
+    # the node head is the (detached) teacher: gradients reach the edges, not the head
+    assert A_pred.grad.abs().sum() > 0
+    assert out_logits.grad is None or out_logits.grad.abs().sum() == 0
+    # and they push the child-edge probability up toward out-degree 2
+    assert A_pred.grad[0, 0, 1] < 0
+
+    # a source whose GT successor set is unavailable (e.g. sparse-GT boundary) has an
+    # untrained out-degree target and must be excluded, even though its edges are
+    # masked in -> loss collapses to zero, no gradient leaks to those edges.
+    A_pred2 = A_pred.detach().clone().requires_grad_(True)
+    censored = lm._degree_consistency_loss(
+        A_pred2,
+        out_logits.detach(),
+        torch.zeros(1, 3, dtype=torch.bool),  # succ set unavailable everywhere
+        timepoints,
+        mask,
+        mask_invalid,
+    )
+    assert float(censored) == 0.0
+
+
+def test_consistency_weight_requires_node_loss():
+    import pytest
+
+    model = TrackingTransformer(
+        coord_dim=2, feat_dim=4, d_model=16, num_encoder_layers=1, num_decoder_layers=1
+    )
+    with pytest.raises(ValueError, match="requires node_loss"):
+        TrackingLightningModule(model, consistency_weight=1.0, node_loss=0.0)
+
+
 def test_balanced_batch_sampler_partial_batch():
     dataset = ConcatDataset([_SamplerDataset(7), _SamplerDataset(6)])
     sampler = BalancedBatchSampler(dataset, batch_size=4, n_pool=2, num_samples=10)
@@ -1835,7 +1948,7 @@ def test_node_degree_loss_masks_unobservable_and_censored():
     mask_time = (dt > 0) & (dt <= 2)
     mask_invalid = torch.zeros(1, 3, 3, dtype=torch.bool)
 
-    out_ce, in_ce = lm._node_degree_loss(
+    out_ce, in_ce, _ = lm._node_degree_loss(
         out_logits, in_logits, batch, succ, pred, mask_time, mask_invalid
     )
     # node 2 has no later node -> out-degree unobservable; node 0 has no earlier node
@@ -1843,7 +1956,7 @@ def test_node_degree_loss_masks_unobservable_and_censored():
     with torch.no_grad():
         out_logits[0, 2] += 100.0  # masked out node
         in_logits[0, 0] += 100.0  # masked in node
-    out_ce2, in_ce2 = lm._node_degree_loss(
+    out_ce2, in_ce2, _ = lm._node_degree_loss(
         out_logits, in_logits, batch, succ, pred, mask_time, mask_invalid
     )
     assert torch.allclose(out_ce, out_ce2)
@@ -1852,12 +1965,12 @@ def test_node_degree_loss_masks_unobservable_and_censored():
     # censoring a node via the availability flag also removes it from the loss.
     pred_censored = pred.clone()
     pred_censored[0, 1] = False
-    _out_ce, in_ce_censored = lm._node_degree_loss(
+    _out_ce, in_ce_censored, _ = lm._node_degree_loss(
         out_logits, in_logits, batch, succ, pred_censored, mask_time, mask_invalid
     )
     with torch.no_grad():
         in_logits[0, 1] += 100.0  # now-censored node
-    _out_ce, in_ce_censored2 = lm._node_degree_loss(
+    _out_ce, in_ce_censored2, _ = lm._node_degree_loss(
         out_logits, in_logits, batch, succ, pred_censored, mask_time, mask_invalid
     )
     assert torch.allclose(in_ce_censored, in_ce_censored2)

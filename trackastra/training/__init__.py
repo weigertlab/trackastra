@@ -860,6 +860,7 @@ def _training_config_from_args(
             "focal_loss_gamma": args.focal_loss_gamma,
             "div_upweight": args.div_upweight,
             "node_loss": args.node_loss,
+            "consistency_weight": args.consistency_weight,
         },
         tracking_kwargs={
             "tracking_frequency": args.tracking_frequency,
