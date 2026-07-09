@@ -74,7 +74,7 @@ def build_lightning_runtime(
 ) -> LightningTrainerRuntime:
     """Build callbacks, logger, profiler, and logdir from plain config values."""
     import lightning as pl
-    from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
+    from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
     from lightning.pytorch.profilers import PyTorchProfiler
 
     callbacks = []
@@ -126,6 +126,18 @@ def build_lightning_runtime(
         logdir = None
         train_logger = False
 
+    # Mirror scalar metrics into a single flat logdir/metrics/metrics.csv (one
+    # accumulating row per logged epoch). Ordered after the primary logger so
+    # self.logger stays the tensorboard/wandb instance the module dispatches on.
+    # version="" keeps the file at logdir/metrics/ rather than a versioned subdir.
+    if train_logger and logdir is not None:
+        loggers = [
+            train_logger,
+            CSVLogger(logdir, name="metrics", version=""),
+        ]
+    else:
+        loggers = train_logger
+
     if train_logger:
         callbacks.append(
             pl.pytorch.callbacks.LearningRateMonitor(logging_interval="epoch")
@@ -141,7 +153,7 @@ def build_lightning_runtime(
 
     return LightningTrainerRuntime(
         logdir=logdir,
-        logger=train_logger,
+        logger=loggers,
         callbacks=callbacks,
         profiler=profiler,
         run_name=run_name,
