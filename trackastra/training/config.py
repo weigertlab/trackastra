@@ -123,7 +123,12 @@ def create_train_parser() -> configargparse.ArgumentParser:
     parser.add_argument("--normalize_diameter", type=float, default=None)
     parser.add_argument("--train_samples", type=int, default=10000)
     parser.add_argument("--num_encoder_layers", type=int, default=6)
-    parser.add_argument("--num_decoder_layers", type=int, default=6)
+    parser.add_argument(
+        "--num_decoder_layers",
+        type=int,
+        default=None,
+        help="decoder depth; None mirrors --num_encoder_layers, 0 under --encoder_only",
+    )
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
     parser.add_argument("--feat_embed_per_dim", type=int, default=8)
     parser.add_argument(
@@ -197,6 +202,11 @@ def create_train_parser() -> configargparse.ArgumentParser:
         action="store_true",
         help="bypass the initial LayerNorm after input projection",
     )
+    parser.add_argument(
+        "--encoder_only",
+        action="store_true",
+        help="drop the decoder; the head sees the encoder output on both sides (y = x)",
+    )
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -254,6 +264,21 @@ def create_train_parser() -> configargparse.ArgumentParser:
         help="weight of the degree-consistency loss pulling the edge-implied "
         "out-degree toward the node head's prediction (needs --node_loss>0); 0 "
         "disables it (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max_out_degree",
+        type=int,
+        default=2,
+        help="width of the node out-degree head: out-degree in 0..max_out_degree "
+        "(2 = up to a 2-way division); only used with --node_loss>0 "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max_in_degree",
+        type=int,
+        default=1,
+        help="width of the node in-degree head: in-degree in 0..max_in_degree "
+        "(1 = a single parent); only used with --node_loss>0 (default: %(default)s)",
     )
     parser.add_argument(
         "--grad_log_every_n_epochs",

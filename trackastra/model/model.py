@@ -45,7 +45,9 @@ class ModelConfig:
     feat_embed_per_dim: int = 8
     feature_embed_mode: Literal["fourier", "mlp"] = "mlp"
     num_encoder_layers: int = 6
-    num_decoder_layers: int = 6
+    # None mirrors num_encoder_layers; encoder_only forces it to 0. Resolved to a
+    # concrete count inside TrackingTransformer and stored in its saved config.
+    num_decoder_layers: int | None = None
     dropout: float = 0.0
     window: int = 4
     spatial_cutoff: float | None = 256
@@ -63,6 +65,13 @@ class ModelConfig:
     disable_abs_pos: bool = False
     disable_input_norm: bool = False
     node_head: bool = False
+    encoder_only: bool = False
+    # width of the auxiliary node-degree heads: out-degree in 0..max_out_degree,
+    # in-degree in 0..max_in_degree. Defaults (2, 1) = the biological baseline
+    # (up to a 2-way division; a single parent). Raise max_out_degree for >2-way
+    # splits. Only used when node_head=True.
+    max_in_degree: int = 1
+    max_out_degree: int = 2
     model_path: Path | None = None
 
     def transformer_kwargs(self) -> dict[str, Any]:
@@ -93,6 +102,9 @@ class ModelConfig:
             "disable_abs_pos": self.disable_abs_pos,
             "disable_input_norm": self.disable_input_norm,
             "node_head": self.node_head,
+            "encoder_only": self.encoder_only,
+            "max_in_degree": self.max_in_degree,
+            "max_out_degree": self.max_out_degree,
         }
 
 
@@ -409,7 +421,7 @@ class TrackingTransformer(torch.nn.Module):
         d_model: int = 128,
         nhead: int = 4,
         num_encoder_layers: int = 4,
-        num_decoder_layers: int = 4,
+        num_decoder_layers: int | None = None,
         dropout: float = 0.1,
         pos_embed_per_dim: int = 32,
         feat_embed_per_dim: int = 1,
@@ -437,6 +449,9 @@ class TrackingTransformer(torch.nn.Module):
         disable_abs_pos: bool = False,
         disable_input_norm: bool = False,
         node_head: bool = False,
+        encoder_only: bool = False,
+        max_in_degree: int = 1,
+        max_out_degree: int = 2,
         max_distance: int | None = None,
     ):
         super().__init__()
@@ -457,6 +472,22 @@ class TrackingTransformer(torch.nn.Module):
                 "sparse_knn_mode must be 'global', 'per_frame' or 'next_frame', "
                 f"got {sparse_knn_mode!r}"
             )
+
+        # Resolve num_decoder_layers to a concrete count that is stored in
+        # self.config (so saved configs stay unambiguous and reload strict):
+        #   encoder_only -> 0 (no decoder; forward feeds y = x to the head),
+        #   None         -> num_encoder_layers (symmetric default),
+        #   int          -> used as given.
+        if encoder_only:
+            if num_decoder_layers not in (None, 0):
+                logger.warning(
+                    "encoder_only=True ignores num_decoder_layers=%s "
+                    "(no decoder is built)",
+                    num_decoder_layers,
+                )
+            num_decoder_layers = 0
+        elif num_decoder_layers is None:
+            num_decoder_layers = num_encoder_layers
 
         # Normalize max_neighbors to a (lo, hi) pair. A single k becomes (k, k)
         # (fixed K); a (k1, k2) pair samples K~Uniform[k1, k2] per forward during
@@ -519,7 +550,11 @@ class TrackingTransformer(torch.nn.Module):
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
             node_head=node_head,
+            encoder_only=encoder_only,
+            max_in_degree=max_in_degree,
+            max_out_degree=max_out_degree,
         )
+        self.encoder_only = encoder_only
         self.architecture_version = architecture_version
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
@@ -557,6 +592,9 @@ class TrackingTransformer(torch.nn.Module):
             )
             for _ in range(num_encoder_layers)
         ])
+        # num_decoder_layers is 0 under encoder_only (resolved above), so no
+        # decoder parameters are allocated; forward() then feeds the encoder
+        # output x into the head as both sides (y = x).
         self.decoder = nn.ModuleList([
             DecoderLayer(
                 coord_dim,
@@ -608,8 +646,10 @@ class TrackingTransformer(torch.nn.Module):
         # head the target (decoder) representation y; see forward().
         self.node_head = node_head
         if node_head:
-            self.out_degree_head = _make_node_head(d_model, 3)
-            self.in_degree_head = _make_node_head(d_model, 2)
+            if max_out_degree < 1 or max_in_degree < 1:
+                raise ValueError("max_in_degree and max_out_degree must be >= 1")
+            self.out_degree_head = _make_node_head(d_model, max_out_degree + 1)
+            self.in_degree_head = _make_node_head(d_model, max_in_degree + 1)
 
         if feature_embed_mode == "fourier":
             if feat_embed_per_dim > 1:
@@ -714,14 +754,18 @@ class TrackingTransformer(torch.nn.Module):
                 attn_mask=attn_mask, nbr_idx=nbr_idx,
             )
 
-        y = features
-        # decoder w cross attention
-        for dec in self.decoder:
-            y = dec(
-                y, x, coords=coords, padding_mask=padding_mask,
-                attn_mask=attn_mask, nbr_idx=nbr_idx,
-            )
-            # y = dec(y, y, coords=coords, padding_mask=padding_mask)
+        if self.encoder_only:
+            # No decoder: the head sees the encoder output on both sides (y = x).
+            y = x
+        else:
+            y = features
+            # decoder w cross attention
+            for dec in self.decoder:
+                y = dec(
+                    y, x, coords=coords, padding_mask=padding_mask,
+                    attn_mask=attn_mask, nbr_idx=nbr_idx,
+                )
+                # y = dec(y, y, coords=coords, padding_mask=padding_mask)
 
         # outer product is the association matrix (logits), (B, N, N)
         A = (

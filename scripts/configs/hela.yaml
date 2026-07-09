@@ -7,7 +7,6 @@ features: wrfeat2
 attn_dist_mode: none
 delta_cutoff: 1
 num_encoder_layers: 6
-num_decoder_layers: 6
 causal_norm: quiet_softmax
 cache: true
 cachedir: runs/.cache

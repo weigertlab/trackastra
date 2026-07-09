@@ -762,10 +762,10 @@ def test_degree_consistency_loss_teaches_edges_from_node_head():
     assert abs(loss.detach().item() - (0.6 - 2.0) ** 2) < 1e-3
 
     loss.backward()
-    # the node head is the (detached) teacher: gradients reach the edges, not the head
+    # mutual consistency: gradients flow into both the edge logits and the node head
     assert A_pred.grad.abs().sum() > 0
-    assert out_logits.grad is None or out_logits.grad.abs().sum() == 0
-    # and they push the child-edge probability up toward out-degree 2
+    assert out_logits.grad is not None and out_logits.grad.abs().sum() > 0
+    # and the edge side is pushed up toward out-degree 2
     assert A_pred.grad[0, 0, 1] < 0
 
     # a source whose GT successor set is unavailable (e.g. sparse-GT boundary) has an

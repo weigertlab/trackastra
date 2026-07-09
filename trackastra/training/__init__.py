@@ -650,8 +650,11 @@ class TrackastraTrainer:
         module_kwargs = self._lightning_module_kwargs(model)
         if module_kwargs.get("node_loss", 0) > 0:
             in_counts, out_counts = pooled_node_degree_counts(train_dataset)
-            module_kwargs["node_in_weights"] = node_degree_class_weights(in_counts, 2)
-            module_kwargs["node_out_weights"] = node_degree_class_weights(out_counts, 3)
+            model_config = getattr(model, "config", {}) or {}
+            n_in = model_config.get("max_in_degree", 1) + 1
+            n_out = model_config.get("max_out_degree", 2) + 1
+            module_kwargs["node_in_weights"] = node_degree_class_weights(in_counts, n_in)
+            module_kwargs["node_out_weights"] = node_degree_class_weights(out_counts, n_out)
             logger.info(
                 "Node in-degree class weights: %s (counts=%s)",
                 module_kwargs["node_in_weights"].tolist(),
@@ -757,7 +760,10 @@ def _training_config_from_args(
         architecture_version=args.architecture_version,
         disable_abs_pos=args.disable_abs_pos,
         disable_input_norm=args.disable_input_norm,
+        encoder_only=args.encoder_only,
         node_head=args.node_loss > 0,
+        max_in_degree=args.max_in_degree,
+        max_out_degree=args.max_out_degree,
         model_path=Path(args.model) if args.model is not None else None,
     )
     sequence_kwargs = {

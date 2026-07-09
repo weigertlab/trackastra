@@ -328,16 +328,18 @@ class TrackingLightningModule(LightningModule):
 
     @staticmethod
     def _node_div_counts(out_logits, out_tgt, valid, thresholds):
-        """Thresholded node-division (out-degree==2) FN/FP counts.
+        """Thresholded node-division (out-degree>=2, i.e. a split) FN/FP counts.
 
-        Mirrors ``edge_error_counts``: the division class is the positive, thresholded
-        on ``P(out-degree==2)``. Returns raw num/den counts (not rates) keyed like the
-        edge counts so they pool across steps/ranks and feed the same F1 and FN/FP
-        sweep plot. FN denominator = GT div nodes, FP denominator = predicted div.
+        Mirrors ``edge_error_counts``: a division/split is the positive, thresholded on
+        ``P(out-degree>=2)`` (the summed prob of every split class, so it generalizes
+        to >2-way splits; for the default max_out_degree=2 it is exactly class 2).
+        Returns raw num/den counts (not rates) keyed like the edge counts so they pool
+        across steps/ranks and feed the same F1 and FN/FP sweep plot. FN denominator =
+        GT div nodes, FP denominator = predicted div.
         """
-        p_div = out_logits.float().softmax(-1)[..., 2]
+        p_div = out_logits.float().softmax(-1)[..., 2:].sum(-1)
         v = valid.bool()
-        gt = (out_tgt == 2) & v
+        gt = (out_tgt >= 2) & v
         gt_den = gt.sum().float()
         base_only = tuple(thresholds) == (0.5,)
         counts = {}
@@ -388,18 +390,26 @@ class TrackingLightningModule(LightningModule):
         obs_out = valid_pair.any(dim=-1)  # source has a candidate successor in-window
         obs_in = valid_pair.any(dim=-2)  # target has a candidate predecessor in-window
 
-        valid_out = succ_avail & (out_tgt >= 0) & (out_tgt <= 2) & obs_out
-        valid_in = pred_avail & (in_tgt >= 0) & (in_tgt <= 1) & obs_in
+        # class range follows the head widths (max_out_degree/max_in_degree), so a
+        # target beyond a head's range (e.g. a merge, or a >2-way split on a head not
+        # built for it) is dropped rather than indexing out of the logits
+        max_out = out_logits.shape[-1] - 1
+        max_in = in_logits.shape[-1] - 1
+        valid_out = succ_avail & (out_tgt >= 0) & (out_tgt <= max_out) & obs_out
+        valid_in = pred_avail & (in_tgt >= 0) & (in_tgt <= max_in) & obs_in
 
         if not self._node_violation_warned:
             n_bad = int(
-                ((out_tgt > 2) & succ_avail).sum() + ((in_tgt > 1) & pred_avail).sum()
+                ((out_tgt > max_out) & succ_avail).sum()
+                + ((in_tgt > max_in) & pred_avail).sum()
             )
             if n_bad:
                 logger.warning(
-                    "Dropping %d node(s) with out-degree>2 or in-degree>1 "
+                    "Dropping %d node(s) with out-degree>%d or in-degree>%d "
                     "(merge / over-division) from the node loss",
                     n_bad,
+                    max_out,
+                    max_in,
                 )
                 self._node_violation_warned = True
 
@@ -421,8 +431,10 @@ class TrackingLightningModule(LightningModule):
         The edge-implied out-degree of a source is the sum of its predicted forward
         edge probabilities over candidate successors (row block-sum of ``prob``); the
         node-head expected out-degree is ``E[deg] = p1 + 2*p2`` under the out-degree
-        softmax. MSE between them, with the node side detached so the (stronger)
-        division head teaches the edge head, not the reverse.
+        softmax. MSE between them, with gradients flowing into both heads (mutual
+        consistency): the edge head is pulled toward the node head's out-degree and
+        the node head toward the edge-implied one; both remain anchored by their own
+        GT losses (association BCE and node CE).
 
         Each source's squared error is weighted by ``node_out_weights[out_tgt]``, the
         same class weights the node CE uses, so rare divisions are not drowned out by
@@ -452,14 +464,18 @@ class TrackingLightningModule(LightningModule):
 
         edge_out = prob.sum(dim=-1)  # (B, N) expected number of children
         p_out = out_logits.float().softmax(-1)
-        node_out = (p_out[..., 1] + 2.0 * p_out[..., 2]).detach()
+        # expected out-degree = sum_k k * p_k, general over however many out-degree
+        # classes the head has (3 today: 0/1/2; e.g. 4 if 3-way splits are added)
+        n_out_classes = p_out.shape[-1]
+        degrees = torch.arange(n_out_classes, device=p_out.device, dtype=p_out.dtype)
+        node_out = (p_out * degrees).sum(dim=-1)
 
         # complete (available) GT successor set, in the head's class range (drop
         # merges), and a supervised candidate successor -> out-degree target is usable
         valid = (
             succ_avail.bool()
             & (out_tgt >= 0)
-            & (out_tgt <= 2)
+            & (out_tgt < n_out_classes)
             & mask.bool().any(dim=-1)
         )
         if not bool(valid.any()):
