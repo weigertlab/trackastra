@@ -56,6 +56,7 @@ def sparse_bilinear_scores(
     return sparse_einsum_gather(x, y, nbr_idx)
 
 
+@torch.compiler.disable
 def build_knn_index(
     coords: torch.Tensor,
     padding_mask: torch.Tensor | None,
@@ -99,6 +100,7 @@ def build_knn_index(
     return idx.masked_fill(~valid, -1)
 
 
+@torch.compiler.disable
 def build_knn_index_per_frame(
     coords: torch.Tensor,
     padding_mask: torch.Tensor | None,
@@ -158,6 +160,7 @@ def build_knn_index_per_frame(
     return torch.cat(out, dim=-1)  # (B, N, F * K)
 
 
+@torch.compiler.disable
 def build_knn_index_next_frame(
     coords: torch.Tensor,
     padding_mask: torch.Tensor | None,
