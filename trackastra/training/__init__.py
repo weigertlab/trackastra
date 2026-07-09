@@ -72,6 +72,7 @@ class TrainConfig:
     resume: bool = False
     dry: bool = False
     mixed_precision: bool = True
+    compile: bool = False
     cache_dir: Path | None = None
     loss_kwargs: dict[str, Any] = field(default_factory=dict)
     tracking_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -591,6 +592,7 @@ class TrackastraTrainer:
             "warmup_epochs": self.config.warmup_epochs,
             "max_epochs": self.config.epochs,
             "learning_rate": self.config.learning_rate,
+            "compile": self.config.compile,
         }
         module_kwargs.update(self.config.loss_kwargs)
         module_kwargs.update(self.config.tracking_kwargs)
@@ -857,6 +859,7 @@ def _training_config_from_args(
         resume=args.resume,
         dry=args.dry,
         mixed_precision=args.mixedp,
+        compile=args.compile,
         cache_dir=Path(args.cachedir) if args.cache else None,
         loss_kwargs={
             "delta_cutoff": delta_cutoff,

@@ -207,6 +207,12 @@ def create_train_parser() -> configargparse.ArgumentParser:
         action="store_true",
         help="drop the decoder; the head sees the encoder output on both sides (y = x)",
     )
+    parser.add_argument(
+        "--compile",
+        type=str2bool,
+        default=True,
+        help="wrap the training-step model forward in torch.compile",
+    )
     parser.add_argument("--mixedp", type=str2bool, default=True)
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--profile", action="store_true")

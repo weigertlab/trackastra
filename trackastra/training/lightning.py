@@ -103,6 +103,7 @@ class TrackingLightningModule(LightningModule):
         consistency_weight: float = 0.0,
         node_in_weights=None,
         node_out_weights=None,
+        compile: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "node_in_weights", "node_out_weights"])
@@ -113,6 +114,18 @@ class TrackingLightningModule(LightningModule):
         self._edge_counts: dict[str, dict] = {}
 
         self.model = model
+        # Compile only the training-step forward path. Store the wrapper WITHOUT
+        # registering it as a submodule (object.__setattr__ bypasses nn.Module's
+        # registration): torch.compile's OptimizedModule shares parameters with
+        # `model`, so registering it would duplicate every parameter into
+        # state_dict (with an _orig_mod. prefix) and double-count them in
+        # self.parameters()/the optimizer. self.model stays the sole owner of the
+        # (shared) parameters, so checkpointing and optimization are unchanged.
+        # Eval/tracking keeps using the raw self.model to avoid recompiles on the
+        # varying shapes seen during inference.
+        object.__setattr__(
+            self, "_forward_model", torch.compile(model) if compile else model
+        )
         self.causal_norm = causal_norm
         if assoc_loss not in ("bce", "child_ce"):
             raise ValueError(f"Unknown assoc_loss {assoc_loss!r}")
@@ -521,11 +534,13 @@ class TrackingLightningModule(LightningModule):
         out_degree_logits = None
         in_degree_logits = None
         if self.node_loss > 0:
-            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = self.model(
+            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = self._forward_model(
                 coords, feats, padding_mask=padding_mask, return_node_logits=True
             )
         else:
-            A_pred, neighbor_mask = self.model(coords, feats, padding_mask=padding_mask)
+            A_pred, neighbor_mask = self._forward_model(
+                coords, feats, padding_mask=padding_mask
+            )
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
