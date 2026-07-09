@@ -754,9 +754,10 @@ def test_degree_consistency_loss_teaches_edges_from_node_head():
     mask[0, 0, 2] = 1
     mask_invalid = torch.zeros(1, 3, 3, dtype=torch.bool)
     succ_avail = torch.ones(1, 3, dtype=torch.bool)
+    out_tgt = torch.tensor([[2, 0, 0]])  # node 0 is a GT division
 
     loss = lm._degree_consistency_loss(
-        A_pred, out_logits, succ_avail, timepoints, mask, mask_invalid
+        A_pred, out_logits, out_tgt, succ_avail, timepoints, mask, mask_invalid
     )
     assert abs(loss.detach().item() - (0.6 - 2.0) ** 2) < 1e-3
 
@@ -774,12 +775,54 @@ def test_degree_consistency_loss_teaches_edges_from_node_head():
     censored = lm._degree_consistency_loss(
         A_pred2,
         out_logits.detach(),
+        out_tgt,
         torch.zeros(1, 3, dtype=torch.bool),  # succ set unavailable everywhere
         timepoints,
         mask,
         mask_invalid,
     )
     assert float(censored) == 0.0
+
+
+def test_degree_consistency_loss_weights_by_out_degree_class():
+    # two equal-error sources, one a GT division (out=2), one a normal continuation
+    # (out=1). With class weights favouring divisions, the weighted loss must be pulled
+    # toward the division node's error rather than the unweighted average of the two.
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=4,
+        d_model=32,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        node_head=True,
+        attn_positional_bias="none",
+    )
+    lm = TrackingLightningModule(
+        model,
+        causal_norm="none",
+        node_loss=1.0,
+        consistency_weight=1.0,
+        delta_cutoff=2,
+        node_out_weights=[1.0, 1.0, 9.0],  # heavily upweight the division class
+    )
+    # nodes 0,1 at t=0 each have one candidate successor (node 2 at t=1)
+    A_pred = torch.full((1, 3, 3), torch.logit(torch.tensor(0.5)))
+    out_logits = torch.zeros(1, 3, 3)
+    out_logits[0, 0, 2] = 10.0  # node 0 -> division, edge_out 0.5 vs 2.0 -> err 2.25
+    out_logits[0, 1, 1] = 10.0  # node 1 -> continuation, edge_out 0.5 vs 1.0 -> err 0.25
+    timepoints = torch.tensor([[0, 0, 1]])
+    mask = torch.zeros(1, 3, 3)
+    mask[0, 0, 2] = 1
+    mask[0, 1, 2] = 1
+    mask_invalid = torch.zeros(1, 3, 3, dtype=torch.bool)
+    succ_avail = torch.ones(1, 3, dtype=torch.bool)
+    out_tgt = torch.tensor([[2, 1, 0]])
+
+    loss = lm._degree_consistency_loss(
+        A_pred, out_logits, out_tgt, succ_avail, timepoints, mask, mask_invalid
+    )
+    # weighted mean = (9*2.25 + 1*0.25) / (9 + 1) = 2.05; unweighted mean = 1.25
+    assert abs(float(loss) - 2.05) < 1e-3
 
 
 def test_consistency_weight_requires_node_loss():

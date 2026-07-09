@@ -414,7 +414,7 @@ class TrackingLightningModule(LightningModule):
         return out_ce, in_ce, node_div_counts
 
     def _degree_consistency_loss(
-        self, A_pred, out_logits, succ_avail, timepoints, mask, mask_invalid
+        self, A_pred, out_logits, out_tgt, succ_avail, timepoints, mask, mask_invalid
     ):
         """Pull the edge-implied out-degree toward the node head's expected out-degree.
 
@@ -424,14 +424,20 @@ class TrackingLightningModule(LightningModule):
         softmax. MSE between them, with the node side detached so the (stronger)
         division head teaches the edge head, not the reverse.
 
-        Scored only on sources whose GT successor set is *available* (complete), the
-        same gate as ``valid_out`` in the node loss. This matters on sparse GT: a
-        censored source (e.g. a sparse track start/boundary) has an untrained node
-        out-degree, and the supervision mask -- being a per-pair ``OR`` of endpoint
-        availability -- can still leak some of its edges in, so observability alone
-        would pull edges toward an unreliable target. Only the out-degree is
-        constrained: under causal_norm the in-degree (column) is already ~normalized,
-        so it carries no division signal.
+        Each source's squared error is weighted by ``node_out_weights[out_tgt]``, the
+        same class weights the node CE uses, so rare divisions are not drowned out by
+        abundant continuations (an unweighted mean would spend almost all its gradient
+        on out-degree-1 nodes the edge head already handles). Falls back to a plain
+        mean when no weights are set.
+
+        Scored only on sources whose GT successor set is *available* (complete) and
+        whose out-degree is in the head's class range, matching ``valid_out`` in the
+        node loss. This matters on sparse GT: a censored source (e.g. a sparse track
+        start/boundary) has an untrained node out-degree, and the supervision mask --
+        being a per-pair ``OR`` of endpoint availability -- can still leak some of its
+        edges in, so observability alone would pull edges toward an unreliable target.
+        Only the out-degree is constrained: under causal_norm the in-degree (column)
+        is already ~normalized, so it carries no division signal.
         """
         if self.causal_norm != "none":
             prob = blockwise_causal_norm_batched(
@@ -448,12 +454,21 @@ class TrackingLightningModule(LightningModule):
         p_out = out_logits.float().softmax(-1)
         node_out = (p_out[..., 1] + 2.0 * p_out[..., 2]).detach()
 
-        # source has a supervised candidate successor AND a complete (available) GT
-        # successor set -> its out-degree target is trustworthy
-        obs_out = succ_avail.bool() & mask.bool().any(dim=-1)
-        if not bool(obs_out.any()):
+        # complete (available) GT successor set, in the head's class range (drop
+        # merges), and a supervised candidate successor -> out-degree target is usable
+        valid = (
+            succ_avail.bool()
+            & (out_tgt >= 0)
+            & (out_tgt <= 2)
+            & mask.bool().any(dim=-1)
+        )
+        if not bool(valid.any()):
             return A_pred.new_zeros(())
-        return ((edge_out - node_out)[obs_out] ** 2).mean()
+        err = (edge_out - node_out)[valid] ** 2
+        if self.node_out_weights is not None:
+            w = self.node_out_weights[out_tgt[valid].long()]
+            return (w * err).sum() / w.sum()
+        return err.mean()
 
     def _log_node_losses(self, stage: str, out: dict, batch_size: int) -> None:
         """Log node in/out-degree losses and their sum (losses only)."""
@@ -612,6 +627,7 @@ class TrackingLightningModule(LightningModule):
             consistency_loss = self._degree_consistency_loss(
                 A_pred,
                 out_degree_logits,
+                batch["node_out_degree"],
                 gt_successor_set_available,
                 timepoints,
                 mask,
