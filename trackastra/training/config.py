@@ -210,7 +210,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
     parser.add_argument(
         "--compile",
         type=str2bool,
-        default=True,
+        default=False,
         help="wrap the training-step model forward in torch.compile",
     )
     parser.add_argument("--mixedp", type=str2bool, default=True)
