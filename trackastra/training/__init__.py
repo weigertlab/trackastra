@@ -787,6 +787,12 @@ def _training_config_from_args(
         "augment": args.augment,
         "augment_details": args.augment_details,
         "position_noise": args.spatial_cutoff,
+        # Same per-window drop probability for every feature group.
+        "feature_group_drop": (
+            {"intensity": args.feature_drop, "shape": args.feature_drop}
+            if args.feature_drop > 0
+            else None
+        ),
     }
     val_dataset_kwargs = {
         **base_dataset_kwargs,

@@ -270,6 +270,80 @@ def test_wrfeat2_3d_no_intensity_removes_only_intensity_channel():
     assert np.array_equal(without_intensity, full[:, [0, 2, 3, 4, 5, 6, 7, 8]])
 
 
+def test_stacked_with_mask_matches_features_stacked_when_complete():
+    raw = _wrfeat2_example()
+    stacked, mask = raw.stacked_with_mask("wrfeat2")
+
+    assert stacked.shape == (3, 6)
+    assert mask.shape == (3, 6)
+    assert mask.dtype == bool
+    assert np.all(mask)
+    np.testing.assert_array_equal(stacked, raw.features_stacked_for("wrfeat2"))
+
+
+def test_stacked_with_mask_masks_missing_intensity():
+    full = _wrfeat2_example()
+    without = WRFeatures(
+        coords=full.coords,
+        labels=full.labels,
+        timepoints=full.timepoints,
+        features={k: v for k, v in full.features.items() if k != "intensity"},
+    )
+    stacked, mask = without.stacked_with_mask("wrfeat2")
+
+    # intensity is column 1 for wrfeat2; only it is masked and zeroed.
+    assert stacked.shape == (3, 6)
+    expected_mask = np.ones((3, 6), dtype=bool)
+    expected_mask[:, 1] = False
+    np.testing.assert_array_equal(mask, expected_mask)
+    np.testing.assert_array_equal(stacked[:, 1], 0)
+    # every other column is identical to the fully-featured stack.
+    reference = full.features_stacked_for("wrfeat2")
+    keep = [0, 2, 3, 4, 5]
+    np.testing.assert_array_equal(stacked[:, keep], reference[:, keep])
+
+
+def test_stacked_with_mask_masks_all_shape_when_only_coords():
+    coords_only = WRFeatures(
+        coords=np.zeros((3, 2), dtype=np.float32),
+        labels=np.arange(3),
+        timepoints=np.zeros(3, dtype=int),
+        features={},
+    )
+    stacked, mask = coords_only.stacked_with_mask("wrfeat2")
+
+    assert stacked.shape == (3, 6)
+    assert not np.any(mask)
+    np.testing.assert_array_equal(stacked, 0)
+
+
+def test_stacked_with_mask_masks_dependent_columns():
+    full = _wrfeat2_example()
+    # diameter present, inertia absent: log1p_diameter stays available, but
+    # compactness (needs both) and the inertia-derived q channels are masked.
+    partial = WRFeatures(
+        coords=full.coords,
+        labels=full.labels,
+        timepoints=full.timepoints,
+        features={
+            k: v for k, v in full.features.items() if k != "inertia_tensor"
+        },
+    )
+    _stacked, mask = partial.stacked_with_mask("wrfeat2")
+
+    # columns: 0 diam, 1 intensity, 2 compactness, 3-4 q, 5 border_dist
+    expected = np.array([True, True, False, False, False, True])
+    assert np.array_equal(mask[0], expected)
+
+
+def test_stacked_with_mask_3d_shape_and_masking():
+    full = _wrfeat2_3d_example()
+    stacked, mask = full.stacked_with_mask("wrfeat2")
+    assert stacked.shape == (3, 9)
+    assert np.all(mask)
+    np.testing.assert_array_equal(stacked, full.features_stacked_for("wrfeat2"))
+
+
 def test_random_affine_scale_is_isotropic_and_log_symmetric():
     x, y, _p, _ts = generate_data(ndim=2, ngrid=4)
     features = WRFeatures.from_mask_img(mask=y, img=x)

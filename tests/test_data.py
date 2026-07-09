@@ -102,7 +102,10 @@ def test_tracking_dataset_augment_details_reject_unknown_keys():
         )
 
 
-def test_tracking_dataset_feature_mode_error_lists_available_options():
+def test_tracking_dataset_masks_missing_feature_properties():
+    # A sequence with only intensity is no longer rejected for a richer recipe:
+    # the absent shape columns are masked. For the "wrfeat" concat recipe the
+    # column order is (diameter, intensity, inertia x4, border_dist).
     lineage_index = np.array([0, 0], dtype=np.int64)
     seg = DetectionSequence(
         name="points",
@@ -114,16 +117,114 @@ def test_tracking_dataset_feature_mode_error_lists_available_options():
     )
     sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
 
-    with pytest.raises(ValueError) as exc_info:
-        TrackingDataset(sequence, window_size=2, features="wrfeat")
+    dataset = TrackingDataset(sequence, window_size=2, features="wrfeat")
+    sample = dataset[0]
 
-    message = str(exc_info.value)
-    assert "Feature mode 'wrfeat' requires feature properties" in message
-    assert "border_dist" in message
-    assert "equivalent_diameter_area" in message
-    assert "inertia_tensor" in message
-    assert "tracking sequence only has ['intensity']" in message
-    assert "Compatible feature modes: ['none', 'intensity']" in message
+    assert tuple(sample["features"].shape) == (2, 7)
+    mask = sample["feature_mask"]
+    assert mask.dtype == torch.bool
+    expected = torch.tensor([False, True, False, False, False, False, False])
+    assert torch.equal(mask[0], expected)
+    # masked columns are zero-filled; the present intensity column carries values.
+    assert torch.all(sample["features"][:, mask[0] == 0] == 0)
+    assert torch.allclose(sample["features"][:, 1], torch.tensor([0.25, 0.75]))
+
+
+def _wrfeat2_seg(name, with_shape=True, with_intensity=True):
+    features = {}
+    if with_shape:
+        features["equivalent_diameter_area"] = np.full((2, 1), 2, dtype=np.float32)
+        features["inertia_tensor"] = np.array(
+            [[2, 0, 0, 2], [3, 0, 0, 1]], dtype=np.float32
+        )
+        features["border_dist"] = np.array([[0.0], [0.5]], dtype=np.float32)
+    if with_intensity:
+        features["intensity"] = np.array([[0.25], [0.75]], dtype=np.float32)
+    return DetectionSequence(
+        name=name,
+        n_frames=2,
+        coords=np.array([[0, 0], [1, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features=features,
+    )
+
+
+def test_mixed_feature_availability_batch_runs_through_model():
+    from trackastra.model import TrackingTransformer
+
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    relation = np.eye(1, dtype=bool)
+    full = _sequence(_wrfeat2_seg("full"), lineage_index, relation)
+    intensity_only = _sequence(
+        _wrfeat2_seg("intensity_only", with_shape=False), lineage_index, relation
+    )
+
+    full_sample = TrackingDataset(full, window_size=2, features="wrfeat2")[0]
+    partial_sample = TrackingDataset(
+        intensity_only, window_size=2, features="wrfeat2"
+    )[0]
+
+    # both stacks share the fixed wrfeat2 width; only the masks differ.
+    assert full_sample["features"].shape[1] == 6
+    assert partial_sample["features"].shape[1] == 6
+    assert bool(full_sample["feature_mask"].all())
+    # intensity is column 1; the shape columns are masked for the intensity-only seq.
+    assert bool(partial_sample["feature_mask"][:, 1].all())
+    assert not bool(partial_sample["feature_mask"][:, [0, 2, 3, 4, 5]].any())
+
+    batch = collate_sequence_padding([full_sample, partial_sample])
+
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=6,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+    )
+    model.eval()
+    with torch.no_grad():
+        A, _ = model(
+            batch["coords"].float(),
+            features=batch["features"].float(),
+            feature_mask=batch["feature_mask"],
+            padding_mask=batch["padding_mask"],
+        )
+    assert A.shape == (2, 2, 2)
+    assert torch.isfinite(A).all()
+
+
+def test_feature_group_drop_masks_intensity_every_window():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    sequence = _sequence(_wrfeat2_seg("full"), lineage_index, np.eye(1, dtype=bool))
+
+    dataset = TrackingDataset(
+        sequence,
+        window_size=2,
+        features="wrfeat2",
+        feature_group_drop={"intensity": 1.0},
+    )
+    sample = dataset[0]
+
+    # intensity is wrfeat2 column 1; it is always dropped, the shape columns remain.
+    mask = sample["feature_mask"]
+    assert not bool(mask[:, 1].any())
+    assert torch.all(sample["features"][:, 1] == 0)
+    assert bool(mask[:, [0, 2, 3, 4, 5]].all())
+
+
+def test_feature_group_drop_validates_probability():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    sequence = _sequence(_wrfeat2_seg("full"), lineage_index, np.eye(1, dtype=bool))
+
+    with pytest.raises(ValueError, match="must be in"):
+        TrackingDataset(
+            sequence,
+            window_size=2,
+            features="wrfeat2",
+            feature_group_drop={"intensity": 1.5},
+        )
 
 
 def test_apply_spatial_spacing_scales_model_space_distances():

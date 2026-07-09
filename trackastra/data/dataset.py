@@ -106,26 +106,6 @@ def _feature_properties_for_sequence(sequence: TrackingSequence) -> set[str]:
     return set.intersection(*feature_sets)
 
 
-def _compatible_feature_modes(available: set[str]) -> tuple[str, ...]:
-    return tuple(
-        mode
-        for mode in _FEATURE_MODES
-        if set(wrfeat.feature_recipe_keys(mode)).issubset(available)
-    )
-
-
-def _validate_feature_mode(sequence: TrackingSequence, mode: FeatureMode) -> None:
-    available = _feature_properties_for_sequence(sequence)
-    required = set(wrfeat.feature_recipe_keys(mode))
-    if required.issubset(available):
-        return
-    raise ValueError(
-        f"Feature mode {mode!r} requires feature properties {sorted(required)}, "
-        f"but the tracking sequence only has {sorted(available)}. "
-        f"Compatible feature modes: {list(_compatible_feature_modes(available))}"
-    )
-
-
 def _association_target(
     lineage_index: np.ndarray, lineage_relation: np.ndarray
 ) -> np.ndarray:
@@ -399,6 +379,7 @@ class TrackingDataset(Dataset):
         detect_drop: float = 0.0,
         detect_drop_fraction: float = 0.1,
         normalize_diameter: float | None = None,
+        feature_group_drop: Mapping[str, float] | None = None,
         dataset_index: int = 0,
     ) -> None:
         if window_size <= 1:
@@ -407,7 +388,22 @@ class TrackingDataset(Dataset):
             raise ValueError("TrackingDataset requires a gt LineageGraph")
         if features not in _FEATURE_MODES:
             raise ValueError(f"Unsupported feature mode {features!r}")
-        _validate_feature_mode(sequence, features)
+        # A sequence may provide only a subset of a recipe's source properties: the
+        # missing output columns are masked (routed through the model's null pathway)
+        # instead of rejected, so datasets with different feature availability train
+        # one model. Log which required properties are absent for visibility.
+        missing_props = sorted(
+            set(wrfeat.feature_recipe_keys(features))
+            - _feature_properties_for_sequence(sequence)
+        )
+        if missing_props:
+            logger.info(
+                "Sequence %s lacks feature properties %s for mode %r; "
+                "those feature columns will be masked.",
+                getattr(sequence, "root", "<sequence>"),
+                missing_props,
+                features,
+            )
         augment_config = (
             augment_details
             if isinstance(augment_details, AugmentationConfig)
@@ -433,6 +429,19 @@ class TrackingDataset(Dataset):
         self.max_detections = max_detections
         self.detect_drop = detect_drop
         self.detect_drop_fraction = detect_drop_fraction
+        # Per-window feature-group dropout: precompute the stacked columns each group
+        # occupies so __getitem__ can mask them out with the given probability. This
+        # trains the model's null pathway so it stays robust to datasets missing a
+        # whole feature group (e.g. intensity, or all shape).
+        self._feature_group_drop: list[tuple[np.ndarray, float]] = []
+        for group, prob in (feature_group_drop or {}).items():
+            if not 0 <= prob <= 1:
+                raise ValueError(
+                    f"feature_group_drop[{group!r}] must be in [0, 1], got {prob}"
+                )
+            if prob > 0:
+                columns = wrfeat.feature_group_columns(features, self.ndim, group)
+                self._feature_group_drop.append((columns, prob))
         self.scale_factor = _normalize_diameter_factor(sequence, normalize_diameter)
         if normalize_diameter is not None:
             logger.info(
@@ -556,7 +565,7 @@ class TrackingDataset(Dataset):
                 timepoints=seg.timepoints.astype(np.int32, copy=False),
                 features=OrderedDict(seg.features),
             )
-            return feature.features_stacked_for(self.features).shape[1]
+            return feature.stacked_with_mask(self.features)[0].shape[1]
         return 0
 
     def __getitem__(
@@ -610,7 +619,11 @@ class TrackingDataset(Dataset):
 
         if self.augmenter is not None:
             feature = self.augmenter(feature)
-        feature_values = feature.features_stacked_for(self.features)
+        feature_values, feature_mask = feature.stacked_with_mask(self.features)
+        for columns, prob in self._feature_group_drop:
+            if np.random.rand() < prob:
+                feature_mask[:, columns] = False
+                feature_values[:, columns] = 0.0
         coords0 = torch.from_numpy(
             np.concatenate((feature.timepoints[:, None], feature.coords), axis=1)
         ).float()
@@ -621,6 +634,7 @@ class TrackingDataset(Dataset):
             )
         result = {
             "features": torch.from_numpy(feature_values).float(),
+            "feature_mask": torch.from_numpy(feature_mask),
             "coords0": coords0,
             "coords": coords,
             "assoc_matrix": torch.from_numpy(association.astype(np.float32)),
@@ -741,6 +755,9 @@ def collate_sequence_padding(batch):
     normal_keys = {
         "coords": 0,
         "features": 0,
+        # Padded nodes get mask=False; they route through the model's null pathway
+        # and are ignored anyway via padding_mask.
+        "feature_mask": False,
         "pretrained_feats": 0,
         "labels": 0,
         "matched_gt": False,

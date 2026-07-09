@@ -522,6 +522,7 @@ class TrackingLightningModule(LightningModule):
 
     def _common_step(self, batch):
         feats = batch["features"]
+        feat_mask = batch.get("feature_mask")
         coords = batch["coords"]
         # association targets arrive as sparse COO; densify on-device (see collate)
         A = densify_assoc(
@@ -533,13 +534,21 @@ class TrackingLightningModule(LightningModule):
 
         out_degree_logits = None
         in_degree_logits = None
+        # Only forward feature_mask when the batch carries one, so simplified model
+        # stubs and mask-free legacy batches keep working (the model treats an absent
+        # mask as all-present anyway).
+        mask_kw = {} if feat_mask is None else {"feature_mask": feat_mask}
         if self.node_loss > 0:
             A_pred, neighbor_mask, out_degree_logits, in_degree_logits = self._forward_model(
-                coords, feats, padding_mask=padding_mask, return_node_logits=True
+                coords,
+                feats,
+                padding_mask=padding_mask,
+                return_node_logits=True,
+                **mask_kw,
             )
         else:
             A_pred, neighbor_mask = self._forward_model(
-                coords, feats, padding_mask=padding_mask
+                coords, feats, padding_mask=padding_mask, **mask_kw
             )
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics

@@ -283,13 +283,11 @@ def test_sparse_model_forward_backward_cuda():
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
-def test_mlp_feature_embedding_runs_without_fourier_features():
+def test_feature_mlp_embeds_concatenated_features_and_mask():
     torch.manual_seed(0)
     model = TrackingTransformer(
         coord_dim=2,
         feat_dim=6,
-        feat_embed_per_dim=8,
-        feature_embed_mode="mlp",
         d_model=64,
         nhead=4,
         num_encoder_layers=1,
@@ -298,34 +296,46 @@ def test_mlp_feature_embedding_runs_without_fourier_features():
     )
     coords = torch.rand((2, 12, 3))
     features = torch.rand((2, 12, 6))
-    output, _ = model(coords, features)
+    mask = torch.ones((2, 12, 6), dtype=torch.bool)
+    output, _ = model(coords, features, feature_mask=mask)
 
-    assert isinstance(model.feat_embed, FeatureMLP)
-    assert model.feat_embed.fc1.in_features == 6
-    assert model.feat_embed.fc1.out_features == 48
-    assert model.feat_embed.fc2.out_features == 48
-    assert model.config["feature_embed_mode"] == "mlp"
+    # features and mask are concatenated (2 * feat_dim) into a single 2-layer MLP.
+    assert isinstance(model.feat_mlp, FeatureMLP)
+    assert model.feat_mlp.fc1.in_features == 12
+    assert model.feat_mlp.fc2.out_features == 64
     assert output.shape == (2, 12, 12)
     assert torch.isfinite(output).all()
 
 
-def test_legacy_model_config_defaults_to_fourier_features():
-    model = TrackingTransformer(coord_dim=2, feat_dim=6, feat_embed_per_dim=8)
-    legacy_config = model.config.copy()
-    legacy_config.pop("feature_embed_mode")
-
-    restored = TrackingTransformer.create(legacy_config)
-
-    assert isinstance(restored.feat_embed, PositionalEncoding)
-    assert restored.config["feature_embed_mode"] == "fourier"
-
-
-def test_mlp_feature_embedding_survives_save_load(tmp_path):
+def test_feature_mask_changes_embedding():
+    torch.manual_seed(0)
     model = TrackingTransformer(
         coord_dim=2,
         feat_dim=6,
-        feat_embed_per_dim=8,
-        feature_embed_mode="mlp",
+        d_model=64,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0,
+    )
+    model.eval()
+    coords = torch.rand((1, 8, 3))
+    features = torch.rand((1, 8, 6))
+    all_present = torch.ones((1, 8, 6), dtype=torch.bool)
+    none_present = torch.zeros((1, 8, 6), dtype=torch.bool)
+
+    with torch.no_grad():
+        a, _ = model(coords, features, feature_mask=all_present)
+        b, _ = model(coords, features, feature_mask=none_present)
+    # A fully-masked feature block routes through the learned null response and
+    # must produce a different embedding than the fully-present one.
+    assert not torch.allclose(a, b)
+
+
+def test_feature_mlp_survives_save_load(tmp_path):
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=6,
         d_model=64,
         nhead=4,
         num_encoder_layers=1,
@@ -335,8 +345,7 @@ def test_mlp_feature_embedding_survives_save_load(tmp_path):
 
     restored = TrackingTransformer.from_folder(tmp_path)
 
-    assert isinstance(restored.feat_embed, FeatureMLP)
-    assert restored.config["feature_embed_mode"] == "mlp"
+    assert isinstance(restored.feat_mlp, FeatureMLP)
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
 
@@ -352,7 +361,6 @@ def test_disable_abs_pos_skips_input_coordinate_embedding_and_survives_save_load
         num_encoder_layers=1,
         num_decoder_layers=1,
         pos_embed_per_dim=4,
-        feat_embed_per_dim=4,
         disable_abs_pos=True,
     )
     coords = torch.rand((1, 5, 3))
@@ -363,11 +371,12 @@ def test_disable_abs_pos_skips_input_coordinate_embedding_and_survives_save_load
     restored = TrackingTransformer.from_folder(tmp_path)
 
     assert model.pos_embed is None
-    assert model.proj.in_features == 8
+    assert isinstance(model.coord_proj, torch.nn.Identity)
+    assert model.feat_mlp.fc1.in_features == 4
     assert output.shape == (1, 5, 5)
     assert torch.isfinite(output).all()
     assert restored.pos_embed is None
-    assert restored.proj.in_features == 8
+    assert isinstance(restored.coord_proj, torch.nn.Identity)
     assert restored.config["disable_abs_pos"] is True
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])

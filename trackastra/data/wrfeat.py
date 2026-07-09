@@ -279,6 +279,134 @@ def _regionprops_table(
     return table
 
 
+def _stack_wrfeat2(features: dict[str, np.ndarray], ndim: int, mode: str) -> np.ndarray:
+    """Derived shape (and, for ``wrfeat2``, intensity) channels for one frame set.
+
+    Shared by :meth:`WRFeatures.features_stacked_for` and
+    :meth:`WRFeatures.stacked_with_mask`. The masked variant imputes any absent
+    source property with zeros before calling here and masks the output columns
+    that depend on it, so the imputed values never reach an available column.
+    """
+    diameter = features[FEATURE_DIAMETER][:, 0]
+    inertia = features[FEATURE_INERTIA].reshape(-1, ndim, ndim)
+    border_dist = features[FEATURE_BORDER_DIST][:, 0]
+
+    trace = np.trace(inertia, axis1=1, axis2=2)
+    unit_ball = np.pi if ndim == 2 else 4 * np.pi / 3
+    ball_measure = unit_ball * (np.maximum(diameter, 0) / 2) ** ndim
+    eps = np.finfo(np.float32).eps
+    compactness = trace / np.maximum(ball_measure ** (2 / ndim), eps)
+
+    if ndim == 2:
+        q1 = np.divide(
+            inertia[:, 0, 0] - inertia[:, 1, 1],
+            trace,
+            out=np.zeros_like(trace),
+            where=trace > eps,
+        )
+        q2 = np.divide(
+            2 * inertia[:, 0, 1],
+            trace,
+            out=np.zeros_like(trace),
+            where=trace > eps,
+        )
+        # A positive-semidefinite tensor gives ||q|| <= 1. Project small
+        # numerical violations (or malformed inputs) back onto the unit disk.
+        q_norm = np.sqrt(np.square(q1) + np.square(q2))
+        q_scale = np.maximum(q_norm, 1)
+        q_channels = [q1 / q_scale, q2 / q_scale]
+    else:
+        inertia_norm = np.divide(
+            inertia,
+            trace[:, None, None],
+            out=np.zeros_like(inertia),
+            where=trace[:, None, None] > eps,
+        )
+        dev = inertia_norm.copy()
+        valid = trace > eps
+        dev[valid] -= np.eye(ndim, dtype=inertia.dtype) / ndim
+        q_scale = np.sqrt(3 / 2)
+        q_norm = q_scale * np.sqrt(
+            np.sum(np.square(np.diagonal(dev, axis1=1, axis2=2)), axis=1)
+            + 2
+            * (
+                np.square(dev[:, 0, 1])
+                + np.square(dev[:, 0, 2])
+                + np.square(dev[:, 1, 2])
+            )
+        )
+        dev = dev * q_scale
+        q_project = np.maximum(q_norm, 1)
+        dev = dev / q_project[:, None, None]
+        q_channels = [
+            dev[:, 0, 0],
+            dev[:, 1, 1],
+            np.sqrt(2) * dev[:, 0, 1],
+            np.sqrt(2) * dev[:, 0, 2],
+            np.sqrt(2) * dev[:, 1, 2],
+        ]
+
+    channels = [
+        np.log1p(np.maximum(diameter, 0)),
+        np.log1p(np.maximum(compactness, 0)),
+        *q_channels,
+        np.log1p(np.maximum(border_dist, 0)),
+    ]
+    if mode == "wrfeat2":
+        channels.insert(1, features[FEATURE_INTENSITY][:, 0])
+    return np.stack(channels, axis=-1).astype(np.float32, copy=False)
+
+
+def _wrfeat2_column_sources(mode: str, ndim: int) -> list[tuple[str, ...]]:
+    """Source properties each ``wrfeat2`` output column depends on, in column order.
+
+    A column is available only when all of its sources are present. The order
+    mirrors the channel assembly in :func:`_stack_wrfeat2`.
+    """
+    q_count = 2 if ndim == 2 else 5
+    cols: list[tuple[str, ...]] = [
+        (FEATURE_DIAMETER,),
+        (FEATURE_DIAMETER, FEATURE_INERTIA),
+        *([(FEATURE_INERTIA,)] * q_count),
+        (FEATURE_BORDER_DIST,),
+    ]
+    if mode == "wrfeat2":
+        cols.insert(1, (FEATURE_INTENSITY,))
+    return cols
+
+
+def _prop_width(name: str, ndim: int) -> int:
+    """Column width of a raw region property (inertia is a flattened ndim x ndim)."""
+    return ndim * ndim if name == FEATURE_INERTIA else 1
+
+
+# Logical groups for per-window feature dropout during training: dropping a group
+# masks every stacked column that depends on one of its source properties, so the
+# model learns to fall back to the remaining groups (e.g. coords-only when both drop).
+FEATURE_DROP_GROUPS = {
+    "intensity": (FEATURE_INTENSITY,),
+    "shape": (FEATURE_DIAMETER, FEATURE_INERTIA, FEATURE_BORDER_DIST),
+}
+
+
+def feature_group_columns(mode: str, ndim: int, group: str) -> np.ndarray:
+    """Boolean mask over stacked output columns belonging to a drop group.
+
+    Only defined for the ``wrfeat2`` family, whose derived columns map to source
+    properties; other recipes have no grouped columns.
+    """
+    if group not in FEATURE_DROP_GROUPS:
+        raise ValueError(
+            f"Unknown feature drop group {group!r}; "
+            f"expected one of {sorted(FEATURE_DROP_GROUPS)}"
+        )
+    if mode not in ("wrfeat2", "wrfeat2_no_intensity"):
+        raise ValueError(f"feature drop groups require a wrfeat2 mode, got {mode!r}")
+    props = set(FEATURE_DROP_GROUPS[group])
+    sources = _wrfeat2_column_sources(mode, ndim)
+    return np.array([bool(props & set(srcs)) for srcs in sources], dtype=bool)
+
+
 class WRFeatures:
     """regionprops features for a windowed track region."""
 
@@ -337,74 +465,64 @@ class WRFeatures:
         if mode in ("intensity", FEATURE_CUSTOM, "wrfeat"):
             return np.concatenate([self.features[name] for name in required], axis=-1)
 
-        diameter = self.features[FEATURE_DIAMETER][:, 0]
-        inertia = self.features[FEATURE_INERTIA].reshape(-1, self.ndim, self.ndim)
-        border_dist = self.features[FEATURE_BORDER_DIST][:, 0]
+        return _stack_wrfeat2(self.features, self.ndim, mode)
 
-        trace = np.trace(inertia, axis1=1, axis2=2)
-        unit_ball = np.pi if self.ndim == 2 else 4 * np.pi / 3
-        ball_measure = unit_ball * (np.maximum(diameter, 0) / 2) ** self.ndim
-        eps = np.finfo(np.float32).eps
-        compactness = trace / np.maximum(ball_measure ** (2 / self.ndim), eps)
+    def stacked_with_mask(self, mode: str) -> tuple[np.ndarray, np.ndarray]:
+        """Stacked features plus an availability mask, tolerating missing props.
 
-        if self.ndim == 2:
-            q1 = np.divide(
-                inertia[:, 0, 0] - inertia[:, 1, 1],
-                trace,
-                out=np.zeros_like(trace),
-                where=trace > eps,
-            )
-            q2 = np.divide(
-                2 * inertia[:, 0, 1],
-                trace,
-                out=np.zeros_like(trace),
-                where=trace > eps,
-            )
-            # A positive-semidefinite tensor gives ||q|| <= 1. Project small
-            # numerical violations (or malformed inputs) back onto the unit disk.
-            q_norm = np.sqrt(np.square(q1) + np.square(q2))
-            q_scale = np.maximum(q_norm, 1)
-            q_channels = [q1 / q_scale, q2 / q_scale]
-        else:
-            inertia_norm = np.divide(
-                inertia,
-                trace[:, None, None],
-                out=np.zeros_like(inertia),
-                where=trace[:, None, None] > eps,
-            )
-            dev = inertia_norm.copy()
-            valid = trace > eps
-            dev[valid] -= np.eye(self.ndim, dtype=inertia.dtype) / self.ndim
-            q_scale = np.sqrt(3 / 2)
-            q_norm = q_scale * np.sqrt(
-                np.sum(np.square(np.diagonal(dev, axis1=1, axis2=2)), axis=1)
-                + 2
-                * (
-                    np.square(dev[:, 0, 1])
-                    + np.square(dev[:, 0, 2])
-                    + np.square(dev[:, 1, 2])
-                )
-            )
-            dev = dev * q_scale
-            q_project = np.maximum(q_norm, 1)
-            dev = dev / q_project[:, None, None]
-            q_channels = [
-                dev[:, 0, 0],
-                dev[:, 1, 1],
-                np.sqrt(2) * dev[:, 0, 1],
-                np.sqrt(2) * dev[:, 0, 2],
-                np.sqrt(2) * dev[:, 1, 2],
-            ]
+        Same channel layout and order as :meth:`features_stacked_for`, but instead
+        of requiring every source property it fills unavailable output columns with
+        zeros and flags them ``False`` in the mask. Both arrays are ``(len(self), F)``;
+        the model routes masked columns through its learned null pathway. This is the
+        inference/training entry point for models that mix datasets with and without
+        shape or intensity features.
+        """
+        n = len(self)
+        required = feature_recipe_keys(mode)
+        if mode == "none":
+            empty = np.zeros((n, 0), dtype=np.float32)
+            return empty, empty.astype(bool)
 
-        channels = [
-            np.log1p(np.maximum(diameter, 0)),
-            np.log1p(np.maximum(compactness, 0)),
-            *q_channels,
-            np.log1p(np.maximum(border_dist, 0)),
-        ]
-        if mode == "wrfeat2":
-            channels.insert(1, self.features[FEATURE_INTENSITY][:, 0])
-        return np.stack(channels, axis=-1).astype(np.float32, copy=False)
+        have = set(self.features)
+        if mode in ("wrfeat2", "wrfeat2_no_intensity"):
+            work = dict(self.features)
+            for name in (
+                FEATURE_DIAMETER,
+                FEATURE_INERTIA,
+                FEATURE_BORDER_DIST,
+                FEATURE_INTENSITY,
+            ):
+                if name not in work:
+                    work[name] = np.zeros(
+                        (n, _prop_width(name, self.ndim)), dtype=np.float32
+                    )
+            stacked = _stack_wrfeat2(work, self.ndim, mode)
+            sources = _wrfeat2_column_sources(mode, self.ndim)
+            mask = np.stack(
+                [np.full(n, all(p in have for p in srcs), dtype=bool) for srcs in sources],
+                axis=-1,
+            )
+            stacked = np.where(mask, stacked, 0.0).astype(np.float32, copy=False)
+            return stacked, mask
+
+        # Concatenation recipes (intensity, wrfeat, custom): one block per source
+        # property, masked as a whole when the property is absent.
+        parts, masks = [], []
+        for name in required:
+            if name in self.features:
+                values = self.features[name].astype(np.float32, copy=False)
+                parts.append(values)
+                masks.append(np.ones((n, values.shape[1]), dtype=bool))
+            elif name == FEATURE_CUSTOM:
+                raise ValueError("Custom features are required but missing")
+            else:
+                width = _prop_width(name, self.ndim)
+                parts.append(np.zeros((n, width), dtype=np.float32))
+                masks.append(np.zeros((n, width), dtype=bool))
+        if not parts:
+            empty = np.zeros((n, 0), dtype=np.float32)
+            return empty, empty.astype(bool)
+        return np.concatenate(parts, axis=-1), np.concatenate(masks, axis=-1)
 
     @property
     def pretrained_feats(self):
@@ -1037,15 +1155,23 @@ def build_windows(
         if len(feat) == 0:
             coords = np.zeros((0, feat.ndim), dtype=int)
 
-        stacked_features = feat.features_stacked_for(feature_mode)
+        if type(feat).features_stacked_for is WRFeatures.features_stacked_for:
+            stacked_features, feature_mask = feat.stacked_with_mask(feature_mode)
+        else:
+            # A subclass (e.g. pretrained-feats) customises stacking: keep its output
+            # and treat all shallow feature columns as present.
+            stacked_features = feat.features_stacked_for(feature_mode)
+            feature_mask = np.ones_like(stacked_features, dtype=bool)
         if as_torch and stacked_features is not None:
             stacked_features = torch.from_numpy(stacked_features)
+            feature_mask = torch.from_numpy(feature_mask)
         w = dict(
             coords=torch.from_numpy(coords) if as_torch else coords,
             t1=torch.tensor(t1, dtype=torch.int32) if as_torch else t1,
             labels=torch.from_numpy(labels) if as_torch else labels,
             timepoints=torch.from_numpy(timepoints) if as_torch else timepoints,
             features=stacked_features,
+            feature_mask=feature_mask,
         )
         # Add pre-trained features
         if pt_feats is not None:

@@ -25,7 +25,6 @@ from ..data.wrfeat import (
     FEATURE_CUSTOM,
     FEATURE_RECIPES,
     WRFeatures,
-    feature_recipe_keys,
     normalize_to_diameter,
     transform_feature_geometry,
 )
@@ -459,28 +458,23 @@ class Trackastra:
         """Build model windows from a canonical detection sequence."""
         recipe = self.inference_config["features"]
         if recipe in FEATURE_RECIPES or recipe == FEATURE_CUSTOM:
-            required = feature_recipe_keys(recipe)
-            missing = [name for name in required if name not in detections.features]
-            if missing:
-                if recipe == FEATURE_CUSTOM:
-                    expected_width = int(self.transformer.config.get("feat_dim", 0))
-                    raise ValueError(
-                        "Point feature width does not match the model: "
-                        f"got 0, expected {expected_width}"
-                    )
-                available = ", ".join(sorted(detections.features)) or "<none>"
-                raise ValueError(
-                    f"Model requires feature {missing[0]!r} for recipe {recipe!r}, "
-                    f"but DetectionSequence only has: {available}."
-                )
             if recipe == FEATURE_CUSTOM:
-                got_width = int(detections.features[FEATURE_CUSTOM].shape[1])
+                # Custom point features have no availability mask: require the exact
+                # column layout the model was trained with.
                 expected_width = int(self.transformer.config.get("feat_dim", 0))
+                got_width = (
+                    int(detections.features[FEATURE_CUSTOM].shape[1])
+                    if FEATURE_CUSTOM in detections.features
+                    else 0
+                )
                 if got_width != expected_width:
                     raise ValueError(
                         "Point feature width does not match the model: "
                         f"got {got_width}, expected {expected_width}"
                     )
+            # Recipe modes (wrfeat2, ...) tolerate absent source properties: the
+            # missing output columns are masked and routed through the model's null
+            # pathway, so a DetectionSequence with only a subset of features tracks.
             features = detections.to_wrfeatures()
             feature_mode = recipe
         else:

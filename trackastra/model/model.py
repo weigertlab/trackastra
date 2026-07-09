@@ -571,8 +571,21 @@ class TrackingTransformer(torch.nn.Module):
         # self.coord_dim = coord_dim
 
         pos_dim = 0 if disable_abs_pos else (1 + coord_dim) * pos_embed_per_dim
-        self.proj = nn.Linear(
-            pos_dim + feat_dim * feat_embed_per_dim, d_model
+        self.d_model = d_model
+        self.feat_dim = feat_dim
+        # Coordinates (always present) and the shallow object features are embedded to
+        # d_model separately and summed. Features arrive as a fixed-width (F) stack plus
+        # a per-column availability mask; a 2-layer MLP over concat(features, mask)
+        # embeds the present values and learns a null response for columns a dataset
+        # does not provide (missing shape/intensity), so datasets with different feature
+        # sets can train one model.
+        self.coord_proj = (
+            nn.Identity() if disable_abs_pos else nn.Linear(pos_dim, d_model)
+        )
+        self.feat_mlp = (
+            FeatureMLP(input_dim=2 * feat_dim, output_dim=d_model)
+            if feat_dim > 0
+            else None
         )
         self.norm = nn.Identity() if disable_input_norm else nn.LayerNorm(d_model)
 
@@ -651,22 +664,9 @@ class TrackingTransformer(torch.nn.Module):
             self.out_degree_head = _make_node_head(d_model, max_out_degree + 1)
             self.in_degree_head = _make_node_head(d_model, max_in_degree + 1)
 
-        if feature_embed_mode == "fourier":
-            if feat_embed_per_dim > 1:
-                self.feat_embed = PositionalEncoding(
-                    cutoffs=(1000,) * feat_dim,
-                    n_pos=(feat_embed_per_dim,) * feat_dim,
-                    cutoffs_start=(0.01,) * feat_dim,
-                )
-            else:
-                self.feat_embed = nn.Identity()
-        elif feature_embed_mode == "mlp":
-            self.feat_embed = FeatureMLP(
-                input_dim=feat_dim,
-                output_dim=feat_dim * feat_embed_per_dim,
-            )
-        else:
-            raise ValueError(f"Unknown feature_embed_mode {feature_embed_mode!r}")
+        # feature_embed_mode / feat_embed_per_dim are retained in the config for
+        # compatibility but no longer select a feature embedder: features are always
+        # embedded by self.feat_mlp over concat(features, mask).
 
         self.pos_embed = None
         if not disable_abs_pos:
@@ -682,7 +682,12 @@ class TrackingTransformer(torch.nn.Module):
         # self.pos_embed = NoPositionalEncoding(d=pos_embed_per_dim * (1 + coord_dim))
 
     def forward(
-        self, coords, features=None, padding_mask=None, return_node_logits=False
+        self,
+        coords,
+        features=None,
+        feature_mask=None,
+        padding_mask=None,
+        return_node_logits=False,
     ):
         assert coords.ndim == 3 and coords.shape[-1] in (3, 4)
         _B, _N, _D = coords.shape
@@ -703,20 +708,16 @@ class TrackingTransformer(torch.nn.Module):
             )
 
         if self.disable_abs_pos:
-            if features is None or features.numel() == 0:
-                features = coords.new_empty((_B, _N, 0))
-            else:
-                features = self.feat_embed(features)
+            token = coords.new_zeros((_B, _N, self.d_model))
         else:
-            pos = self.pos_embed(coords)
-            if features is None or features.numel() == 0:
-                features = pos
-            else:
-                features = self.feat_embed(features)
-                features = torch.cat((pos, features), axis=-1)
-
-        features = self.proj(features)
-        features = self.norm(features)
+            token = self.coord_proj(self.pos_embed(coords))
+        if self.feat_mlp is not None and features is not None and features.numel():
+            if feature_mask is None:
+                feature_mask = torch.ones_like(features)
+            token = token + self.feat_mlp(
+                torch.cat((features, feature_mask.to(features.dtype)), dim=-1)
+            )
+        features = self.norm(token)
 
         x = features
 

@@ -316,6 +316,15 @@ def create_train_parser() -> configargparse.ArgumentParser:
         help="fraction of detections dropped when detection dropout is applied",
     )
     parser.add_argument(
+        "--feature_drop",
+        type=float,
+        default=0.0,
+        help=(
+            "per-window probability of masking each feature group (intensity, shape) "
+            "during training, so the model stays robust to datasets missing a group"
+        ),
+    )
+    parser.add_argument(
         "--tracking_frequency",
         type=int,
         default=5,

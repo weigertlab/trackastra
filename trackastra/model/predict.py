@@ -41,6 +41,7 @@ def predict(
             feats = None
     except KeyError:
         feats = None
+    feature_mask = padded_batch.get("feature_mask")
     try:
         if padded_batch["pretrained_feats"] is not None:
             pretrained_feats = padded_batch["pretrained_feats"]
@@ -57,6 +58,8 @@ def predict(
     device = next(model.parameters()).device
     if feats is not None:
         feats = feats.to(device)
+    if feature_mask is not None:
+        feature_mask = feature_mask.to(device)
     if pretrained_feats is not None:
         pretrained_feats = pretrained_feats.unsqueeze(0).to(device)
     timepoints = timepoints.to(device)
@@ -74,13 +77,19 @@ def predict(
             A, _, out_logits, in_logits = model(
                 coords,
                 features=feats,
+                feature_mask=feature_mask,
                 padding_mask=padding_mask,
                 return_node_logits=True,
             )
             p_out = torch.softmax(out_logits.float(), dim=-1).detach().cpu().numpy()
             p_in = torch.softmax(in_logits.float(), dim=-1).detach().cpu().numpy()
         elif pretrained_feats is None:
-            A, _ = model(coords, features=feats, padding_mask=padding_mask)
+            A, _ = model(
+                coords,
+                features=feats,
+                feature_mask=feature_mask,
+                padding_mask=padding_mask,
+            )
         else:
             A, _ = model(
                 coords,
