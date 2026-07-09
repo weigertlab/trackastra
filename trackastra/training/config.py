@@ -204,7 +204,8 @@ def create_train_parser() -> configargparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoder_only",
-        action="store_true",
+        type=str2bool,
+        default=False,
         help="drop the decoder; the head sees the encoder output on both sides (y = x)",
     )
     parser.add_argument(
