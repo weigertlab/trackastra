@@ -797,6 +797,7 @@ class TrackingSequence:
         match_max_distance: float = 16,
         load_images: bool = False,
         spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
+        validate: bool = False,
     ) -> TrackingSequence:
         """Load a CTC-like sequence into immutable detections and lineage metadata.
 
@@ -806,6 +807,9 @@ class TrackingSequence:
         with ``np.maximum(TRA, ST)`` when the matching ``*_ST/SEG`` folder exists.
         Detection folders also use standard CTC resolution, so requesting
         ``detection_folders=("SEG",)`` uses ``*_ST/SEG`` when present.
+
+        ``validate=True`` runs the (relatively expensive) ``_check_ctc`` sanity
+        checks on the GT masks and track file; it is off by default.
         """
         return _load_ctc_sequence(
             cls,
@@ -824,6 +828,7 @@ class TrackingSequence:
             match_max_distance,
             load_images,
             spacing,
+            validate,
         )
 
     @classmethod
@@ -938,11 +943,12 @@ def _load_tiffs(
     temporal_step: int,
     spatial_step: int,
     dtype: np.dtype,
+    desc="Loading TIFF frames",
 ) -> np.ndarray:
     files = sorted(folder.glob("*.tif"))[start:stop:temporal_step]
     if not files:
         raise ValueError(f"No TIFF frames selected from {folder}")
-    values = np.stack([tifffile.imread(path).astype(dtype) for path in files])
+    values = np.stack([tifffile.imread(path).astype(dtype) for path in tqdm(files, desc=desc, leave=False)])
     if spatial_step > 1:
         values = values[
             (slice(None),) + (slice(None, None, spatial_step),) * (values.ndim - 1)
@@ -974,7 +980,7 @@ def _correct_with_st(
     if not st_path.exists():
         return masks
     st_masks = _load_tiffs(
-        st_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32)
+        st_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32), desc="Loading ST masks"
     )
     return np.maximum(masks, st_masks)
 
@@ -990,7 +996,7 @@ def _load_normalized_images(
     """Load and percentile-normalize the image frames of a CTC sequence."""
     images = _ensure_ndim(
         _load_tiffs(
-            image_path, start, stop, temporal_step, spatial_step, np.dtype(np.float32)
+            image_path, start, stop, temporal_step, spatial_step, np.dtype(np.float32), desc="Loading images"
         ),
         ndim,
     )
@@ -1010,7 +1016,7 @@ def _load_refined_masks(
     """Load a CTC mask folder, ST-refining a ``_GT/TRA`` folder with its silver SEG."""
     masks = _ensure_ndim(
         _load_tiffs(
-            mask_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32)
+            mask_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32), desc="Loading CTC masks"
         ),
         ndim,
     )
@@ -1052,17 +1058,25 @@ def _isolated_tracks(masks: np.ndarray) -> pd.DataFrame:
 
 
 def _ctc_node_index(masks: np.ndarray) -> dict[tuple[int, int], int]:
+    # Only labels are needed here, and np.unique returns them in the same
+    # ascending order as regionprops, so node indices stay aligned with the
+    # LineageGraph node arrays built in _lineage_graph_from_masks.
     index = {}
     for t, mask in enumerate(masks):
-        for prop in regionprops(mask):
-            index[(t, int(prop.label))] = len(index)
+        for label in np.unique(mask):
+            if label == 0:
+                continue
+            index[(t, int(label))] = len(index)
     return index
 
 
 def _ctc_node_degrees(
-    masks: np.ndarray, tracks: pd.DataFrame | None
+    masks: np.ndarray,
+    tracks: pd.DataFrame | None,
+    node_index: dict[tuple[int, int], int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    node_index = _ctc_node_index(masks)
+    if node_index is None:
+        node_index = _ctc_node_index(masks)
     in_degree = np.zeros(len(node_index), dtype=np.int64)
     out_degree = np.zeros(len(node_index), dtype=np.int64)
     if tracks is None:
@@ -1697,6 +1711,7 @@ def _load_ctc_sequence(
     match_max_distance: float,
     load_images: bool = False,
     spacing: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    validate: bool = False,
 ) -> TrackingSequence:
     if not 0 <= slice_pct[0] < slice_pct[1] <= 1:
         raise ValueError(f"Invalid slice_pct {slice_pct}")
@@ -1752,7 +1767,8 @@ def _load_ctc_sequence(
             dtype=int,
         )
         tracks = _filter_tracks(tracks, start, stop, downscale_temporal)
-        _check_ctc(tracks, _get_node_attributes(gt_masks), gt_masks)
+        if validate:
+            _check_ctc(tracks, _get_node_attributes(gt_masks), gt_masks)
         lineage_map, lineage_relation, lineage_parents = _lineage_arrays(tracks)
         isolated_indices = None
     else:
@@ -1770,7 +1786,7 @@ def _load_ctc_sequence(
 
     gt_node_index_by_id = _ctc_node_index(gt_masks)
     node_in_degree, node_out_degree = _ctc_node_degrees(
-        gt_masks, tracks if use_gt else None
+        gt_masks, tracks if use_gt else None, node_index=gt_node_index_by_id
     )
     gt = _lineage_graph_from_masks(
         gt_masks,
@@ -1785,9 +1801,12 @@ def _load_ctc_sequence(
     detections = []
     supervision = []
     for folder, detection_path in zip(resolved_folders, detection_paths):
-        detection_masks = _load_refined_masks(
-            detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
-        )
+        if detection_path == reference_mask_path:
+            detection_masks = gt_masks
+        else:
+            detection_masks = _load_refined_masks(
+                detection_path, start, stop, downscale_temporal, downscale_spatial, ndim
+            )
         if len(detection_masks) != len(images):
             raise ValueError(
                 f"Image and detection frame counts differ for {detection_path}"
