@@ -108,7 +108,7 @@ class MaskedRunningNorm(nn.Module):
 
         # debug: log running stats every 100 updates (remove once tuned)
         self._dbg_steps += 1
-        if self._dbg_steps % 100 == 0:
+        if self._dbg_steps % 1000 == 0:
             std = (self.sq_mean - self.mean.square()).clamp_min(0).sqrt()
             logger.info(
                 "MaskedRunningNorm step=%d mean=%s std=%s",
@@ -160,8 +160,6 @@ class FeatureEmbedding(nn.Module):
         # Standardizes present channels and re-zeros masked ones.
         features = self.norm(features, feature_mask)
         
-        logger.info(features.mean(dim=(0,1)).tolist())
-        logger.info(features.std(dim=(0,1)).tolist())
         x = torch.cat((features, feature_mask.to(features.dtype)), dim=-1)
         return self.fc2(self.act(self.fc1(x)))
 
