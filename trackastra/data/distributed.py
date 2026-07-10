@@ -183,7 +183,8 @@ class BalancedBatchSampler(BatchSampler):
         batch_size: int,
         n_pool: int = 10,
         num_samples: int | None = None,
-        weight_by_ndivs: bool = False,
+        oversample_divs: float = 0.0,
+        oversample_density: float = 0.0,
         weight_by_dataset: bool = False,
         drop_last: bool = False,
         balance_batch_objects: bool = False,
@@ -191,7 +192,17 @@ class BalancedBatchSampler(BatchSampler):
     ):
         """Setting n_pool =1 will result in a regular random batch sampler.
 
-        weight_by_ndivs: if True, the probability of sampling an element is proportional to the number of divisions
+        oversample_divs: power-law oversampling of division-rich windows. The
+            per-window sampling weight is multiplied by
+            ``(1 + n_divs) ** oversample_divs``; 0 disables it (uniform), higher
+            values push harder toward windows with more divisions. Zero-division
+            windows keep weight 1.
+        oversample_density: power-law oversampling of dense windows, computed
+            *per dataset*. Within each dataset the weight is
+            ``(n_objects / median_n_objects) ** oversample_density`` renormalized to mean 1, so
+            only the within-dataset distribution shifts toward denser (harder)
+            windows -- the dataset mixture is preserved. 0 disables it. ``n_objects``
+            is the post-crop count already capped at ``max_detections``.
         weight_by_dataset: if True, the probability of sampling an element is inversely proportional to the length of the dataset
         balance_batch_objects: if True, use a variable batch size so that the total
             number of detections per batch is held roughly constant (``batch_size``
@@ -205,27 +216,40 @@ class BalancedBatchSampler(BatchSampler):
             self.n_objects = dataset.n_objects
             self.n_divs = np.array(dataset.n_divs)
             self.n_sizes = np.ones(len(dataset)) * len(dataset)
+            self.dataset_ids = np.zeros(len(dataset), dtype=int)
         elif isinstance(dataset, ConcatDataset):
             self.n_objects = tuple(n for d in dataset.datasets for n in d.n_objects)
             self.n_divs = np.array(tuple(n for d in dataset.datasets for n in d.n_divs))
             self.n_sizes = np.array(
                 tuple(len(d) for d in dataset.datasets for _ in range(len(d)))
             )
+            self.dataset_ids = np.array(
+                tuple(i for i, d in enumerate(dataset.datasets) for _ in range(len(d))),
+                dtype=int,
+            )
         else:
             raise NotImplementedError(
                 f"BalancedBatchSampler: Unknown dataset type {type(dataset)}"
             )
-        assert len(self.n_objects) == len(self.n_divs) == len(self.n_sizes)
+        assert (
+            len(self.n_objects)
+            == len(self.n_divs)
+            == len(self.n_sizes)
+            == len(self.dataset_ids)
+        )
 
         self.batch_size = batch_size
         self.n_pool = n_pool
         self.drop_last = drop_last
         self.num_samples = num_samples
-        self.weight_by_ndivs = weight_by_ndivs
+        self.oversample_divs = oversample_divs
+        self.oversample_density = oversample_density
         self.weight_by_dataset = weight_by_dataset
         self.balance_batch_objects = balance_batch_objects
         self.balance_pct = balance_pct
-        logger.debug(f"{weight_by_ndivs=}")
+        self.sample_weight = self._compute_sample_weights()
+        logger.debug(f"{oversample_divs=}")
+        logger.debug(f"{oversample_density=}")
         logger.debug(f"{weight_by_dataset=}")
 
         # Budget on the total number of detections per (padded) batch. Since
@@ -242,12 +266,36 @@ class BalancedBatchSampler(BatchSampler):
         else:
             self.object_budget = None
 
+    def _compute_sample_weights(self) -> np.ndarray:
+        """Per-window sampling weight from the division and object factors.
+
+        Both factors are power laws that reduce to 1 (no oversampling) at 0. The
+        object factor is normalized per dataset to mean 1 so it only redistributes
+        sampling within a dataset (toward denser/harder windows) without shifting
+        the dataset mixture; use ``weight_by_dataset`` to control that mixture.
+        """
+        n_obj = np.asarray(self.n_objects, dtype=float)
+        n_div = np.asarray(self.n_divs, dtype=float)
+        w = np.ones(len(n_obj), dtype=float)
+
+        if self.oversample_divs:
+            w *= (1.0 + n_div) ** self.oversample_divs
+
+        if self.oversample_density:
+            obj_w = np.ones(len(n_obj), dtype=float)
+            for did in np.unique(self.dataset_ids):
+                m = self.dataset_ids == did
+                ref = max(float(np.median(n_obj[m])), 1.0)
+                r = (n_obj[m] / ref) ** self.oversample_density
+                mean_r = float(r.mean())
+                obj_w[m] = r / mean_r if mean_r > 0 else 1.0
+            w *= obj_w
+
+        return w
+
     def get_probs(self, idx):
-        idx = np.array(idx)
-        if self.weight_by_ndivs:
-            probs = 1 + np.sqrt(self.n_divs[idx])
-        else:
-            probs = np.ones(len(idx))
+        idx = np.asarray(idx)
+        probs = self.sample_weight[idx].astype(float)
         if self.weight_by_dataset:
             probs = probs / (self.n_sizes[idx] + 1e-6)
 
@@ -373,7 +421,8 @@ class BalancedDistributedSampler(DistributedSampler):
         batch_size: int,
         n_pool: int,
         num_samples: int | None,
-        weight_by_ndivs: bool = False,
+        oversample_divs: float = 0.0,
+        oversample_density: float = 0.0,
         weight_by_dataset: bool = False,
         balance_batch_objects: bool = False,
         balance_pct: float = 50.0,
@@ -400,7 +449,8 @@ class BalancedDistributedSampler(DistributedSampler):
             batch_size=batch_size,
             n_pool=n_pool,
             num_samples=per_rank_samples,
-            weight_by_ndivs=weight_by_ndivs,
+            oversample_divs=oversample_divs,
+            oversample_density=oversample_density,
             weight_by_dataset=weight_by_dataset,
         )
 

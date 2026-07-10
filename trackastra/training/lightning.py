@@ -58,6 +58,9 @@ from trackastra.training.tracking_validation import (
     is_tracking_epoch as _is_tracking_epoch,
 )
 from trackastra.training.tracking_validation import (
+    summarize_lam_split_sweep as _summarize_lam_split_sweep,
+)
+from trackastra.training.tracking_validation import (
     summarize_tracking_metrics as _summarize_tracking_metrics,
 )
 from trackastra.utils import (
@@ -72,9 +75,11 @@ logger = logging.getLogger(__name__)
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
 # this contains all the training/loss logic
 class TrackingLightningModule(LightningModule):
+    _TRACKING_LAM_SPLIT_SWEEP = (0.0, 0.1, 0.25, 0.5, 1.0)
     _EDGE_PLOT_THRESHOLDS = tuple(
         sorted({0.5, *[float(x) for x in np.linspace(0.2, 0.8, 10)]})
     )
+    _ASSOC_TIME_BINS = 20
 
     def __init__(
         self,
@@ -112,6 +117,9 @@ class TrackingLightningModule(LightningModule):
         # per epoch and pooled across DDP ranks at epoch end (see _log_edge_error_rates)
         self.log_edge_rates = log_edge_rates
         self._edge_counts: dict[str, dict] = {}
+        self._assoc_time_counts: dict[
+            str, dict[tuple[int, int, int], np.ndarray]
+        ] = {}
 
         self.model = model
         # Compile only the training-step forward path. Store the wrapper WITHOUT
@@ -202,6 +210,7 @@ class TrackingLightningModule(LightningModule):
         self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
         self._batch_provenance_epochs_started: set[int] = set()
+        self._assoc_time_dataset_maps: dict[str, dict[int, str]] = {}
 
     def _build_tracking_cache(self):
         """Build the per-movie validation-tracking cache once (rank 0).
@@ -210,6 +219,8 @@ class TrackingLightningModule(LightningModule):
         window construction, GT graph), so it is computed a single time and reused
         every tracking epoch; only prediction + tracking + scoring re-run.
         """
+        from traccuracy.loaders import load_ctc_data
+
         from trackastra.data import load_ctc_images_masks
         from trackastra.model import Trackastra
 
@@ -244,19 +255,59 @@ class TrackingLightningModule(LightningModule):
             if name in used_names:
                 name = f"{name}_{index}"
             used_names.add(name)
-            cache.append({
-                "name": name,
-                "features": features,
-                "windows": windows,
-                "masks": masks,
-                "spatial_dim": masks.ndim - 1,
-                # Store the path, not the loaded graph: traccuracy annotates the GT
-                # graph in place during CTC scoring (ctc_node_errors/ctc_edge_errors),
-                # so a cached graph is poisoned after the first eval. Reload per epoch
-                # (cheap relative to feature extraction).
-                "gt_path": gt_path,
-            })
+            cache.append(
+                {
+                    "name": name,
+                    "features": features,
+                    "windows": windows,
+                    "masks": masks,
+                    "spatial_dim": masks.ndim - 1,
+                    # traccuracy annotates this graph in place. clear_annotations() makes
+                    # the cached graph pristine again between predictions and epochs.
+                    "gt_data": load_ctc_data(str(gt_path), run_checks=False),
+                }
+            )
         self._tracking_cache = cache
+
+    def _tracking_lam_split_values(self) -> tuple[float, ...]:
+        """Return the validation sweep supported by the current model and solver."""
+        if bool(getattr(self.model, "node_head", False)) and self.tracking_mode in (
+            "greedy",
+            "ilp",
+        ):
+            return self._TRACKING_LAM_SPLIT_SWEEP
+        return (0.0,)
+
+    def _track_lam_split_sweep(self, predictions, spatial_cutoff):
+        """Decode one candidate graph at every configured split-prior weight."""
+        from trackastra.tracking import GreedyConfig, track_greedy
+
+        values = self._tracking_lam_split_values()
+        baseline, candidate_graph = self._tracking_model._track_from_predictions(
+            predictions,
+            mode=self.tracking_mode,
+            spatial_cutoff=spatial_cutoff,
+            return_candidate=True,
+        )
+        yield values[0], baseline
+        for lam_split in values[1:]:
+            if self.tracking_mode == "greedy":
+                graph = track_greedy(
+                    candidate_graph,
+                    config=GreedyConfig(lam_split=lam_split),
+                )
+            elif self.tracking_mode == "ilp":
+                from trackastra.tracking.ilp import ILPConfig, track_ilp
+
+                graph = track_ilp(
+                    candidate_graph,
+                    ilp_config=ILPConfig(lam_split=lam_split),
+                )
+            else:
+                raise RuntimeError(
+                    f"Unexpected lam_split sweep mode {self.tracking_mode!r}"
+                )
+            yield lam_split, graph
 
     def _run_tracking_eval(self):
         """Per-epoch CTC validation: re-run only the weight-dependent prediction,
@@ -285,21 +336,29 @@ class TrackingLightningModule(LightningModule):
                     spatial_dim=movie["spatial_dim"],
                     batch_size=1,
                 )
-                graph = tm._track_from_predictions(
-                    predictions, mode=self.tracking_mode, spatial_cutoff=spatial_cutoff
-                )
-                out = Path(tmpdir) / movie["name"]
-                graph_to_ctc(graph, movie["masks"], outdir=out)
-                # Both graphs loaded fresh each epoch: traccuracy mutates them
-                # in place during scoring, so neither may be cached/reused.
-                gt_data = load_ctc_data(str(movie["gt_path"]), run_checks=False)
-                pred_data = load_ctc_data(str(out), run_checks=False)
-                values, matched = ctc_metrics_from_data(
-                    gt_data, pred_data, return_matched=True
-                )
-                rows.append({
-                    "movie": movie["name"], **values, **link_type_breakdown(matched)
-                })
+                for lam_split, graph in self._track_lam_split_sweep(
+                    predictions, spatial_cutoff
+                ):
+                    suffix = f"{lam_split:g}".replace(".", "p")
+                    out = Path(tmpdir) / movie["name"] / f"lam_split_{suffix}"
+                    graph_to_ctc(graph, movie["masks"], outdir=out)
+                    pred_data = load_ctc_data(str(out), run_checks=False)
+                    gt_data = movie["gt_data"]
+                    gt_data.clear_annotations()
+                    try:
+                        values, matched = ctc_metrics_from_data(
+                            gt_data, pred_data, return_matched=True
+                        )
+                        rows.append(
+                            {
+                                "movie": movie["name"],
+                                "lam_split": lam_split,
+                                **values,
+                                **link_type_breakdown(matched),
+                            }
+                        )
+                    finally:
+                        gt_data.clear_annotations()
         return pd.DataFrame(rows)
 
     def _write_tracking_metrics(self, metrics: pd.DataFrame, epoch: int) -> None:
@@ -676,6 +735,7 @@ class TrackingLightningModule(LightningModule):
             loss = loss + self.consistency_weight * consistency_loss
 
         edge_counts = None
+        assoc_time_counts = None
         if self.log_edge_rates:
             with torch.no_grad():
                 if self.causal_norm != "none":
@@ -695,6 +755,14 @@ class TrackingLightningModule(LightningModule):
                     division_tracks,
                     thresholds=self._EDGE_PLOT_THRESHOLDS,
                 )
+                assoc_time_counts = self._assoc_time_counts_for_batch(
+                    A,
+                    prob,
+                    timepoints,
+                    mask,
+                    batch.get("dataset_index"),
+                    batch.get("seg_index"),
+                )
                 if node_div_counts is not None:
                     edge_counts.update(node_div_counts)
 
@@ -707,6 +775,7 @@ class TrackingLightningModule(LightningModule):
             mask_time=mask_time,
             mask_valid=mask_valid,
             edge_counts=edge_counts,
+            assoc_time_counts=assoc_time_counts,
             node_loss_out=node_loss_out,
             node_loss_in=node_loss_in,
             consistency_loss=consistency_loss,
@@ -718,6 +787,85 @@ class TrackingLightningModule(LightningModule):
         acc = self._edge_counts.setdefault(stage, {})
         for key, value in counts.items():
             acc[key] = acc[key] + value if key in acc else value
+
+    @staticmethod
+    def _assoc_time_counts_for_batch(
+        A: torch.Tensor,
+        prob: torch.Tensor,
+        timepoints: torch.Tensor,
+        mask: torch.Tensor,
+        dataset_index: torch.Tensor | None,
+        seg_index: torch.Tensor | None,
+        threshold: float = 0.5,
+    ) -> dict[tuple[int, int, int], np.ndarray]:
+        """Association TP/FP/FN counts grouped by target timepoint."""
+        if dataset_index is None or seg_index is None:
+            return {}
+        m = mask.bool()
+        gt_pos = (A > 0.5) & m
+        pred_pos = (prob >= threshold) & m
+        per_target = torch.stack(
+            (
+                (gt_pos & pred_pos).sum(dim=-2),
+                (pred_pos & ~gt_pos).sum(dim=-2),
+                (gt_pos & ~pred_pos).sum(dim=-2),
+            ),
+            dim=-1,
+        )
+        counts = per_target.detach().to("cpu", dtype=torch.int64).numpy()
+        times = timepoints.detach().to("cpu").numpy()
+        dataset_ids = dataset_index.detach().to("cpu").numpy()
+        seg_ids = seg_index.detach().to("cpu").numpy()
+
+        out: dict[tuple[int, int, int], np.ndarray] = {}
+        for b in range(counts.shape[0]):
+            ds = int(dataset_ids[b])
+            seg = int(seg_ids[b])
+            for node in range(counts.shape[1]):
+                t = int(times[b, node])
+                if t < 0:
+                    continue
+                value = counts[b, node]
+                if int(value.sum()) == 0:
+                    continue
+                key = (ds, seg, t)
+                out[key] = out[key] + value if key in out else value.copy()
+        return out
+
+    def _accumulate_assoc_time_counts(
+        self, stage: str, counts: dict[tuple[int, int, int], np.ndarray] | None
+    ) -> None:
+        if not counts:
+            return
+        acc = self._assoc_time_counts.setdefault(stage, {})
+        for key, value in counts.items():
+            acc[key] = acc[key] + value if key in acc else value.copy()
+
+    @staticmethod
+    def _merge_assoc_time_counts(
+        items: list[dict[str, dict[tuple[int, int, int], np.ndarray]]],
+    ) -> dict[str, dict[tuple[int, int, int], np.ndarray]]:
+        merged: dict[str, dict[tuple[int, int, int], np.ndarray]] = {}
+        for item in items:
+            for stage, counts in item.items():
+                acc = merged.setdefault(stage, {})
+                for key, value in counts.items():
+                    arr = np.asarray(value, dtype=np.int64)
+                    acc[key] = acc[key] + arr if key in acc else arr.copy()
+        return merged
+
+    def _gather_assoc_time_counts(
+        self,
+    ) -> dict[str, dict[tuple[int, int, int], np.ndarray]]:
+        local = {
+            stage: {key: value.copy() for key, value in counts.items()}
+            for stage, counts in self._assoc_time_counts.items()
+        }
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            gathered = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(gathered, local)
+            return self._merge_assoc_time_counts(gathered)
+        return self._merge_assoc_time_counts([local])
 
     def _log_edge_error_rates(self, stage):
         """Pool per-epoch num/den across DDP ranks and log {stage}_assoc_* rates.
@@ -927,6 +1075,197 @@ class TrackingLightningModule(LightningModule):
             log_key="node_errors",
         )
 
+    @staticmethod
+    def _short_dataset_label(root: str, dataset_index: int, max_len: int = 28) -> str:
+        if not root:
+            return str(dataset_index)
+        path = Path(root)
+        parts = [part for part in path.parts if part not in ("", path.anchor)]
+        if parts:
+            label = (
+                "/".join(parts[-2:])
+                if len(parts[-1]) < 5 and len(parts) >= 2
+                else parts[-1]
+            )
+        else:
+            label = path.name
+        if not label:
+            label = str(dataset_index)
+        if len(label) > max_len:
+            label = f"...{label[-(max_len - 3):]}"
+        return label
+
+    def _dataset_root_map_for_stage(self, stage: str) -> dict[int, str]:
+        if stage in self._assoc_time_dataset_maps:
+            return self._assoc_time_dataset_maps[stage]
+        mapping: dict[int, str] = {}
+        dm = getattr(self.trainer, "datamodule", None)
+        datasets = getattr(dm, "datasets", {}) if dm is not None else {}
+        split_ds = datasets.get(stage) if isinstance(datasets, dict) else None
+        for sub in getattr(split_ds, "datasets", []) or []:
+            mapping[int(getattr(sub, "dataset_index", -1))] = str(
+                getattr(sub, "root", "")
+            )
+        self._assoc_time_dataset_maps[stage] = mapping
+        return mapping
+
+    @classmethod
+    def _assoc_time_error_matrix(
+        cls,
+        counts: dict[tuple[int, int, int], np.ndarray],
+        dataset_roots: dict[int, str],
+        n_bins: int | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        """Pool per-time association counters into dataset rows and normalized bins."""
+        n_bins = cls._ASSOC_TIME_BINS if n_bins is None else int(n_bins)
+        if not counts:
+            return np.full((0, n_bins), np.nan), []
+
+        stream_ranges: dict[tuple[int, int], list[int]] = {}
+        for (dataset_index, seg_index, timepoint), value in counts.items():
+            if int(np.asarray(value).sum()) == 0:
+                continue
+            key = (dataset_index, seg_index)
+            if key in stream_ranges:
+                stream_ranges[key][0] = min(stream_ranges[key][0], timepoint)
+                stream_ranges[key][1] = max(stream_ranges[key][1], timepoint)
+            else:
+                stream_ranges[key] = [timepoint, timepoint]
+
+        pooled: dict[tuple[int, int], np.ndarray] = {}
+        for (dataset_index, seg_index, timepoint), value in counts.items():
+            stream_key = (dataset_index, seg_index)
+            if stream_key not in stream_ranges:
+                continue
+            lo, hi = stream_ranges[stream_key]
+            frac = 0.0 if hi == lo else (timepoint - lo) / (hi - lo)
+            bin_index = min(int(frac * n_bins), n_bins - 1)
+            key = (dataset_index, bin_index)
+            arr = np.asarray(value, dtype=np.int64)
+            pooled[key] = pooled[key] + arr if key in pooled else arr.copy()
+
+        dataset_indices = sorted({dataset_index for dataset_index, _bin in pooled})
+        labels = [
+            cls._short_dataset_label(dataset_roots.get(dataset_index, ""), dataset_index)
+            for dataset_index in dataset_indices
+        ]
+        label_counts = {label: labels.count(label) for label in labels}
+        for i, label in enumerate(labels):
+            if label_counts[label] > 1:
+                labels[i] = f"{label} [{dataset_indices[i]}]"
+
+        matrix = np.full((len(dataset_indices), n_bins), np.nan, dtype=np.float32)
+        row_for_dataset = {
+            dataset_index: row for row, dataset_index in enumerate(dataset_indices)
+        }
+        for (dataset_index, bin_index), value in pooled.items():
+            tp, fp, fn = np.asarray(value, dtype=np.float64)
+            den = tp + fp + fn
+            if den > 0:
+                matrix[row_for_dataset[dataset_index], bin_index] = (fp + fn) / den
+        return matrix, labels
+
+    @staticmethod
+    def _draw_assoc_time_panel(ax, matrix, labels, title, *, cmap, vmax):
+        n_bins = matrix.shape[1]
+        if matrix.shape[0] == 0:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            ax.set_box_aspect(1 / n_bins)
+            return None
+        image = ax.matshow(
+            matrix,
+            interpolation="nearest",
+            cmap=cmap,
+            vmin=0.0,
+            vmax=vmax,
+        )
+        ax.set_title(title)
+        ax.set_xlabel("normalized target time")
+        ax.set_xticks([0, n_bins // 2, n_bins - 1])
+        ax.set_xticklabels(["0", "0.5", "1"])
+        ax.xaxis.set_ticks_position("bottom")
+        ax.xaxis.set_label_position("bottom")
+        ax.set_yticks(np.arange(len(labels)))
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.tick_params(axis="both", length=0)
+        ax.set_box_aspect(matrix.shape[0] / n_bins)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        return image
+
+    def _log_assoc_time_plot(self) -> None:
+        """Log train/val association error heatmaps over normalized target time."""
+        if (
+            not self.log_edge_rates
+            or not isinstance(self.logger, WandbLogger)
+            or self.trainer.sanity_checking
+        ):
+            return
+        gathered = self._gather_assoc_time_counts()
+        if not self.trainer.is_global_zero:
+            return
+
+        train_matrix, train_labels = self._assoc_time_error_matrix(
+            gathered.get("train", {}),
+            self._dataset_root_map_for_stage("train"),
+        )
+        val_matrix, val_labels = self._assoc_time_error_matrix(
+            gathered.get("val", {}),
+            self._dataset_root_map_for_stage("val"),
+        )
+        finite_parts = [
+            x[np.isfinite(x)] for x in (train_matrix, val_matrix) if x.size
+        ]
+        if not finite_parts:
+            return
+        finite = np.concatenate(finite_parts)
+        if finite.size == 0:
+            return
+
+        import matplotlib.pyplot as plt
+        import wandb as _wandb
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+        from matplotlib.ticker import PercentFormatter
+
+        vmax = float(np.nanpercentile(finite, 95))
+        vmax = min(1.0, max(vmax, 0.05))
+        row_counts = [max(train_matrix.shape[0], 1), max(val_matrix.shape[0], 1)]
+        height = max(3.0, 1.8 + 0.28 * sum(row_counts))
+        fig, axes = plt.subplots(
+            2,
+            1,
+            figsize=(7.0, height),
+            dpi=150,
+            constrained_layout=True,
+            gridspec_kw={"height_ratios": row_counts},
+        )
+        cmap = plt.get_cmap("magma").copy()
+        cmap.set_bad("#e6e6e6")
+        self._draw_assoc_time_panel(
+            axes[0],
+            train_matrix,
+            train_labels,
+            f"train, epoch {self.current_epoch}",
+            cmap=cmap,
+            vmax=vmax,
+        )
+        self._draw_assoc_time_panel(
+            axes[1],
+            val_matrix,
+            val_labels,
+            f"val, epoch {self.current_epoch}",
+            cmap=cmap,
+            vmax=vmax,
+        )
+        sm = ScalarMappable(norm=Normalize(vmin=0.0, vmax=vmax), cmap=cmap)
+        cbar = fig.colorbar(sm, ax=axes, shrink=0.8)
+        cbar.set_label("association error (1 - Jaccard)")
+        cbar.ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        self.logger.experiment.log({"assoc_errors_time": _wandb.Image(fig)})
+        plt.close(fig)
+
     def _spike_debug_dir(self) -> Path:
         if self.loss_spike_debug_dir is not None:
             return Path(self.loss_spike_debug_dir)
@@ -1037,6 +1376,7 @@ class TrackingLightningModule(LightningModule):
 
     def on_train_epoch_start(self):
         self._edge_counts["train"] = {}
+        self._assoc_time_counts["train"] = {}
         self._viz_epoch_count = 0
 
     def _maybe_save_window_viz(self, batch: dict) -> None:
@@ -1078,6 +1418,7 @@ class TrackingLightningModule(LightningModule):
 
     def on_validation_epoch_start(self):
         self._edge_counts["val"] = {}
+        self._assoc_time_counts["val"] = {}
 
     def checkpoint_path(self, logdir):
         path = Path(logdir) / "checkpoints" / "last.ckpt"
@@ -1207,6 +1548,7 @@ class TrackingLightningModule(LightningModule):
             return None
 
         self._accumulate_edge_counts("train", out["edge_counts"])
+        self._accumulate_assoc_time_counts("train", out["assoc_time_counts"])
 
         self.log(
             "train_loss",
@@ -1299,6 +1641,7 @@ class TrackingLightningModule(LightningModule):
         self._log_node_losses("val", out, batch["coords"].shape[0])
 
         self._accumulate_edge_counts("val", out["edge_counts"])
+        self._accumulate_assoc_time_counts("val", out["assoc_time_counts"])
 
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
@@ -1312,6 +1655,7 @@ class TrackingLightningModule(LightningModule):
 
         self._log_edge_error_rates("val")
         self._log_assoc_error_plot()
+        self._log_assoc_time_plot()
         self._log_node_error_plot()
 
         # Hack to make lightning progress bars with loss values persistent
@@ -1330,7 +1674,11 @@ class TrackingLightningModule(LightningModule):
                     self.current_epoch,
                     metrics.to_markdown(index=False),
                 )
-                values = _summarize_tracking_metrics(metrics)
+                baseline = metrics
+                if "lam_split" in metrics:
+                    baseline = metrics[np.isclose(metrics["lam_split"], 0.0)]
+                values = _summarize_tracking_metrics(baseline)
+                values.update(_summarize_lam_split_sweep(metrics))
                 msg = (
                     f"[epoch {self.current_epoch}] "
                     f"val_TRA={values['val_TRA']:.4f} "
@@ -1342,6 +1690,11 @@ class TrackingLightningModule(LightningModule):
                     key = f"val_track_{name}"
                     if key in values:
                         msg += f" {key}={values[key]:.4f}"
+                if "val_best_lam_split" in values:
+                    msg += (
+                        f" val_best_lam_split={values['val_best_lam_split']:.4g}"
+                        f" val_best_AOGM={values['val_best_AOGM']:.4f}"
+                    )
                 logger.info(msg)
                 self.log_dict(
                     values,

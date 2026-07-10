@@ -1,8 +1,9 @@
 import os
+import sys
 import urllib.request
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ import torch
 import trackastra.training as training_api
 import trackastra.training.runtime as runtime_api
 import yaml
-from torch.utils.data import ConcatDataset, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from trackastra.data import distributed
 from trackastra.data.dataset import (
     TrackingDataset,
@@ -77,6 +78,9 @@ from trackastra.training.losses import (
 )
 from trackastra.training.losses import (
     reduce_matrix_loss as _reduce_matrix_loss,
+)
+from trackastra.training.tracking_validation import (
+    summarize_lam_split_sweep,
 )
 from trackastra.training.tracking_validation import (
     summarize_tracking_metrics as _summarize_tracking_metrics,
@@ -387,6 +391,160 @@ def test_summarize_tracking_metrics_includes_linking_and_detection():
     assert summary["val_track_f1_div"] == pytest.approx(0.64)
 
 
+def test_summarize_lam_split_sweep_selects_lowest_mean_aogm():
+    metrics = pd.DataFrame(
+        {
+            "movie": ["01", "02"] * 3,
+            "lam_split": [0.0, 0.0, 0.25, 0.25, 0.5, 0.5],
+            "AOGM": [4.0, 6.0, 2.0, 4.0, 3.0, 5.0],
+            "LNK": [0.7, 0.5, 0.9, 0.7, 0.8, 0.6],
+            "TRA": [0.8, 0.6, 0.9, 0.8, 0.85, 0.75],
+        }
+    )
+
+    summary = summarize_lam_split_sweep(metrics)
+
+    assert summary["val_best_lam_split"] == pytest.approx(0.25)
+    assert summary["val_best_AOGM"] == pytest.approx(3.0)
+    assert summary["val_best_LNK_ERR"] == pytest.approx(0.2)
+    assert summary["val_AOGM_lam_split_0"] == pytest.approx(5.0)
+    assert summary["val_AOGM_lam_split_0p25"] == pytest.approx(3.0)
+
+
+def test_tracking_eval_reuses_and_clears_cached_gt(monkeypatch):
+    class CachedGT:
+        def __init__(self):
+            self.annotated = False
+            self.clear_calls = 0
+
+        def clear_annotations(self):
+            self.annotated = False
+            self.clear_calls += 1
+
+    gt_data = CachedGT()
+    pred_loads = []
+    loaders = ModuleType("traccuracy.loaders")
+
+    def load_ctc_data(path, run_checks):
+        pred_loads.append((path, run_checks))
+        return SimpleNamespace(path=path)
+
+    loaders.load_ctc_data = load_ctc_data
+    traccuracy = ModuleType("traccuracy")
+    monkeypatch.setitem(sys.modules, "traccuracy", traccuracy)
+    monkeypatch.setitem(sys.modules, "traccuracy.loaders", loaders)
+    monkeypatch.setattr(
+        "trackastra.tracking.graph_to_ctc", lambda *_args, **_kwargs: None
+    )
+
+    def ctc_metrics_from_data(gt, pred, return_matched):
+        assert gt is gt_data
+        assert not gt.annotated
+        assert return_matched
+        gt.annotated = True
+        values = {
+            "TRA": 0.8,
+            "AOGM": 2.0,
+            "DET": 1.0,
+            "LNK": 0.75,
+            "fp_nodes": 0.0,
+            "fn_nodes": 0.0,
+            "ns_nodes": 0.0,
+            "fp_edges": 1.0,
+            "fn_edges": 1.0,
+            "ws_edges": 0.0,
+        }
+        return values, SimpleNamespace(gt_graph=gt, pred_graph=pred)
+
+    def link_type_breakdown(matched):
+        assert matched.gt_graph.annotated
+        return {"fn_div": 0.0, "fp_div": 0.0, "f1_div": 1.0}
+
+    predict_script = ModuleType("predict")
+    predict_script.ctc_metrics_from_data = ctc_metrics_from_data
+    predict_script.link_type_breakdown = link_type_breakdown
+    monkeypatch.setitem(sys.modules, "predict", predict_script)
+
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=8,
+        nhead=1,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        spatial_cutoff=10,
+    )
+    module = TrackingLightningModule(model, tracking_mode="greedy")
+    module._tracking_model = SimpleNamespace(
+        _predict_from_windows=lambda *_args, **_kwargs: "predictions"
+    )
+    module._tracking_cache = [
+        {
+            "name": "movie",
+            "features": [],
+            "windows": [],
+            "masks": np.zeros((1, 2, 2), dtype=np.uint16),
+            "spatial_dim": 2,
+            "gt_data": gt_data,
+        }
+    ]
+    module._track_lam_split_sweep = lambda *_args: iter(
+        ((0.0, "graph0"), (0.25, "graph025"))
+    )
+
+    metrics = module._run_tracking_eval()
+
+    assert metrics["lam_split"].tolist() == [0.0, 0.25]
+    assert gt_data.clear_calls == 4
+    assert not gt_data.annotated
+    assert len(pred_loads) == 2
+    assert all(not run_checks for _path, run_checks in pred_loads)
+
+
+def test_tracking_lam_split_sweep_reuses_candidate_graph(monkeypatch):
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=8,
+        nhead=1,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        spatial_cutoff=10,
+        node_head=True,
+    )
+    module = TrackingLightningModule(model, tracking_mode="greedy")
+    calls = []
+    candidate_graph = object()
+    module._tracking_model = SimpleNamespace(
+        _track_from_predictions=lambda *args, **kwargs: (
+            calls.append((args, kwargs)) or ("baseline", candidate_graph)
+        )
+    )
+
+    greedy_calls = []
+
+    def fake_track_greedy(candidate, config):
+        greedy_calls.append((candidate, config.lam_split))
+        return f"graph-{config.lam_split:g}"
+
+    monkeypatch.setattr("trackastra.tracking.track_greedy", fake_track_greedy)
+
+    results = list(module._track_lam_split_sweep("predictions", spatial_cutoff=10))
+
+    assert [lam for lam, _graph in results] == [0.0, 0.1, 0.25, 0.5, 1.0]
+    assert results[0][1] == "baseline"
+    assert len(calls) == 1
+    assert calls[0][1]["return_candidate"] is True
+    assert greedy_calls == [
+        (candidate_graph, 0.1),
+        (candidate_graph, 0.25),
+        (candidate_graph, 0.5),
+        (candidate_graph, 1.0),
+    ]
+
+
 def test_metrics_from_counts():
     # TP=6, FP=2, FN=2: rates and scores from one shared triple
     m = metrics_from_counts(tp=6, fp=2, fn=2)
@@ -454,6 +612,64 @@ def test_edge_error_counts_for_division_links():
     assert threshold_counts["fn_div_t0_den"] == 2.0
     assert threshold_counts["fp_div_t0_num"] == 1.0
     assert threshold_counts["fp_div_t0_den"] == 4.0
+
+
+def test_assoc_time_counts_group_by_target_time():
+    timepoints = torch.tensor([[0, 1, 1, 2]])
+    dataset_index = torch.tensor([7])
+    seg_index = torch.tensor([3])
+    A = torch.zeros((1, 4, 4))
+    A[0, 0, 1] = 1.0
+    A[0, 0, 2] = 1.0
+    A[0, 1, 3] = 1.0
+    prob = torch.zeros((1, 4, 4))
+    prob[0, 0, 1] = 0.9
+    prob[0, 0, 2] = 0.1
+    prob[0, 1, 3] = 0.9
+    prob[0, 2, 3] = 0.9
+
+    dt = timepoints.unsqueeze(1) - timepoints.unsqueeze(2)
+    mask = ((dt > 0) & (dt <= 2)).float()
+
+    counts = TrackingLightningModule._assoc_time_counts_for_batch(
+        A, prob, timepoints, mask, dataset_index, seg_index
+    )
+
+    assert counts.keys() == {(7, 3, 1), (7, 3, 2)}
+    np.testing.assert_array_equal(counts[(7, 3, 1)], np.array([1, 0, 1]))
+    np.testing.assert_array_equal(counts[(7, 3, 2)], np.array([1, 1, 0]))
+
+
+def test_assoc_time_error_matrix_pools_normalized_stream_bins():
+    counts = {
+        (0, 0, 10): np.array([1, 1, 0]),
+        (0, 0, 20): np.array([2, 0, 0]),
+        (0, 1, 5): np.array([0, 1, 1]),
+    }
+
+    matrix, labels = TrackingLightningModule._assoc_time_error_matrix(
+        counts,
+        {0: "/data/Fluo-N3DH-CE/01"},
+        n_bins=3,
+    )
+
+    assert labels == ["Fluo-N3DH-CE/01"]
+    assert matrix.shape == (1, 3)
+    assert matrix[0, 0] == pytest.approx(3 / 4)
+    assert np.isnan(matrix[0, 1])
+    assert matrix[0, 2] == pytest.approx(0.0)
+
+
+def test_assoc_time_dataset_labels_are_compact():
+    assert (
+        TrackingLightningModule._short_dataset_label("/data/Fluo-N3DH-CE/01", 0)
+        == "Fluo-N3DH-CE/01"
+    )
+    assert (
+        TrackingLightningModule._short_dataset_label("/data/biohub/44b6_0113de3b", 0)
+        == "44b6_0113de3b"
+    )
+    assert TrackingLightningModule._short_dataset_label("", 4) == "4"
 
 
 class _SamplerDataset(Dataset):
@@ -831,6 +1047,67 @@ def test_balanced_batch_sampler_partial_batch():
 
     assert len(sampler) == len(batches) == 3
     assert sorted(len(batch) for batch in batches) == [2, 4, 4]
+
+
+def test_oversample_density_preserves_dataset_mixture():
+    # _SamplerDataset(n) has n_objects = 1..n. Oversampling dense windows must
+    # only redistribute within a dataset (toward larger n_objects), not shift the
+    # total sampling mass between the two datasets.
+    dataset = ConcatDataset([_SamplerDataset(6), _SamplerDataset(6)])
+    sampler = BalancedBatchSampler(
+        dataset, batch_size=4, n_pool=2, oversample_density=1.0
+    )
+    idx = np.arange(len(sampler.n_objects))
+    probs = sampler.get_probs(idx)
+
+    ds0 = sampler.dataset_ids == 0
+    # each dataset keeps half the mass (mean-1 per-dataset renormalization)
+    assert probs[ds0].sum() == pytest.approx(0.5)
+    assert probs[~ds0].sum() == pytest.approx(0.5)
+    # within a dataset, denser windows are strictly more likely
+    within = probs[ds0]
+    assert np.all(np.diff(within) > 0)
+
+
+def test_sample_factors_default_uniform():
+    dataset = ConcatDataset([_SamplerDataset(5), _SamplerDataset(6)])
+    sampler = BalancedBatchSampler(dataset, batch_size=4, n_pool=2)
+    assert np.allclose(sampler.sample_weight, 1.0)
+
+
+def test_write_sampler_prob_debug_csv(tmp_path):
+    class RootDataset(_SamplerDataset):
+        def __init__(self, n, root):
+            super().__init__(n)
+            self.root = root
+
+    dataset = ConcatDataset(
+        [
+            RootDataset(4, Path("data/a")),
+            RootDataset(4, Path("data/b")),
+        ]
+    )
+    sampler = BalancedBatchSampler(
+        dataset,
+        batch_size=2,
+        n_pool=2,
+        oversample_density=1.0,
+        weight_by_dataset=True,
+    )
+    loader = DataLoader(dataset, batch_sampler=sampler)
+    path = tmp_path / "debug" / "sampling_probs.csv"
+
+    training_api._write_sampler_prob_debug(loader, path)
+
+    df = pd.read_csv(path)
+    assert list(df["global_index"]) == list(range(len(dataset)))
+    assert sorted(df["dataset_root"].unique()) == ["data/a", "data/b"]
+    assert df["sample_prob"].sum() == pytest.approx(1.0)
+    assert set(df["oversample_density"]) == {1.0}
+    assert set(df["weight_by_dataset"]) == {True}
+    for _dataset_index, group in df.groupby("dataset_index"):
+        assert group["sample_prob_within_dataset"].sum() == pytest.approx(1.0)
+        assert group["dataset_prob_mass"].nunique() == 1
 
 
 def test_balanced_batch_sampler_iter_len_match_variable_batch():

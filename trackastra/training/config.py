@@ -362,10 +362,23 @@ def create_train_parser() -> configargparse.ArgumentParser:
     )
     parser.add_argument("--wandb_project", type=str, default="trackastra-new")
     parser.add_argument(
-        "--weight_by_ndivs",
-        type=str2bool,
-        default=True,
-        help="Oversample windows that contain divisions",
+        "--oversample_divs",
+        type=float,
+        default=0.0,
+        help=(
+            "Oversample division-rich windows via the power law "
+            "(1 + n_divs) ** oversample_divs; 0 disables (uniform)"
+        ),
+    )
+    parser.add_argument(
+        "--oversample_density",
+        type=float,
+        default=0.0,
+        help=(
+            "Oversample dense (harder) windows within each dataset via a power law "
+            "on the per-dataset median-relative detection count; 0 disables. "
+            "Renormalized per dataset so the dataset mixture is preserved"
+        ),
     )
     parser.add_argument(
         "--weight_by_dataset",

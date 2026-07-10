@@ -28,7 +28,7 @@ normalize_diameter: null
 max_detections: 512
 batch_size: 4
 weight_by_dataset: true
-weight_by_ndivs: false
+oversample_divs: 0.0
 detection_folders:
 - TRA
 

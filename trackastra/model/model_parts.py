@@ -67,11 +67,13 @@ class MaskedRunningNorm(nn.Module):
     @torch.no_grad()
     def update(self, x, mask):
         dims = tuple(range(x.ndim - 1))
+        mask = mask.bool()
         w = mask.to(x.dtype)
+        x_masked = torch.where(mask, x, torch.zeros((), dtype=x.dtype, device=x.device))
 
         count = w.sum(dim=dims)
-        sum_x = (x * w).sum(dim=dims)
-        sum_sq = (x.square() * w).sum(dim=dims)
+        sum_x = x_masked.sum(dim=dims)
+        sum_sq = x_masked.square().sum(dim=dims)
 
         # Aggregate the sufficient statistics across DDP ranks so every process
         # updates from the full global batch (no-op when not distributed).
@@ -140,22 +142,28 @@ class FeatureEmbedding(nn.Module):
     (see ``TrackingTransformer.forward``) and never reaches here.
     """
 
-    def __init__(self, feat_dim: int, output_dim: int):
+    def __init__(self, feat_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
         if feat_dim <= 0 or output_dim <= 0:
             raise ValueError("FeatureEmbedding dimensions must be positive")
         self.feat_dim = feat_dim
         self.norm = MaskedRunningNorm(feat_dim)
-        self.fc1 = nn.Linear(2 * feat_dim, output_dim)
-        self.fc2 = nn.Linear(output_dim, output_dim)
+        self.fc1 = nn.Linear(2 * feat_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
         self.act = nn.GELU()
 
     def forward(self, features, feature_mask=None):
+        if features.ndim != 3 or features.shape[-1] != self.feat_dim:
+            raise ValueError(
+                f"features must have shape (B, N, {self.feat_dim}), "
+                f"got {tuple(features.shape)}"
+            )
         if feature_mask is None:
             feature_mask = torch.ones_like(features, dtype=torch.bool)
-        if feature_mask.shape[-1] != self.feat_dim:
+        elif feature_mask.shape != features.shape:
             raise ValueError(
-                f"feature_mask last dim {feature_mask.shape[-1]} != feat_dim {self.feat_dim}"
+                "feature_mask must match features shape, got "
+                f"{tuple(feature_mask.shape)} and {tuple(features.shape)}"
             )
         # Standardizes present channels and re-zeros masked ones.
         features = self.norm(features, feature_mask)

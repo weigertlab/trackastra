@@ -36,8 +36,7 @@ spatial_cutoff: 100
 max_detections: 256
 
 weight_by_dataset: false
-weight_by_ndivs: false
-
+oversample_divs: 0.0
 input_train:
 - format: geff
   sparse_gt: true

@@ -575,7 +575,7 @@ class TrackingTransformer(torch.nn.Module):
             nn.Identity() if disable_abs_pos else nn.Linear(pos_dim, d_model)
         )
         self.feat_embed = (
-            FeatureEmbedding(feat_dim, d_model) if feat_dim > 0 else None
+            FeatureEmbedding(feat_dim, d_model//2, d_model) if feat_dim > 0 else None
         )
         self.norm = nn.Identity() if disable_input_norm else nn.LayerNorm(d_model)
 
@@ -698,6 +698,20 @@ class TrackingTransformer(torch.nn.Module):
         else:
             token = self.coord_proj(self.pos_embed(coords))
 
+        expected_feature_shape = (_B, _N, self.feat_dim)
+        if features is not None and tuple(features.shape) != expected_feature_shape:
+            raise ValueError(
+                f"features must have shape {expected_feature_shape}, "
+                f"got {tuple(features.shape)}"
+            )
+        if feature_mask is not None and features is None:
+            raise ValueError("feature_mask requires features")
+        if feature_mask is not None and feature_mask.shape != features.shape:
+            raise ValueError(
+                "feature_mask must match features shape, got "
+                f"{tuple(feature_mask.shape)} and {tuple(features.shape)}"
+            )
+
         if self.feat_embed is not None:
             # Only forward knows _B/_N and the device, so it materializes absent
             # features here: no features and no mask -> all-False mask over zero
@@ -705,8 +719,6 @@ class TrackingTransformer(torch.nn.Module):
             # mask given is invalid. A present features tensor with feature_mask=None is
             # left as-is (FeatureEmbedding treats None as all-present).
             if features is None:
-                if feature_mask is not None:
-                    raise ValueError("feature_mask requires features")
                 features = coords.new_zeros((_B, _N, self.feat_dim))
                 feature_mask = torch.zeros_like(features, dtype=torch.bool)
             token = token + self.feat_embed(features, feature_mask)

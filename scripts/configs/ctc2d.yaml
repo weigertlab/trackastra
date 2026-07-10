@@ -22,7 +22,7 @@ tracking_mode: greedy
 max_detections: 1024
 batch_size: 32
 weight_by_dataset: true
-weight_by_ndivs: false
+oversample_divs: 0.0
 detection_folders:
 - TRA
 input_train:

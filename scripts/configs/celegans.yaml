@@ -4,9 +4,9 @@ epochs: 500
 warmup_epochs: 0
 augment: 3
 augment_details:
-  jitter: 0.5
-  drift: 4.0
-  tilt: 20
+  jitter: 0.2
+  drift: 0.0
+  tilt: 50
   # frame_jump: 5
   # frame_jump_p: 0.05
 window: 4
@@ -23,7 +23,7 @@ num_encoder_layers: 6
 causal_norm: quiet_softmax
 cache: true
 cachedir: runs/.cache
-d_model: 448
+d_model: 320
 dropout: 0.05
 detect_drop: 0.0
 node_loss: .1
@@ -37,8 +37,7 @@ spatial_cutoff: 100  #um
 # max_detections: 256
 
 weight_by_dataset: false
-weight_by_ndivs: false
-
+oversample_divs: 0.0
 input_train:
 - format: ctc
   spacing: [1.0, .09, .09]

@@ -37,8 +37,7 @@ spatial_cutoff: 100  #um
 # max_detections: 256
 
 weight_by_dataset: false
-weight_by_ndivs: false
-
+oversample_divs: 0.0
 input_train:
 - format: ctc
   spacing: [1.0, .09, .09]

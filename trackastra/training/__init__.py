@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import logging
+import os
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
@@ -405,6 +407,79 @@ def build_dataset(
     return TrackingDatasetBundle(dataset=dataset, config=data_config)
 
 
+def _balanced_sampler_from_loader(loader: DataLoader) -> BalancedBatchSampler | None:
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    if isinstance(batch_sampler, BalancedBatchSampler):
+        return batch_sampler
+    sampler = getattr(loader, "sampler", None)
+    balanced = getattr(sampler, "_balanced_batch_sampler", None)
+    if isinstance(balanced, BalancedBatchSampler):
+        return balanced
+    return None
+
+
+def _write_sampler_prob_debug(loader: DataLoader, path: Path | str | None) -> None:
+    """Write the train sampler's per-window sampling probabilities to CSV."""
+    if path is None or int(os.environ.get("RANK", "0")) != 0:
+        return
+    sampler = _balanced_sampler_from_loader(loader)
+    if sampler is None:
+        return
+
+    all_indices = list(range(len(sampler.n_objects)))
+    if not all_indices:
+        return
+    global_probs = sampler.get_probs(all_indices)
+    within_dataset_probs: dict[int, float] = {}
+    dataset_prob_mass: dict[int, float] = {}
+    for dataset_index in sorted(set(int(x) for x in sampler.dataset_ids)):
+        idxs = [
+            i
+            for i, current_dataset in enumerate(sampler.dataset_ids)
+            if int(current_dataset) == dataset_index
+        ]
+        probs = sampler.get_probs(idxs)
+        for i, prob in zip(idxs, probs):
+            within_dataset_probs[i] = float(prob)
+        dataset_prob_mass[dataset_index] = float(sum(float(global_probs[i]) for i in idxs))
+
+    datasets = getattr(getattr(loader, "dataset", None), "datasets", [])
+    roots = {
+        i: str(getattr(dataset, "root", ""))
+        for i, dataset in enumerate(datasets)
+    }
+    local_index_by_dataset: dict[int, int] = {}
+    rows = []
+    for global_index in all_indices:
+        dataset_index = int(sampler.dataset_ids[global_index])
+        local_index = local_index_by_dataset.get(dataset_index, 0)
+        local_index_by_dataset[dataset_index] = local_index + 1
+        rows.append(
+            {
+                "global_index": global_index,
+                "dataset_index": dataset_index,
+                "dataset_root": roots.get(dataset_index, ""),
+                "window_index": local_index,
+                "n_objects": int(sampler.n_objects[global_index]),
+                "n_divs": int(sampler.n_divs[global_index]),
+                "sample_weight": float(sampler.sample_weight[global_index]),
+                "sample_prob": float(global_probs[global_index]),
+                "sample_prob_within_dataset": within_dataset_probs[global_index],
+                "dataset_prob_mass": dataset_prob_mass[dataset_index],
+                "oversample_divs": float(sampler.oversample_divs),
+                "oversample_density": float(sampler.oversample_density),
+                "weight_by_dataset": bool(sampler.weight_by_dataset),
+            }
+        )
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _dataset_feature_dim(dataset: Any) -> int | None:
     if dataset is None:
         return None
@@ -673,11 +748,16 @@ class TrackastraTrainer:
             if ckpt_path is not None
             else resume_checkpoint_path(logdir=runtime.logdir, resume=self.config.resume)
         )
+        train_loader = train_dataset.dataloader(distributed=self.config.distributed)
+        _write_sampler_prob_debug(
+            train_loader,
+            None
+            if runtime.logdir is None
+            else Path(runtime.logdir) / "debug" / "sampling_probs.csv",
+        )
         result = trainer.fit(
             lightning_module,
-            train_dataloaders=train_dataset.dataloader(
-                distributed=self.config.distributed
-            ),
+            train_dataloaders=train_loader,
             val_dataloaders=val_dataset.dataloader(),
             ckpt_path=resume_path,
         )
@@ -795,7 +875,8 @@ def _training_config_from_args(
         "batch_size": args.batch_size,
         "n_pool": args.n_pool_sampler,
         "num_samples": args.train_samples if args.train_samples > 0 else None,
-        "weight_by_ndivs": args.weight_by_ndivs,
+        "oversample_divs": args.oversample_divs,
+        "oversample_density": args.oversample_density,
         "weight_by_dataset": args.weight_by_dataset,
         "balance_batch_objects": args.balance_batch_objects,
         "balance_pct": args.balance_pct,
