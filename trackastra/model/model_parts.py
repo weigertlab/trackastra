@@ -45,18 +45,124 @@ class FeedForward(nn.Module):
         return self.fc2(self.dropout(self.act(self.fc1(x))))
 
 
-class FeatureMLP(nn.Module):
-    """Embed ordered scalar object features without periodic Fourier aliasing."""
+class MaskedRunningNorm(nn.Module):
+    """Per-channel standardization using mask-aware running statistics.
 
-    def __init__(self, input_dim: int, output_dim: int):
+    Normalizes each feature channel to zero mean / unit variance using EMA buffers
+    that are updated (in training) only over unmasked entries, with the EMA weight
+    scaled by how many valid samples a batch contributes. Normalization always uses
+    the running buffers (not per-batch stats), so the transform is identical in train
+    and eval. Masked entries are re-zeroed on output so they never participate.
+    """
+
+    def __init__(self, dim: int, momentum_per_sample: float = 1e-3, eps: float = 1e-5):
         super().__init__()
-        if input_dim <= 0 or output_dim <= 0:
-            raise ValueError("FeatureMLP dimensions must be positive")
-        self.fc1 = nn.Linear(input_dim, output_dim)
+        self.momentum_per_sample = momentum_per_sample
+        self.eps = eps
+        self.register_buffer("mean", torch.zeros(dim))
+        self.register_buffer("sq_mean", torch.ones(dim))
+        self.register_buffer("initialized", torch.zeros(dim, dtype=torch.bool))
+        self._dbg_steps = 0  # debug: throttle running-stat logging
+
+    @torch.no_grad()
+    def update(self, x, mask):
+        dims = tuple(range(x.ndim - 1))
+        w = mask.to(x.dtype)
+
+        count = w.sum(dim=dims)
+        sum_x = (x * w).sum(dim=dims)
+        sum_sq = (x.square() * w).sum(dim=dims)
+
+        # Aggregate the sufficient statistics across DDP ranks so every process
+        # updates from the full global batch (no-op when not distributed).
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            packed = torch.stack((count, sum_x, sum_sq))
+            torch.distributed.all_reduce(packed)
+            count, sum_x, sum_sq = packed.unbind(0)
+
+        valid = count > 0
+        denom = count.clamp_min(1)
+        batch_mean = sum_x / denom
+        batch_sq_mean = sum_sq / denom
+
+        alpha = (1 - (1 - self.momentum_per_sample) ** count).to(self.mean.dtype)
+
+        first = valid & ~self.initialized
+        update = valid & self.initialized
+
+        self.mean[first] = batch_mean[first].to(self.mean.dtype)
+        self.sq_mean[first] = batch_sq_mean[first].to(self.sq_mean.dtype)
+
+        # Indexed assignment (not in-place lerp_ on a boolean-indexed copy, which
+        # would silently no-op) so the EMA actually advances.
+        self.mean[update] = torch.lerp(
+            self.mean[update], batch_mean[update].to(self.mean.dtype), alpha[update]
+        )
+        self.sq_mean[update] = torch.lerp(
+            self.sq_mean[update],
+            batch_sq_mean[update].to(self.sq_mean.dtype),
+            alpha[update],
+        )
+
+        self.initialized |= valid
+
+        # debug: log running stats every 100 updates (remove once tuned)
+        self._dbg_steps += 1
+        if self._dbg_steps % 100 == 0:
+            std = (self.sq_mean - self.mean.square()).clamp_min(0).sqrt()
+            logger.info(
+                "MaskedRunningNorm step=%d mean=%s std=%s",
+                self._dbg_steps,
+                [round(v, 3) for v in self.mean.tolist()],
+                [round(v, 3) for v in std.tolist()],
+            )
+
+    def forward(self, x, mask):
+        mask = mask.bool()
+        if self.training:
+            self.update(x.detach(), mask)
+
+        mean = self.mean.to(x.dtype)
+        var = (self.sq_mean - self.mean.square()).clamp_min(0).to(x.dtype)
+
+        y = (x - mean) * torch.rsqrt(var + self.eps)
+        return y.masked_fill(~mask, 0)
+
+
+class FeatureEmbedding(nn.Module):
+    """Embed masked scalar object features.
+
+    ``features`` is a real ``(B, N, feat_dim)`` tensor; ``feature_mask`` is either the
+    matching boolean tensor or ``None`` (all present). Features are per-channel
+    standardized with mask-aware running statistics (``MaskedRunningNorm``), which also
+    re-zeros masked columns so their values never participate; an all-False row fires
+    the model's learned null embedding. ``features=None`` is resolved by the caller
+    (see ``TrackingTransformer.forward``) and never reaches here.
+    """
+
+    def __init__(self, feat_dim: int, output_dim: int):
+        super().__init__()
+        if feat_dim <= 0 or output_dim <= 0:
+            raise ValueError("FeatureEmbedding dimensions must be positive")
+        self.feat_dim = feat_dim
+        self.norm = MaskedRunningNorm(feat_dim)
+        self.fc1 = nn.Linear(2 * feat_dim, output_dim)
         self.fc2 = nn.Linear(output_dim, output_dim)
         self.act = nn.GELU()
 
-    def forward(self, x):
+    def forward(self, features, feature_mask=None):
+        if feature_mask is None:
+            feature_mask = torch.ones_like(features, dtype=torch.bool)
+        if feature_mask.shape[-1] != self.feat_dim:
+            raise ValueError(
+                f"feature_mask last dim {feature_mask.shape[-1]} != feat_dim {self.feat_dim}"
+            )
+        # Standardizes present channels and re-zeros masked ones.
+        features = self.norm(features, feature_mask)
+        
+        logger.info(features.mean(dim=(0,1)).tolist())
+        logger.info(features.std(dim=(0,1)).tolist())
+        x = torch.cat((features, feature_mask.to(features.dtype)), dim=-1)
         return self.fc2(self.act(self.fc1(x)))
 
 

@@ -412,8 +412,8 @@ class TrackingDataset(Dataset):
         )
         if position_noise < 0:
             raise ValueError("position_noise must be non-negative")
-        if max_detections is not None and max_detections < window_size:
-            raise ValueError("max_detections must be at least window_size")
+        if max_detections is not None and max_detections < 1:
+            raise ValueError("max_detections must be at least 1")
         if not 0 <= detect_drop <= 1 or not 0 <= detect_drop_fraction <= 1:
             raise ValueError("Detection dropout values must be in [0, 1]")
         self.sequence = sequence

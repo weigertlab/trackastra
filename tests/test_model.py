@@ -4,7 +4,8 @@ import yaml
 from trackastra.model import TrackingTransformer
 from trackastra.model.model import DecoderLayer, EncoderLayer
 from trackastra.model.model_parts import (
-    FeatureMLP,
+    FeatureEmbedding,
+    MaskedRunningNorm,
     PositionalEncoding,
 )
 from trackastra.model.sparse_attn import build_knn_index
@@ -302,9 +303,9 @@ def test_feature_mlp_embeds_concatenated_features_and_mask():
     output, _ = model(coords, features, feature_mask=mask)
 
     # features and mask are concatenated (2 * feat_dim) into a single 2-layer MLP.
-    assert isinstance(model.feat_mlp, FeatureMLP)
-    assert model.feat_mlp.fc1.in_features == 12
-    assert model.feat_mlp.fc2.out_features == 64
+    assert isinstance(model.feat_embed, FeatureEmbedding)
+    assert model.feat_embed.fc1.in_features == 12
+    assert model.feat_embed.fc2.out_features == 64
     assert output.shape == (2, 12, 12)
     assert torch.isfinite(output).all()
 
@@ -361,8 +362,99 @@ def test_feature_mask_shape_is_validated():
     coords = torch.rand((1, 5, 3))
     features = torch.rand((1, 5, 2))
 
-    with pytest.raises(ValueError, match="feature_mask must match"):
+    with pytest.raises(ValueError, match="feat_dim"):
         model(coords, features, feature_mask=torch.ones((1, 5, 1), dtype=torch.bool))
+
+
+def test_masked_running_norm_advances_and_standardizes():
+    torch.manual_seed(0)
+    norm = MaskedRunningNorm(3, momentum_per_sample=1e-2).train()
+    # channel c has mean ~ (c+1)*10 and differing scales
+    scales = torch.tensor([1.0, 5.0, 20.0])
+    means = torch.tensor([10.0, 20.0, 30.0])
+    mask = torch.ones(64, 100, 3, dtype=torch.bool)
+
+    prev = norm.mean.clone()
+    for _ in range(200):
+        x = torch.randn(64, 100, 3) * scales + means
+        y = norm(x, mask)
+    # EMA must have moved off init and toward the true means (guards the frozen-stats bug)
+    assert not torch.allclose(norm.mean, prev)
+    assert torch.allclose(norm.mean, means, rtol=0.1)
+    # output is standardized per channel regardless of input scale
+    x = torch.randn(64, 100, 3) * scales + means
+    y = norm.eval()(x, mask)
+    assert torch.allclose(y.mean(dim=(0, 1)), torch.zeros(3), atol=0.1)
+    assert torch.allclose(y.std(dim=(0, 1)), torch.ones(3), rtol=0.15)
+
+
+def test_masked_running_norm_ignores_masked_entries():
+    torch.manual_seed(0)
+    norm = MaskedRunningNorm(2, momentum_per_sample=1e-1).train()
+    mask = torch.ones(32, 50, 2, dtype=torch.bool)
+    mask[..., 1] = False  # channel 1 never valid
+    for _ in range(50):
+        x = torch.randn(32, 50, 2) * 3 + 7
+        norm(x, mask)
+    # masked channel stays at init; valid channel learns its stats
+    assert norm.initialized.tolist() == [True, False]
+    assert abs(norm.mean[0].item() - 7) < 1.0
+    assert norm.mean[1].item() == 0.0  # untouched init
+
+
+def test_masked_feature_values_do_not_participate():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=6,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0,
+    ).eval()
+    coords = torch.rand((1, 5, 3))
+    mask = torch.ones((1, 5, 6), dtype=torch.bool)
+    mask[..., 2:4] = False  # drop two columns
+    features_a = torch.rand((1, 5, 6))
+    features_b = features_a.clone()
+    features_b[..., 2:4] = torch.rand((1, 5, 2))  # differ only in masked columns
+
+    with torch.no_grad():
+        a, _ = model(coords, features_a, feature_mask=mask)
+        b, _ = model(coords, features_b, feature_mask=mask)
+
+    assert torch.allclose(a, b)
+
+
+def test_feature_mask_without_features_raises():
+    model = TrackingTransformer(coord_dim=2, feat_dim=2, d_model=16, nhead=4)
+    coords = torch.rand((1, 5, 3))
+
+    with pytest.raises(ValueError, match="feature_mask requires features"):
+        model(coords, features=None, feature_mask=torch.ones((1, 5, 2), dtype=torch.bool))
+
+
+def test_missing_mask_defaults_to_all_present():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=6,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0,
+    ).eval()
+    coords = torch.rand((1, 5, 3))
+    features = torch.rand((1, 5, 6))
+    all_present = torch.ones_like(features, dtype=torch.bool)
+
+    with torch.no_grad():
+        without_mask, _ = model(coords, features)
+        explicit, _ = model(coords, features, feature_mask=all_present)
+
+    assert torch.allclose(without_mask, explicit)
 
 
 def test_feature_mlp_survives_save_load(tmp_path):
@@ -378,7 +470,7 @@ def test_feature_mlp_survives_save_load(tmp_path):
 
     restored = TrackingTransformer.from_folder(tmp_path)
 
-    assert isinstance(restored.feat_mlp, FeatureMLP)
+    assert isinstance(restored.feat_embed, FeatureEmbedding)
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
 
@@ -405,7 +497,7 @@ def test_disable_abs_pos_skips_input_coordinate_embedding_and_survives_save_load
 
     assert model.pos_embed is None
     assert isinstance(model.coord_proj, torch.nn.Identity)
-    assert model.feat_mlp.fc1.in_features == 4
+    assert model.feat_embed.fc1.in_features == 4
     assert output.shape == (1, 5, 5)
     assert torch.isfinite(output).all()
     assert restored.pos_embed is None

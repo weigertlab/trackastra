@@ -936,6 +936,10 @@ def _resolve_detection_folder(root: Path, folder: str | Path) -> Path:
     raise FileNotFoundError(f"Could not find detection folder {folder!s} for {root}")
 
 
+def _imread_as(path: Path, dtype: np.dtype) -> np.ndarray:
+    return tifffile.imread(path).astype(dtype)
+
+
 def _load_tiffs(
     folder: Path,
     start: int,
@@ -944,11 +948,19 @@ def _load_tiffs(
     spatial_step: int,
     dtype: np.dtype,
     desc="Loading TIFF frames",
+    n_jobs: int | None = None,
 ) -> np.ndarray:
     files = sorted(folder.glob("*.tif"))[start:stop:temporal_step]
     if not files:
         raise ValueError(f"No TIFF frames selected from {folder}")
-    values = np.stack([tifffile.imread(path).astype(dtype) for path in tqdm(files, desc=desc, leave=False)])
+    # Reads are I/O plus GIL-releasing TIFF decode, so a thread pool overlaps
+    # them; joblib preserves input order, keeping frames time-aligned.
+    n_jobs = n_jobs or min(8, joblib.cpu_count())
+    frames = joblib.Parallel(n_jobs=n_jobs, prefer="threads")(
+        joblib.delayed(_imread_as)(path, dtype)
+        for path in tqdm(files, desc=desc, leave=False)
+    )
+    values = np.stack(frames)
     if spatial_step > 1:
         values = values[
             (slice(None),) + (slice(None, None, spatial_step),) * (values.ndim - 1)
@@ -1000,8 +1012,14 @@ def _load_normalized_images(
         ),
         ndim,
     )
+    # Per-frame percentile normalization is independent and GIL-releasing (numpy
+    # C ops), so a thread pool overlaps it; joblib preserves input order.
+    n_jobs = min(8, joblib.cpu_count())
     return np.stack(
-        [normalize(image) for image in tqdm(images, desc="Normalizing", leave=False)]
+        joblib.Parallel(n_jobs=n_jobs, prefer="threads")(
+            joblib.delayed(normalize)(image)
+            for image in tqdm(images, desc="Normalizing", leave=False)
+        )
     )
 
 
@@ -1482,7 +1500,12 @@ def _tracking_sequence_from_geff_graph(
             if sparse_gt:
                 gt_predecessor_set_available[:] = False
                 gt_successor_set_available[:] = False
-            for time in np.intersect1d(np.unique(timepoints), np.unique(gt_timepoints)):
+            shared_times = np.intersect1d(
+                np.unique(timepoints), np.unique(gt_timepoints)
+            )
+            for time in tqdm(
+                shared_times, desc="Matching detections to GT", leave=False
+            ):
                 prop_idx = np.flatnonzero(timepoints == time)
                 gt_idx = np.flatnonzero(gt_timepoints == time)
                 matches = match_points(
@@ -1840,7 +1863,12 @@ def _load_ctc_sequence(
             joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
                 mask=mask[None], img=image[None], t_start=t
             )
-            for t, (mask, image) in enumerate(zip(detection_masks, images))
+            for t, (mask, image) in tqdm(
+                enumerate(zip(detection_masks, images)),
+                total=len(detection_masks),
+                desc="Extracting features",
+                leave=False,
+            )
         )
         frame_features = [
             wrfeat.transform_feature_geometry(feature, spacing_matrix)

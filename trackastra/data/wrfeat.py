@@ -1056,8 +1056,8 @@ def get_features(
     logger.info(
         "Using fast_regionprops backend"
         if FAST_REGIONPROPS_INSTALLED
-        else "Using skimage regionprops backend (install trackastra[fast] to speed"
-        " up feature extraction)"
+        else "Using skimage regionprops backend (pip install fast-regionprops to"
+        " speed up feature extraction)"
     )
     if n_workers > 0:
         logger.info(f"Using {n_workers} processes for feature extraction")

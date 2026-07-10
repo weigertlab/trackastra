@@ -4,7 +4,7 @@ epochs: 500
 warmup_epochs: 0
 augment: 3
 augment_details:
-  jitter: 0.8
+  jitter: 0.5
   drift: 4.0
   tilt: 20
   # frame_jump: 5
@@ -23,7 +23,7 @@ num_encoder_layers: 6
 causal_norm: quiet_softmax
 cache: true
 cachedir: runs/.cache
-d_model: 256
+d_model: 448
 dropout: 0.05
 detect_drop: 0.0
 node_loss: .1
