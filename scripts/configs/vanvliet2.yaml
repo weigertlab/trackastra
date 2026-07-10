@@ -13,7 +13,6 @@ cachedir: runs/.cache
 d_model: 320
 dropout: 0.05
 pos_embed_per_dim: 32
-feat_embed_per_dim: 8
 lr: 0.0001
 train_samples: 32000
 tracking_frequency: 5

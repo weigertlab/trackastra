@@ -16,7 +16,7 @@ spatial_cutoff: 96
 pos_embed_per_dim: 32
 causal_norm: quiet_softmax
 attn_positional_bias: rope
-features: wrfeat
+features: wrfeat2
 div_upweight: 2
 cachedir: runs/.cache.old
 distributed: false

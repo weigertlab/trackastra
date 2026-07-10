@@ -134,8 +134,7 @@ def _as_point_features(features, *, n: int, frame: int) -> np.ndarray:
     features = np.asarray(features, dtype=np.float32)
     if features.ndim != 2 or len(features) != n:
         raise ValueError(
-            f"features[{frame}] must have shape (N, F) with N={n}, got "
-            f"{features.shape}"
+            f"features[{frame}] must have shape (N, F) with N={n}, got {features.shape}"
         )
     if not np.all(np.isfinite(features)):
         raise ValueError(f"features[{frame}] contains non-finite values")
@@ -184,6 +183,18 @@ class Trackastra:
             device: Device to run model on ("cuda", "mps", "cpu", "automatic" or None).
             batch_size: Batch size for prediction. If None, defaults to 1 on CPU and 16 on GPU.
         """
+        feature_mode = inference_config.get("features")
+        valid_feature_modes = (
+            *FEATURE_RECIPES,
+            FEATURE_CUSTOM,
+            "pretrained_feats",
+            "pretrained_feats_aug",
+        )
+        if feature_mode not in valid_feature_modes:
+            raise ValueError(
+                f"Unknown inference feature mode {feature_mode!r}; "
+                f"expected one of {valid_feature_modes}"
+            )
         if device == "cuda":
             if torch.cuda.is_available():
                 self.device = "cuda"
@@ -312,7 +323,7 @@ class Trackastra:
     def _maybe_setup_pretrained_extractor(self, imgs, batch_size: int | None = None):
         """Set up the pretrained feature extractor when the contract requires it.
 
-        No-op for the standard wrfeat path. Called by every entry that extracts
+        No-op for the standard region-feature path. Called by every entry that extracts
         features (``track`` and the cached validation path) so they behave the same.
         """
         feat_type = self.inference_config["features"]
@@ -324,7 +335,9 @@ class Trackastra:
                 "feature extraction. Please install it with: "
                 "pip install trackastra[etultra]"
             )
-        save_path = "./embeddings" if self.imgs_path is None else self.imgs_path / "embeddings"
+        save_path = (
+            "./embeddings" if self.imgs_path is None else self.imgs_path / "embeddings"
+        )
         self.feature_extractor = FeatureExtractor.from_model_name(
             self.inference_config["pretrained_feats_model"],
             imgs.shape[-2:],
@@ -382,9 +395,8 @@ class Trackastra:
             as_torch=True,
             feature_mode=(
                 self.inference_config["features"]
-                if self.inference_config["features"]
-                in FEATURE_RECIPES
-                else "wrfeat"
+                if self.inference_config["features"] in FEATURE_RECIPES
+                else "wrfeat2"
             ),
         )
         return features, windows
@@ -498,7 +510,7 @@ class Trackastra:
             if detections.spacing is not None:
                 matrix = np.diag(detections.spacing).astype(np.float32)
                 features = [transform_feature_geometry(f, matrix) for f in features]
-            feature_mode = "wrfeat"
+            feature_mode = "wrfeat2"
 
         if normalize_diameter is None:
             normalize_diameter = self.inference_config.get("normalize_diameter")

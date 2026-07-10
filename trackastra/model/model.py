@@ -42,8 +42,6 @@ class ModelConfig:
     feat_dim: int = 6
     d_model: int = 256
     pos_embed_per_dim: int = 32
-    feat_embed_per_dim: int = 8
-    feature_embed_mode: Literal["fourier", "mlp"] = "mlp"
     num_encoder_layers: int = 6
     # None mirrors num_encoder_layers; encoder_only forces it to 0. Resolved to a
     # concrete count inside TrackingTransformer and stored in its saved config.
@@ -81,8 +79,6 @@ class ModelConfig:
             "feat_dim": self.feat_dim,
             "d_model": self.d_model,
             "pos_embed_per_dim": self.pos_embed_per_dim,
-            "feat_embed_per_dim": self.feat_embed_per_dim,
-            "feature_embed_mode": self.feature_embed_mode,
             "num_encoder_layers": self.num_encoder_layers,
             "num_decoder_layers": self.num_decoder_layers,
             "dropout": self.dropout,
@@ -424,7 +420,6 @@ class TrackingTransformer(torch.nn.Module):
         num_decoder_layers: int | None = None,
         dropout: float = 0.1,
         pos_embed_per_dim: int = 32,
-        feat_embed_per_dim: int = 1,
         window: int = 6,
         spatial_cutoff: int = 256,
         attn_positional_bias: Literal["rope", "none"] = "rope",
@@ -444,7 +439,6 @@ class TrackingTransformer(torch.nn.Module):
         edge_star_n_heads: int = 4,
         edge_star_n_blocks: int = 1,
         edge_mlp_dim: int | None = None,
-        feature_embed_mode: Literal["fourier", "mlp"] = "fourier",
         architecture_version: Literal[1, 2] = 2,
         disable_abs_pos: bool = False,
         disable_input_norm: bool = False,
@@ -533,8 +527,6 @@ class TrackingTransformer(torch.nn.Module):
             attn_positional_bias=attn_positional_bias,
             attn_positional_bias_n_spatial=attn_positional_bias_n_spatial,
             spatial_cutoff=spatial_cutoff,
-            feat_embed_per_dim=feat_embed_per_dim,
-            feature_embed_mode=feature_embed_mode,
             causal_norm=causal_norm,
             attn_dist_mode=attn_dist_mode,
             attn_mode=attn_mode,
@@ -664,10 +656,6 @@ class TrackingTransformer(torch.nn.Module):
             self.out_degree_head = _make_node_head(d_model, max_out_degree + 1)
             self.in_degree_head = _make_node_head(d_model, max_in_degree + 1)
 
-        # feature_embed_mode / feat_embed_per_dim are retained in the config for
-        # compatibility but no longer select a feature embedder: features are always
-        # embedded by self.feat_mlp over concat(features, mask).
-
         self.pos_embed = None
         if not disable_abs_pos:
             # Time keeps the absolute short-period anchor (1 frame); spatial dims
@@ -711,7 +699,23 @@ class TrackingTransformer(torch.nn.Module):
             token = coords.new_zeros((_B, _N, self.d_model))
         else:
             token = self.coord_proj(self.pos_embed(coords))
-        if self.feat_mlp is not None and features is not None and features.numel():
+
+        expected_feature_shape = (_B, _N, self.feat_dim)
+        if features is not None and tuple(features.shape) != expected_feature_shape:
+            raise ValueError(
+                f"features must have shape {expected_feature_shape}, got {tuple(features.shape)}"
+            )
+        if feature_mask is not None and features is None:
+            raise ValueError("feature_mask requires features")
+        if feature_mask is not None and feature_mask.shape != features.shape:
+            raise ValueError(
+                "feature_mask must match features shape, got "
+                f"{tuple(feature_mask.shape)} and {tuple(features.shape)}"
+            )
+        if self.feat_mlp is not None:
+            if features is None:
+                features = coords.new_zeros(expected_feature_shape)
+                feature_mask = torch.zeros_like(features)
             if feature_mask is None:
                 feature_mask = torch.ones_like(features)
             token = token + self.feat_mlp(

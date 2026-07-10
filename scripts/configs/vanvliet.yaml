@@ -12,7 +12,6 @@ cachedir: runs/.cache
 d_model: 320
 dropout: 0.05
 pos_embed_per_dim: 32
-feat_embed_per_dim: 8
 lr: 0.0001
 train_samples: 32000
 tracking_frequency: 10
@@ -22,7 +21,7 @@ batch_size: 192
 detection_folders:
 - TRA
 attn_positional_bias: rope
-features: wrfeat
+features: wrfeat2
 input_train:
 - data/vanvliet/cib/140409-03  
 - data/vanvliet/cib/140415-08

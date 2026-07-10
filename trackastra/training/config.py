@@ -130,13 +130,6 @@ def create_train_parser() -> configargparse.ArgumentParser:
         help="decoder depth; None mirrors --num_encoder_layers, 0 under --encoder_only",
     )
     parser.add_argument("--pos_embed_per_dim", type=int, default=32)
-    parser.add_argument("--feat_embed_per_dim", type=int, default=8)
-    parser.add_argument(
-        "--feature_embed_mode",
-        choices=("fourier", "mlp"),
-        default=None,
-        help="feature encoder; defaults to fourier for wrfeat and mlp otherwise",
-    )
     parser.add_argument("--dropout", type=float, default=0.00)
     parser.add_argument("--num_workers", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -223,7 +216,6 @@ def create_train_parser() -> configargparse.ArgumentParser:
         choices=[
             "none",
             "intensity",
-            "wrfeat",
             "wrfeat2",
             "wrfeat2_no_intensity",
         ],
@@ -320,7 +312,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "per-window probability of masking each feature group (intensity, shape) "
+            "per-window probability of masking each wrfeat2 group (intensity, shape) "
             "during training, so the model stays robust to datasets missing a group"
         ),
     )

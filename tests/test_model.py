@@ -62,7 +62,9 @@ def test_spatial_cutoff_drives_attention_pos_enc_and_knn():
         spatial_cutoff=2 * R,
     )
     assert torch.equal(model.pos_embed.freqs[0], other.pos_embed.freqs[0])  # time
-    assert not torch.allclose(model.pos_embed.freqs[1], other.pos_embed.freqs[1])  # space
+    assert not torch.allclose(
+        model.pos_embed.freqs[1], other.pos_embed.freqs[1]
+    )  # space
 
 
 def test_legacy_max_distance_constructor_alias():
@@ -330,6 +332,37 @@ def test_feature_mask_changes_embedding():
     # A fully-masked feature block routes through the learned null response and
     # must produce a different embedding than the fully-present one.
     assert not torch.allclose(a, b)
+
+
+def test_missing_feature_tensor_uses_all_missing_embedding():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=6,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        dropout=0,
+    ).eval()
+    coords = torch.rand((1, 5, 3))
+    features = torch.zeros((1, 5, 6))
+    mask = torch.zeros_like(features, dtype=torch.bool)
+
+    with torch.no_grad():
+        without_tensor, _ = model(coords)
+        explicitly_missing, _ = model(coords, features, feature_mask=mask)
+
+    assert torch.allclose(without_tensor, explicitly_missing)
+
+
+def test_feature_mask_shape_is_validated():
+    model = TrackingTransformer(coord_dim=2, feat_dim=2, d_model=16, nhead=4)
+    coords = torch.rand((1, 5, 3))
+    features = torch.rand((1, 5, 2))
+
+    with pytest.raises(ValueError, match="feature_mask must match"):
+        model(coords, features, feature_mask=torch.ones((1, 5, 1), dtype=torch.bool))
 
 
 def test_feature_mlp_survives_save_load(tmp_path):

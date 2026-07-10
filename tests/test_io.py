@@ -344,7 +344,7 @@ def test_tracking_data_uses_lineage_relation_and_excludes_unmatched():
         supervision=(sup,),
     )
 
-    for mode, width in (("wrfeat", 7), ("wrfeat2", 6), ("wrfeat2_no_intensity", 5)):
+    for mode, width in (("wrfeat2", 6), ("wrfeat2_no_intensity", 5)):
         data = TrackingDataset(sequence, window_size=2, features=mode)
         sample = data[0]
         association = sample["assoc_matrix"].bool().numpy()
@@ -383,17 +383,16 @@ def test_tracking_data_normalize_diameter_scales_window_geometry_only():
     )
 
     sample = TrackingDataset(
-        sequence, window_size=2, features="wrfeat", normalize_diameter=4
+        sequence, window_size=2, features="wrfeat2", normalize_diameter=4
     )[0]
 
     np.testing.assert_allclose(sample["coords0"][:, 1:].numpy(), coords * 2)
     values = sample["features"].numpy()
-    np.testing.assert_allclose(values[:, 0], 4)
+    np.testing.assert_allclose(values[:, 0], np.log1p(4))
     np.testing.assert_allclose(values[:, 1], 0.5)
-    np.testing.assert_allclose(
-        values[:, 2:6], np.tile(4 * np.eye(2).ravel(), (4, 1))
-    )
-    np.testing.assert_allclose(values[:, 6], 6)
+    np.testing.assert_allclose(values[:, 2], np.log1p(2 / np.pi))
+    np.testing.assert_allclose(values[:, 3:5], 0)
+    np.testing.assert_allclose(values[:, 5], np.log1p(6))
     np.testing.assert_allclose(seg.coords, coords)
     np.testing.assert_allclose(seg.features["equivalent_diameter_area"], 2)
 
@@ -628,9 +627,7 @@ def test_load_images_flag_attaches_arrays_and_survives_pickle(tmp_path):
 
     restored = pickle.loads(pickle.dumps(seq))
     np.testing.assert_array_equal(restored.images, seq.images)
-    np.testing.assert_array_equal(
-        restored.detections[0].masks, seq.detections[0].masks
-    )
+    np.testing.assert_array_equal(restored.detections[0].masks, seq.detections[0].masks)
 
 
 def test_tracking_sequence_without_gt_uses_isolated_detections(tmp_path):
@@ -712,9 +709,11 @@ def test_tracking_data_augmentation_does_not_mutate_sequence(level):
 
     np.random.seed(4)
     torch.manual_seed(4)
-    sample = TrackingDataset(sequence, window_size=2, features="wrfeat", augment=level)[0]
+    sample = TrackingDataset(
+        sequence, window_size=2, features="wrfeat2", augment=level
+    )[0]
 
-    assert sample["features"].shape == (4, 7)
+    assert sample["features"].shape == (4, 6)
     np.testing.assert_array_equal(seg.features["inertia_tensor"], original)
 
 
@@ -729,9 +728,7 @@ def test_tracking_data_position_noise_is_bounded_global_offset():
     )
 
     torch.manual_seed(0)
-    sample = TrackingDataset(
-        sequence, window_size=2, augment=1, position_noise=7.0
-    )[0]
+    sample = TrackingDataset(sequence, window_size=2, augment=1, position_noise=7.0)[0]
     offset = sample["coords"][:, 1:] - sample["coords0"][:, 1:]
 
     assert torch.allclose(offset, offset[:1].expand_as(offset))

@@ -75,12 +75,6 @@ FEATURE_ALIASES = {
 FEATURE_RECIPES = {
     "none": (),
     "intensity": (FEATURE_INTENSITY,),
-    "wrfeat": (
-        FEATURE_DIAMETER,
-        FEATURE_INTENSITY,
-        FEATURE_INERTIA,
-        FEATURE_BORDER_DIST,
-    ),
     "wrfeat2": (
         FEATURE_DIAMETER,
         FEATURE_INTENSITY,
@@ -462,7 +456,7 @@ class WRFeatures:
             raise ValueError(f"{mode} requires feature properties {sorted(missing)}")
         if mode == "none":
             return np.zeros((len(self), 0), dtype=np.float32)
-        if mode in ("intensity", FEATURE_CUSTOM, "wrfeat"):
+        if mode in ("intensity", FEATURE_CUSTOM):
             return np.concatenate([self.features[name] for name in required], axis=-1)
 
         return _stack_wrfeat2(self.features, self.ndim, mode)
@@ -505,7 +499,7 @@ class WRFeatures:
             stacked = np.where(mask, stacked, 0.0).astype(np.float32, copy=False)
             return stacked, mask
 
-        # Concatenation recipes (intensity, wrfeat, custom): one block per source
+        # Concatenation recipes (intensity, custom): one block per source
         # property, masked as a whole when the property is absent.
         parts, masks = [], []
         for name in required:
@@ -1041,17 +1035,21 @@ def get_features(
     features: Literal[
         "none",
         "intensity",
-        "wrfeat",
         "wrfeat2",
         "wrfeat2_no_intensity",
         "pretrained_feats",
         "pretrained_feats_aug",
-    ] = "wrfeat",
+    ] = "wrfeat2",
     ndim: int = 2,
     n_workers=0,
     progbar_class=tqdm,
     feature_extractor: Optional["FeatureExtractor"] | None = None,
 ) -> list[WRFeatures]:
+    valid_modes = (*FEATURE_RECIPES, "pretrained_feats", "pretrained_feats_aug")
+    if features not in valid_modes:
+        raise ValueError(
+            f"Unknown feature mode {features!r}; expected one of {valid_modes}"
+        )
     detections = _check_dimensions(detections, ndim)
     imgs = _check_dimensions(imgs, ndim)
     logger.info(f"Extracting features from {len(detections)} frames.")
@@ -1127,7 +1125,7 @@ def build_windows(
     window_size: int,
     progbar_class=tqdm,
     as_torch: bool = False,
-    feature_mode: Literal["wrfeat", "wrfeat2", "wrfeat2_no_intensity"] = "wrfeat",
+    feature_mode: Literal["wrfeat2", "wrfeat2_no_intensity"] = "wrfeat2",
 ) -> list[dict]:
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")

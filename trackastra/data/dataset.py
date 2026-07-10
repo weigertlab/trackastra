@@ -10,6 +10,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -24,7 +25,7 @@ from trackastra.utils import blockwise_sum
 
 logger = logging.getLogger(__name__)
 
-FeatureMode = Literal["none", "intensity", "wrfeat", "wrfeat2", "wrfeat2_no_intensity"]
+FeatureMode = Literal["none", "intensity", "wrfeat2", "wrfeat2_no_intensity"]
 _FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
 
 
@@ -662,6 +663,84 @@ class TrackingDataset(Dataset):
                 result["gt_successor_set_available"],
             )
         return result
+
+    @staticmethod
+    def write_geff(
+        item: Mapping[str, torch.Tensor],
+        path: str | Path,
+        **kwargs,
+    ) -> None:
+        """Write a single ``__getitem__`` output to a GEFF file for viz/debugging.
+
+        One node per detection with its ``(t, (z), y, x)`` coordinates and a
+        ``radius`` recovered from the log1p-diameter feature (column 0 of the
+        ``wrfeat2`` stack); ``assoc_matrix[i, j] > 0`` becomes a parent -> child
+        edge. ``radius`` is registered as the standard GEFF sphere property.
+
+        Args:
+            item: A dict returned by :meth:`__getitem__`.
+            path: Destination ``.geff`` path.
+            **kwargs: Forwarded to :func:`geff.write` (e.g. ``overwrite=True``,
+                ``zarr_format=3``). ``axis_names``/``axis_types``/``axis_units``
+                are set from the detection geometry and cannot be overridden.
+        """
+        import geff
+        import networkx as nx
+        from geff import GeffMetadata
+
+        coords0 = item["coords0"].numpy()
+        ndim = coords0.shape[1] - 1
+        if ndim == 2:
+            axis_names = ["t", "y", "x"]
+        elif ndim == 3:
+            axis_names = ["t", "z", "y", "x"]
+        else:
+            raise ValueError(f"Unsupported number of spatial dimensions: {ndim}")
+        axis_types = ["time"] + ["space"] * ndim
+        axis_units = [None] + ["micrometer"] * ndim
+
+        features = item["features"].numpy()
+        # column 0 of the wrfeat2 stack is log1p(diameter); radius = diameter / 2
+        if features.shape[1] > 0:
+            radius = np.expm1(np.maximum(features[:, 0], 0.0)) / 2.0
+        else:
+            radius = np.zeros(len(coords0), dtype=np.float32)
+
+        # assoc_matrix is the (symmetric, self-linked) same-lineage-tree relation,
+        # so a raw forward scan would connect a detection to every descendant in
+        # the window. Keep only next-frame links: child in the frame immediately
+        # after the parent's (robust to sub-sampled/non-unit frame indices).
+        assoc = item["assoc_matrix"].numpy()
+        timepoints = coords0[:, 0]
+        unique_t = np.unique(timepoints)
+        next_t = dict(zip(unique_t[:-1], unique_t[1:]))
+        parents, children = np.nonzero(assoc > 0)
+        next_frame = np.array(
+            [next_t.get(timepoints[p], np.inf) == timepoints[c]
+             for p, c in zip(parents, children)],
+            dtype=bool,
+        )
+        parents, children = parents[next_frame], children[next_frame]
+
+        graph = nx.DiGraph()
+        for node, row in enumerate(coords0):
+            attrs = {name: float(v) for name, v in zip(axis_names, row)}
+            attrs["t"] = int(round(row[0]))
+            attrs["radius"] = float(radius[node])
+            graph.add_node(node, **attrs)
+        graph.add_edges_from(zip(parents.tolist(), children.tolist()))
+
+        geff.write(
+            graph,
+            str(path),
+            axis_names=axis_names,
+            axis_types=axis_types,
+            axis_units=axis_units,
+            **kwargs,
+        )
+        meta = GeffMetadata.read(str(path))
+        meta.sphere = "radius"
+        meta.write(str(path))
 
 
 def association_distances(dataset: TrackingDataset, delta_cutoff: int) -> np.ndarray:

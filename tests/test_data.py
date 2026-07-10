@@ -104,8 +104,7 @@ def test_tracking_dataset_augment_details_reject_unknown_keys():
 
 def test_tracking_dataset_masks_missing_feature_properties():
     # A sequence with only intensity is no longer rejected for a richer recipe:
-    # the absent shape columns are masked. For the "wrfeat" concat recipe the
-    # column order is (diameter, intensity, inertia x4, border_dist).
+    # the absent shape columns are masked.
     lineage_index = np.array([0, 0], dtype=np.int64)
     seg = DetectionSequence(
         name="points",
@@ -117,13 +116,13 @@ def test_tracking_dataset_masks_missing_feature_properties():
     )
     sequence = _sequence(seg, lineage_index, np.eye(1, dtype=bool))
 
-    dataset = TrackingDataset(sequence, window_size=2, features="wrfeat")
+    dataset = TrackingDataset(sequence, window_size=2, features="wrfeat2")
     sample = dataset[0]
 
-    assert tuple(sample["features"].shape) == (2, 7)
+    assert tuple(sample["features"].shape) == (2, 6)
     mask = sample["feature_mask"]
     assert mask.dtype == torch.bool
-    expected = torch.tensor([False, True, False, False, False, False, False])
+    expected = torch.tensor([False, True, False, False, False, False])
     assert torch.equal(mask[0], expected)
     # masked columns are zero-filled; the present intensity column carries values.
     assert torch.all(sample["features"][:, mask[0] == 0] == 0)
@@ -161,9 +160,9 @@ def test_mixed_feature_availability_batch_runs_through_model():
     )
 
     full_sample = TrackingDataset(full, window_size=2, features="wrfeat2")[0]
-    partial_sample = TrackingDataset(
-        intensity_only, window_size=2, features="wrfeat2"
-    )[0]
+    partial_sample = TrackingDataset(intensity_only, window_size=2, features="wrfeat2")[
+        0
+    ]
 
     # both stacks share the fixed wrfeat2 width; only the masks differ.
     assert full_sample["features"].shape[1] == 6
@@ -301,9 +300,7 @@ def test_detection_dropout_always_keeps_one_lineage():
 
 def _no_severed_links(keep, assoc):
     keep_set = set(keep.tolist())
-    return all(
-        set(np.flatnonzero(assoc[i]).tolist()) <= keep_set for i in keep
-    )
+    return all(set(np.flatnonzero(assoc[i]).tolist()) <= keep_set for i in keep)
 
 
 def test_neighborhood_sampling_keeps_whole_lineages(monkeypatch):
@@ -337,9 +334,7 @@ def test_neighborhood_sampling_leaves_small_first_frame_unchanged():
 def test_neighborhood_sampling_keeps_both_division_daughters(monkeypatch):
     # Parent (frame 0) divides into two daughters (frame 1); budget 1 per frame.
     # The crop can only catch one daughter, but lineage closure restores the other.
-    coords = np.array(
-        [[0, 0], [10, 0], [0, 1], [0, 2], [0, 1.5]], dtype=np.float32
-    )
+    coords = np.array([[0, 0], [10, 0], [0, 1], [0, 2], [0, 1.5]], dtype=np.float32)
     timepoints = np.array([0, 0, 1, 1, 1])
     matched_gt = np.array([True, False, True, True, False])  # 1 and 4 are junk
     assoc = np.zeros((5, 5), dtype=bool)
@@ -358,9 +353,7 @@ def test_neighborhood_sampling_keeps_both_division_daughters(monkeypatch):
 def test_neighborhood_sampling_completes_a_distractor_lineage(monkeypatch):
     # Seed lineage A; a node of lineage B enters the crop only as a distractor.
     # Closure must pull in the rest of B so no partial lineage survives.
-    coords = np.array(
-        [[0, 0], [1, 0], [0, 0], [5, 0], [0.1, 0]], dtype=np.float32
-    )
+    coords = np.array([[0, 0], [1, 0], [0, 0], [5, 0], [0.1, 0]], dtype=np.float32)
     timepoints = np.array([0, 0, 1, 1, 1])
     matched_gt = np.array([True, True, True, True, False])  # 4 is junk
     assoc = np.zeros((5, 5), dtype=bool)
@@ -488,9 +481,7 @@ def test_tracking_dataset_counts_node_degrees_per_detection_stream():
     seg = DetectionSequence(
         name="points",
         n_frames=4,
-        coords=np.array(
-            [[0, 0], [1, 0], [2, 0], [3, 0], [30, 0]], dtype=np.float32
-        ),
+        coords=np.array([[0, 0], [1, 0], [2, 0], [3, 0], [30, 0]], dtype=np.float32),
         labels=np.array([1, 1, 1, 1, 2]),
         timepoints=np.array([0, 1, 2, 3, 3], dtype=np.int64),
         features={},

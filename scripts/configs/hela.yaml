@@ -13,7 +13,6 @@ cachedir: runs/.cache
 d_model: 320
 dropout: 0.05
 pos_embed_per_dim: 32
-feat_embed_per_dim: 8
 lr: 0.0001
 focal_loss_gamma: 0.0
 train_samples: 32000

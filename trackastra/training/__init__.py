@@ -179,22 +179,11 @@ def _feature_dim(ndim: int, features: str) -> int:
         return 0
     if features == "intensity":
         return 1
-    if features == "wrfeat":
-        return 7 if ndim == 2 else 12
     if features == "wrfeat2":
         return 6 if ndim == 2 else 9
     if features == "wrfeat2_no_intensity":
         return 5 if ndim == 2 else 8
     raise ValueError(f"Unknown feature mode {features!r}")
-
-
-def _resolve_feature_embed_mode(
-    features: str,
-    feature_embed_mode: Literal["fourier", "mlp"] | None,
-) -> Literal["fourier", "mlp"]:
-    if feature_embed_mode is not None:
-        return feature_embed_mode
-    return "fourier" if features == "wrfeat" else "mlp"
 
 
 def _resolve_source_format(
@@ -734,17 +723,18 @@ def _training_config_from_args(
     args: Any,
 ) -> tuple[model_api.ModelConfig, DataSplitConfig, DataSplitConfig, TrainConfig]:
     """Convert parsed training CLI args into public config objects."""
-    feature_embed_mode = _resolve_feature_embed_mode(
-        args.features,
-        getattr(args, "feature_embed_mode", None),
-    )
+    if not 0 <= args.feature_drop <= 1:
+        raise ValueError(f"feature_drop must be in [0, 1], got {args.feature_drop}")
+    if args.feature_drop > 0 and args.features not in (
+        "wrfeat2",
+        "wrfeat2_no_intensity",
+    ):
+        raise ValueError("feature_drop requires wrfeat2 or wrfeat2_no_intensity")
     model_config = model_api.ModelConfig(
         coord_dim=args.ndim,
         feat_dim=_feature_dim(args.ndim, args.features),
         d_model=args.d_model,
         pos_embed_per_dim=args.pos_embed_per_dim,
-        feat_embed_per_dim=args.feat_embed_per_dim,
-        feature_embed_mode=feature_embed_mode,
         num_encoder_layers=args.num_encoder_layers,
         num_decoder_layers=args.num_decoder_layers,
         dropout=args.dropout,
@@ -847,7 +837,6 @@ def _training_config_from_args(
     training_args = dict(vars(args))
     training_args.update(
         {
-            "feature_embed_mode": model_config.feature_embed_mode,
             "warmup_epochs": min(args.warmup_epochs, args.epochs),
             "delta_cutoff": delta_cutoff,
         }

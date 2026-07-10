@@ -28,7 +28,6 @@ dropout: 0.05
 detect_drop: 0.0
 node_loss: .1
 pos_embed_per_dim: 32
-feat_embed_per_dim: 8
 lr: 0.0001
 focal_loss_gamma: 0.0
 train_samples: 8192
@@ -85,5 +84,4 @@ input_val:
   match_max_distance: 6
   paths:
   - data/ctc_2026/3d/Fluo-N3DL-DRO/02
-
 

@@ -40,7 +40,6 @@ from trackastra.training import (
     TrackingDatasetBundle,
     TrainConfig,
     _feature_dim,
-    _resolve_feature_embed_mode,
     build_dataset,
     build_lightning_runtime,
     build_model,
@@ -58,7 +57,7 @@ from trackastra.training import (
     resume_checkpoint_path,
     tracking_input_paths_from_sources,
 )
-from trackastra.training.callbacks import TrackastraModelCheckpoint
+from trackastra.training.callbacks import EpochMetricsCSV, TrackastraModelCheckpoint
 from trackastra.training.lightning import TrackingLightningModule
 from trackastra.training.losses import (
     apply_focal_weight as _apply_focal_weight,
@@ -92,25 +91,18 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 def test_wrfeat2_feature_dim_supports_2d_and_3d():
     assert _feature_dim(2, "none") == 0
     assert _feature_dim(2, "intensity") == 1
-    assert _feature_dim(3, "wrfeat") == 12
     assert _feature_dim(2, "wrfeat2") == 6
     assert _feature_dim(2, "wrfeat2_no_intensity") == 5
     assert _feature_dim(3, "wrfeat2") == 9
     assert _feature_dim(3, "wrfeat2_no_intensity") == 8
 
-
-def test_feature_embedding_default_is_fourier_only_for_wrfeat():
-    assert _resolve_feature_embed_mode("none", None) == "mlp"
-    assert _resolve_feature_embed_mode("intensity", None) == "mlp"
-    assert _resolve_feature_embed_mode("wrfeat2", None) == "mlp"
-    assert _resolve_feature_embed_mode("wrfeat2_no_intensity", None) == "mlp"
-    assert _resolve_feature_embed_mode("wrfeat", None) == "fourier"
-    assert _resolve_feature_embed_mode("wrfeat2", "fourier") == "fourier"
+    with pytest.raises(ValueError, match="Unknown feature mode"):
+        _feature_dim(2, "wrfeat")
 
 
 @pytest.mark.parametrize(
     ("features", "width"),
-    (("wrfeat", 7), ("wrfeat2", 6), ("wrfeat2_no_intensity", 5)),
+    (("wrfeat2", 6), ("wrfeat2_no_intensity", 5)),
 )
 def test_tracking_data_cpu_training_smoke(features, width):
     raw_features = {
@@ -138,9 +130,7 @@ def test_tracking_data_cpu_training_smoke(features, width):
             lineage_relation=np.eye(2, dtype=bool),
             lineage_parents=np.full(2, -1),
         ),
-        supervision=(
-            DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),
-        ),
+        supervision=(DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),),
     )
     batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(
@@ -151,12 +141,12 @@ def test_tracking_data_cpu_training_smoke(features, width):
         num_encoder_layers=1,
         num_decoder_layers=1,
         pos_embed_per_dim=4,
-        feat_embed_per_dim=2,
-        feature_embed_mode=_resolve_feature_embed_mode(features, None),
         dropout=0,
     )
 
-    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)[
+        "loss"
+    ]
     loss.backward()
 
     assert torch.isfinite(loss)
@@ -192,9 +182,7 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
             lineage_relation=np.eye(2, dtype=bool),
             lineage_parents=np.full(2, -1),
         ),
-        supervision=(
-            DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),
-        ),
+        supervision=(DetectionSupervision(lineage_index=np.array([0, 1, 0, 1])),),
     )
     batch = collate_sequence_padding([TrackingDataset(sequence, 2, features)[0]])
     model = TrackingTransformer(
@@ -205,12 +193,12 @@ def test_tracking_data_3d_wrfeat2_cpu_training_smoke(features, width):
         num_encoder_layers=1,
         num_decoder_layers=1,
         pos_embed_per_dim=4,
-        feat_embed_per_dim=2,
-        feature_embed_mode=_resolve_feature_embed_mode(features, None),
         dropout=0,
     )
 
-    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)["loss"]
+    loss = TrackingLightningModule(model, causal_norm="none")._common_step(batch)[
+        "loss"
+    ]
     loss.backward()
 
     assert torch.isfinite(loss)
@@ -661,9 +649,7 @@ def test_common_step_masks_pairs_with_available_gt_link_sets():
         "timepoints": torch.tensor([[0, 0, 1, 1]]),
         "padding_mask": torch.zeros((1, 4), dtype=torch.bool),
         "matched_gt": torch.tensor([[True, True, True, True]]),
-        "gt_predecessor_set_available": torch.tensor(
-            [[False, False, False, True]]
-        ),
+        "gt_predecessor_set_available": torch.tensor([[False, False, False, True]]),
         "gt_successor_set_available": torch.tensor([[False, True, False, False]]),
     }
 
@@ -809,7 +795,9 @@ def test_degree_consistency_loss_weights_by_out_degree_class():
     A_pred = torch.full((1, 3, 3), torch.logit(torch.tensor(0.5)))
     out_logits = torch.zeros(1, 3, 3)
     out_logits[0, 0, 2] = 10.0  # node 0 -> division, edge_out 0.5 vs 2.0 -> err 2.25
-    out_logits[0, 1, 1] = 10.0  # node 1 -> continuation, edge_out 0.5 vs 1.0 -> err 0.25
+    out_logits[0, 1, 1] = (
+        10.0  # node 1 -> continuation, edge_out 0.5 vs 1.0 -> err 0.25
+    )
     timepoints = torch.tensor([[0, 0, 1]])
     mask = torch.zeros(1, 3, 3)
     mask[0, 0, 2] = 1
@@ -1184,7 +1172,6 @@ def test_build_model_validates_dataset_feature_dim(monkeypatch):
 
     assert model["feat_dim"] == 6
     assert model["d_model"] == 32
-    assert model["feature_embed_mode"] == "mlp"
     with pytest.raises(ValueError, match="does not match"):
         build_model(ModelConfig(feat_dim=5), dataset)
 
@@ -1236,6 +1223,7 @@ def test_load_model_from_path_delegates_folder_and_checkpoint(tmp_path):
         )
     ]
 
+
 def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
     saved_paths = []
 
@@ -1257,7 +1245,7 @@ def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
 
     callback = TrackastraModelCheckpoint(
         tmp_path,
-        training_args={"features": "wrfeat", "spatial_cutoff": 12},
+        training_args={"features": "wrfeat2", "spatial_cutoff": 12},
         monitor="val_loss",
     )
     module = FakeModule()
@@ -1268,7 +1256,7 @@ def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
     callback.on_validation_end(FakeTrainer(0.5), module)
 
     assert yaml.safe_load((tmp_path / "train_config.yaml").read_text()) == {
-        "features": "wrfeat",
+        "features": "wrfeat2",
         "spatial_cutoff": 12,
     }
     assert yaml.safe_load((tmp_path / "inference_config.yaml").read_text()) == {
@@ -1347,6 +1335,7 @@ def test_build_trainer_facade_fits_domain_datasets(monkeypatch, tmp_path):
         "warmup_epochs": 1,
         "max_epochs": 3,
         "learning_rate": 0.01,
+        "compile": False,
         "delta_cutoff": 1,
         "causal_norm": "none",
         "tracking_frequency": 0,
@@ -1444,7 +1433,9 @@ def test_trainer_fit_returns_without_lightning_when_epochs_zero(monkeypatch):
         "_tracking_lightning_module_class",
         lambda: created_modules.append,
     )
-    monkeypatch.setattr(training_api, "_lightning_trainer_class", lambda: created_trainers.append)
+    monkeypatch.setattr(
+        training_api, "_lightning_trainer_class", lambda: created_trainers.append
+    )
 
     facade = build_trainer(TrainConfig(epochs=0, logger="none"))
 
@@ -1469,7 +1460,7 @@ def test_lightning_runtime_builds_callbacks(monkeypatch, tmp_path):
         logger_name="none",
         wandb_project="proj",
         profile=False,
-        training_args={"features": "wrfeat"},
+        training_args={"features": "wrfeat2"},
     )
 
     assert isinstance(runtime, LightningTrainerRuntime)
@@ -1480,9 +1471,48 @@ def test_lightning_runtime_builds_callbacks(monkeypatch, tmp_path):
     assert {type(callback).__name__ for callback in runtime.callbacks} >= {
         "ModelCheckpoint",
         "TrackastraModelCheckpoint",
+        "EpochMetricsCSV",
         "Timer",
         "PreciseProgressBar",
     }
+
+
+def test_epoch_metrics_csv_writes_one_upserted_row_per_epoch(tmp_path):
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.AdamW([parameter], lr=0.01)
+    trainer = SimpleNamespace(
+        is_global_zero=True,
+        sanity_checking=False,
+        current_epoch=0,
+        global_step=4,
+        callback_metrics={
+            "train_loss": torch.tensor(9.0),
+            "train_loss_step": torch.tensor(8.0),
+            "train_loss_epoch": torch.tensor(0.5),
+            "val_loss": torch.tensor(0.4),
+            "not_scalar": torch.ones(2),
+        },
+        optimizers=[optimizer],
+    )
+    callback = EpochMetricsCSV(tmp_path)
+
+    callback.on_train_epoch_end(trainer, None)
+    trainer.global_step = 5
+    trainer.callback_metrics["val_loss"] = torch.tensor(0.3)
+    callback.on_train_epoch_end(trainer, None)
+    trainer.current_epoch = 1
+    trainer.global_step = 9
+    callback.on_train_epoch_end(trainer, None)
+
+    metrics = pd.read_csv(tmp_path / "metrics" / "metrics.csv")
+    assert list(metrics["epoch"]) == [0, 1]
+    assert list(metrics["step"]) == [5, 9]
+    assert list(metrics["val_loss"]) == pytest.approx([0.3, 0.3])
+    assert list(metrics["train_loss_epoch"]) == pytest.approx([0.5, 0.5])
+    assert list(metrics["lr-AdamW"]) == pytest.approx([0.01, 0.01])
+    assert "train_loss" not in metrics
+    assert "train_loss_step" not in metrics
+    assert "not_scalar" not in metrics
 
 
 def test_configure_lightning_module_runtime_paths(tmp_path):
@@ -1593,11 +1623,12 @@ cachedir: sequence-cache
     )
     monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
 
-    model_config, train_data_config, val_data_config, train_config = parse_training_config()
+    model_config, train_data_config, val_data_config, train_config = (
+        parse_training_config()
+    )
 
     assert model_config.coord_dim == 3
     assert model_config.feat_dim == 8
-    assert model_config.feature_embed_mode == "mlp"
     assert model_config.model_path == Path("saved-model")
     assert train_data_config.sources[0]["kwargs"]["root_or_geff"] == Path("train_a")
     assert train_data_config.sources[0]["kwargs"]["spacing"] == (4.0, 1.0, 1.0)
@@ -1626,7 +1657,8 @@ cachedir: sequence-cache
         "pretrained_feats_mode": None,
         "pretrained_feats_additional_props": None,
     }
-    assert train_config.runtime_kwargs["training_args"]["feature_embed_mode"] == "mlp"
+    assert "feature_embed_mode" not in train_config.runtime_kwargs["training_args"]
+    assert "feat_embed_per_dim" not in train_config.runtime_kwargs["training_args"]
 
 
 def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
@@ -1653,7 +1685,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         cachedir=None,
         distributed=False,
         sequence_kwargs={"ndim": 2},
-        tracking_data_kwargs={"features": "wrfeat"},
+        tracking_data_kwargs={"features": "wrfeat2"},
         train_sequence_kwargs={"slice_pct": (0.0, 0.8)},
         val_sequence_kwargs={"slice_pct": (0.8, 1.0)},
         train_tracking_data_kwargs={
@@ -1682,7 +1714,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         Path("train"),
         {
             "dataset_index": 0,
-            "features": "wrfeat",
+            "features": "wrfeat2",
             "detect_drop": 0.5,
             "augment": 3,
         },
@@ -1691,7 +1723,7 @@ def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
         Path("val"),
         {
             "dataset_index": 0,
-            "features": "wrfeat",
+            "features": "wrfeat2",
             "detect_drop": 0.0,
             "augment": 0,
         },
@@ -1740,7 +1772,7 @@ def test_balanced_datamodule_dispatches_ctc_and_geff(monkeypatch):
         cachedir=None,
         distributed=False,
         sequence_kwargs={"ndim": 2},
-        tracking_data_kwargs={"features": "wrfeat"},
+        tracking_data_kwargs={"features": "wrfeat2"},
         sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
         loader_kwargs={"batch_size": 2, "num_workers": 0},
     )
@@ -1799,7 +1831,7 @@ def test_balanced_datamodule_auto_detects_geff_directory(monkeypatch, tmp_path):
         cachedir=None,
         distributed=False,
         sequence_kwargs={"ndim": 2},
-        tracking_data_kwargs={"features": "wrfeat"},
+        tracking_data_kwargs={"features": "wrfeat2"},
         sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
         loader_kwargs={"batch_size": 2, "num_workers": 0},
     )
@@ -1862,7 +1894,7 @@ def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path)
         cachedir=str(tmp_path / "cache"),
         distributed=False,
         sequence_kwargs={"ndim": 2, "n_workers": 4},
-        tracking_data_kwargs={"features": "wrfeat"},
+        tracking_data_kwargs={"features": "wrfeat2"},
         sampler_kwargs={"batch_size": 2, "n_pool": 2, "num_samples": 4},
         loader_kwargs={"batch_size": 2, "num_workers": 0},
     )

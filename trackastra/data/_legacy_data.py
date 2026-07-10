@@ -39,7 +39,7 @@ from trackastra.utils import blockwise_sum, normalize
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_WRFEAT_MODES = ("wrfeat", "wrfeat2", "wrfeat2_no_intensity")
+_WRFEAT_MODES = ("wrfeat2", "wrfeat2_no_intensity")
 
 
 def _sample_detection_keep_indices(
@@ -386,10 +386,9 @@ class CTCData(Dataset):
             "regionprops2",
             "patch",
             "patch_regionprops",
-            "wrfeat",
             "wrfeat2",
             "wrfeat2_no_intensity",
-        ] = "wrfeat",
+        ] = "wrfeat2",
         crop_size: tuple | None = None,
         crop_ensure_all_centers: bool = True,
         return_dense: bool = False,
@@ -1339,7 +1338,7 @@ class CTCData(Dataset):
         feat_dim = {
             "wrfeat2": 6 if ndim == 2 else 9,
             "wrfeat2_no_intensity": 5 if ndim == 2 else 8,
-        }.get(features, 7 if ndim == 2 else 12)
+        }[features]
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([
                 wrfeat.WRRandomFlip(p=0.5),
