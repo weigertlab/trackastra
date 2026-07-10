@@ -1,0 +1,159 @@
+name: deepcell
+epochs: 500
+warmup_epochs: 5
+augment: 3
+window: 4
+features: wrfeat2
+attn_dist_mode: none
+delta_cutoff: 1
+num_encoder_layers: 6
+causal_norm: quiet_softmax
+cache: true
+cachedir: runs/.cache
+d_model: 320
+dropout: 0.05
+detect_drop: 0.2
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+focal_loss_gamma: 2.0
+train_samples: 32000
+tracking_frequency: 5
+tracking_mode: greedy
+max_detections: 1024
+batch_size: 128
+
+input_train:
+- data/deepcell/train/00
+- data/deepcell/train/01
+- data/deepcell/train/02
+- data/deepcell/train/03
+- data/deepcell/train/04
+- data/deepcell/train/05
+- data/deepcell/train/06
+- data/deepcell/train/07
+- data/deepcell/train/08
+- data/deepcell/train/09
+- data/deepcell/train/10
+- data/deepcell/train/11
+- data/deepcell/train/12
+- data/deepcell/train/13
+- data/deepcell/train/14
+- data/deepcell/train/15
+- data/deepcell/train/16
+- data/deepcell/train/17
+- data/deepcell/train/18
+- data/deepcell/train/19
+- data/deepcell/train/20
+- data/deepcell/train/21
+- data/deepcell/train/22
+- data/deepcell/train/23
+- data/deepcell/train/24
+- data/deepcell/train/25
+# - data/deepcell/train/26
+# - data/deepcell/train/27
+# - data/deepcell/train/28
+# - data/deepcell/train/29
+# - data/deepcell/train/30
+# - data/deepcell/train/31
+# - data/deepcell/train/32
+# - data/deepcell/train/33
+# - data/deepcell/train/34
+# - data/deepcell/train/35
+# - data/deepcell/train/36
+# - data/deepcell/train/37
+# - data/deepcell/train/38
+# - data/deepcell/train/39
+# - data/deepcell/train/40
+# - data/deepcell/train/41
+# - data/deepcell/train/42
+# - data/deepcell/train/43
+- data/deepcell/train/44
+- data/deepcell/train/45
+# - data/deepcell/train/46
+# - data/deepcell/train/47
+# - data/deepcell/train/48
+# - data/deepcell/train/49
+# - data/deepcell/train/50
+# - data/deepcell/train/51
+# - data/deepcell/train/52
+# - data/deepcell/train/53
+# - data/deepcell/train/54
+# - data/deepcell/train/55
+# - data/deepcell/train/56
+# - data/deepcell/train/57
+# - data/deepcell/train/58
+# - data/deepcell/train/59
+# - data/deepcell/train/60
+# - data/deepcell/train/61
+# - data/deepcell/train/62
+# - data/deepcell/train/63
+# - data/deepcell/train/64
+# - data/deepcell/train/65
+# - data/deepcell/train/66
+# - data/deepcell/train/67
+# - data/deepcell/train/68
+# - data/deepcell/train/69
+# - data/deepcell/train/70
+# - data/deepcell/train/71
+# - data/deepcell/train/72
+# - data/deepcell/train/73
+# - data/deepcell/train/74
+# - data/deepcell/train/75
+# - data/deepcell/train/76
+# - data/deepcell/train/77
+# - data/deepcell/train/78
+# - data/deepcell/train/79
+# - data/deepcell/train/80
+# - data/deepcell/train/81
+# - data/deepcell/train/82
+# - data/deepcell/train/83
+# - data/deepcell/train/84
+# - data/deepcell/train/85
+# - data/deepcell/train/86
+# - data/deepcell/train/87
+# - data/deepcell/train/88
+# - data/deepcell/train/89
+# - data/deepcell/train/90
+input_val:
+- data/deepcell/val/00
+# - data/deepcell/val/01
+# - data/deepcell/val/02
+# - data/deepcell/val/03
+# - data/deepcell/val/04
+# - data/deepcell/val/05
+# - data/deepcell/val/06
+# - data/deepcell/val/07
+# - data/deepcell/val/08
+# - data/deepcell/val/09
+# - data/deepcell/val/10
+# - data/deepcell/val/11
+# - data/deepcell/val/12
+# - data/deepcell/val/13
+# - data/deepcell/val/14
+# - data/deepcell/val/15
+- data/deepcell/val/16
+# - data/deepcell/val/17
+# - data/deepcell/val/18
+# - data/deepcell/val/19
+# - data/deepcell/val/20
+# - data/deepcell/val/21
+# - data/deepcell/val/22
+# - data/deepcell/val/23
+# - data/deepcell/val/24
+# - data/deepcell/val/25
+# - data/deepcell/val/26
+
+input_test:
+- data/deepcell/test/00
+- data/deepcell/test/01
+- data/deepcell/test/02
+- data/deepcell/test/03
+- data/deepcell/test/04
+- data/deepcell/test/05
+- data/deepcell/test/06
+- data/deepcell/test/07
+- data/deepcell/test/08
+- data/deepcell/test/09
+- data/deepcell/test/10
+- data/deepcell/test/11

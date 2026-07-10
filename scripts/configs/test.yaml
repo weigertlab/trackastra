@@ -1,0 +1,34 @@
+name: test_overfit
+epochs: 500
+warmup_epochs: 2
+augment: 0
+window: 4
+features: wrfeat2
+attn_dist_mode: none
+delta_cutoff: 1
+num_encoder_layers: 6
+causal_norm: quiet_softmax
+cache: true
+cachedir: runs/.cache
+d_model: 256
+dropout: 0.05
+detect_drop: 0.2
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+focal_loss_gamma: 0.0
+train_samples: 32000
+tracking_frequency: 5
+tracking_mode: greedy
+max_detections: 512
+batch_size: 32
+weight_by_dataset: true
+weight_by_ndivs: false
+detection_folders:
+- TRA
+input_train:
+- data/ctc_2026/2d/PhC-C2DL-PSC/02
+input_val:
+- data/ctc_2026/2d/PhC-C2DL-PSC/02
+input_test:
+- data/ctc_2026/2d/PhC-C2DL-PSC/02

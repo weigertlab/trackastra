@@ -1,0 +1,253 @@
+name: biohub
+ndim: 3
+epochs: 500
+warmup_epochs: 0
+augment: 3
+augment_details:
+  jitter: 0.8
+  drift: 4.0
+  tilt: 20
+  frame_jump: 5
+  frame_jump_p: 0.05
+window: 4
+batch_size: 32
+features: intensity
+attn_dist_mode: none
+attn_mode: sparse
+max_neighbors: 16
+div_upweight: 1.0
+sparse_knn_mode: per_frame
+balance_batch_objects: true
+delta_cutoff: 1
+num_encoder_layers: 6
+causal_norm: quiet_softmax
+cache: false
+cachedir: runs/.cache
+d_model: 256
+dropout: 0.05
+detect_drop: 0.0
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+focal_loss_gamma: 0.0
+train_samples: 10000
+tracking_frequency: -1
+tracking_mode: greedy
+spatial_cutoff: 100
+max_detections: 256
+
+weight_by_dataset: false
+weight_by_ndivs: false
+
+input_train:
+- format: geff
+  sparse_gt: true
+  spacing: [1.625, 0.40625, 0.40625]
+  match_max_distance: 5
+  paths:
+  - data/biohub/final/44b6_0113de3b
+  - data/biohub/final/44b6_0b24845f
+  - data/biohub/final/44b6_0c582fdc
+  - data/biohub/final/44b6_0db75fae
+  - data/biohub/final/44b6_12dfb391
+  - data/biohub/final/44b6_144b256d
+  - data/biohub/final/44b6_1574802b
+  - data/biohub/final/44b6_18ced818
+  - data/biohub/final/44b6_1d530831
+  - data/biohub/final/44b6_24264f12
+  - data/biohub/final/44b6_267148e4
+  - data/biohub/final/44b6_2a2eff9f
+  - data/biohub/final/44b6_2f31fc2f
+  - data/biohub/final/44b6_33b596bf
+  - data/biohub/final/44b6_341df25f
+  - data/biohub/final/44b6_3a861e03
+  - data/biohub/final/44b6_3bb3690f
+  - data/biohub/final/44b6_40c45f5a
+  - data/biohub/final/44b6_415c0a3a
+  - data/biohub/final/44b6_53f95252
+  - data/biohub/final/44b6_551a5dba
+  - data/biohub/final/44b6_5740d24b
+  - data/biohub/final/44b6_587a1e22
+  - data/biohub/final/44b6_5f15d135
+  - data/biohub/final/44b6_668e0cc7
+  - data/biohub/final/44b6_66f9292d
+  - data/biohub/final/44b6_706092f0
+  - data/biohub/final/44b6_71a4179f
+  - data/biohub/final/44b6_74d0c52e
+  - data/biohub/final/44b6_7a302da0
+  - data/biohub/final/44b6_7e557709
+  - data/biohub/final/44b6_808952d6
+  - data/biohub/final/44b6_81c256f0
+  - data/biohub/final/44b6_87bba6c4
+  - data/biohub/final/44b6_8cc6506c
+  - data/biohub/final/44b6_8f5ab931
+  - data/biohub/final/44b6_8f9ecab4
+  - data/biohub/final/44b6_90724892
+  - data/biohub/final/44b6_949adeb1
+  - data/biohub/final/44b6_95029e92
+  - data/biohub/final/44b6_97725144
+  - data/biohub/final/44b6_996155de
+  - data/biohub/final/44b6_9be80b04
+  - data/biohub/final/44b6_9bfa6a0a
+  - data/biohub/final/44b6_a21120c2
+  - data/biohub/final/44b6_a2bb48bb
+  - data/biohub/final/44b6_aaf8b0ea
+  - data/biohub/final/44b6_abf82518
+  - data/biohub/final/44b6_b2c44266
+  - data/biohub/final/44b6_c15fded2
+  - data/biohub/final/44b6_c50204e0
+  - data/biohub/final/44b6_c771cb04
+  - data/biohub/final/44b6_c8e2a523
+  - data/biohub/final/44b6_c96cfa10
+  - data/biohub/final/44b6_cf2536e8
+  - data/biohub/final/44b6_cf8fed6b
+  - data/biohub/final/44b6_d29c9ab2
+  - data/biohub/final/44b6_d2f34f90
+  - data/biohub/final/44b6_d5e7d891
+  - data/biohub/final/44b6_d754aa59
+  - data/biohub/final/44b6_d78e09d9
+  - data/biohub/final/44b6_db3c847b
+  - data/biohub/final/44b6_ddf577ad
+  - data/biohub/final/44b6_deabac95
+  - data/biohub/final/44b6_e28840c6
+  - data/biohub/final/44b6_e29f0176
+  - data/biohub/final/44b6_e31261b4
+  - data/biohub/final/44b6_e35b117d
+  - data/biohub/final/44b6_e57ff5c6
+  - data/biohub/final/44b6_eb2880fc
+  - data/biohub/final/44b6_f28707c6
+  - data/biohub/final/6bba_05b6850b
+  - data/biohub/final/6bba_05db0fb1
+  - data/biohub/final/6bba_062c8d37
+  - data/biohub/final/6bba_07477033
+  - data/biohub/final/6bba_07e24132
+  - data/biohub/final/6bba_085bf656
+  - data/biohub/final/6bba_09961292
+  - data/biohub/final/6bba_0c7fa718
+  - data/biohub/final/6bba_0e7c0d07
+  - data/biohub/final/6bba_12665c0e
+  - data/biohub/final/6bba_13f19531
+  - data/biohub/final/6bba_15403b9a
+  - data/biohub/final/6bba_1d0d8384
+  - data/biohub/final/6bba_1ebfb80d
+  - data/biohub/final/6bba_1f58c2f6
+  - data/biohub/final/6bba_207c6aaf
+  - data/biohub/final/6bba_20852818
+  - data/biohub/final/6bba_2312ac41
+  - data/biohub/final/6bba_23af9eeb
+  - data/biohub/final/6bba_2540cd90
+  - data/biohub/final/6bba_2646afc7
+  - data/biohub/final/6bba_268e1230
+  - data/biohub/final/6bba_2819ca14
+  - data/biohub/final/6bba_283bf9f1
+  - data/biohub/final/6bba_312f0dc3
+  - data/biohub/final/6bba_32db13fc
+  - data/biohub/final/6bba_337b1b3a
+  - data/biohub/final/6bba_372c8cb8
+  - data/biohub/final/6bba_3a1849c2
+  - data/biohub/final/6bba_3abfe10a
+  - data/biohub/final/6bba_3c5691b6
+  - data/biohub/final/6bba_3db54e20
+  - data/biohub/final/6bba_3fda6b25
+  - data/biohub/final/6bba_43fea39d
+  - data/biohub/final/6bba_474be664
+  - data/biohub/final/6bba_48816121
+  - data/biohub/final/6bba_4aa14c89
+  - data/biohub/final/6bba_4f99ce20
+  - data/biohub/final/6bba_4ffd3da3
+  - data/biohub/final/6bba_55b7eebe
+  - data/biohub/final/6bba_55c70843
+  - data/biohub/final/6bba_57b7cc1e
+  - data/biohub/final/6bba_5a4d9360
+  - data/biohub/final/6bba_5b28472a
+  - data/biohub/final/6bba_5c039895
+  - data/biohub/final/6bba_5c824876
+  - data/biohub/final/6bba_5dfe9ad1
+  - data/biohub/final/6bba_5f89039d
+  - data/biohub/final/6bba_61dd1e0d
+  - data/biohub/final/6bba_61ecbe65
+  - data/biohub/final/6bba_6321a359
+  - data/biohub/final/6bba_6479435d
+  - data/biohub/final/6bba_67ebd073
+  - data/biohub/final/6bba_6ca87370
+  - data/biohub/final/6bba_6db0e9b4
+  - data/biohub/final/6bba_6feb10f0
+  - data/biohub/final/6bba_6feeb0b1
+  - data/biohub/final/6bba_705ec2c9
+  - data/biohub/final/6bba_718b21f9
+  - data/biohub/final/6bba_74686d6a
+  - data/biohub/final/6bba_767a1e17
+  - data/biohub/final/6bba_76db78c1
+  - data/biohub/final/6bba_784a78c9
+  - data/biohub/final/6bba_786893ac
+  - data/biohub/final/6bba_789f8168
+  - data/biohub/final/6bba_78a7bd97
+  - data/biohub/final/6bba_7af54fde
+  - data/biohub/final/6bba_7b5d3b2c
+  - data/biohub/final/6bba_7d3058ae
+  - data/biohub/final/6bba_7f87b3d8
+  - data/biohub/final/6bba_80d12824
+  - data/biohub/final/6bba_825bd1c6
+  - data/biohub/final/6bba_87289e13
+  - data/biohub/final/6bba_8b7818bf
+  - data/biohub/final/6bba_907271db
+  # - data/biohub/final/6bba_91951b3a   # frame shift
+  - data/biohub/final/6bba_96833384
+  - data/biohub/final/6bba_969618f6
+  - data/biohub/final/6bba_971fa5e0
+  - data/biohub/final/6bba_9a41d029
+  - data/biohub/final/6bba_9e23430b
+  - data/biohub/final/6bba_a5e926bb
+  - data/biohub/final/6bba_a90a0b9c
+  - data/biohub/final/6bba_ab78413d
+  - data/biohub/final/6bba_acd782a8
+  - data/biohub/final/6bba_ae82a791
+  - data/biohub/final/6bba_aeee7805
+  - data/biohub/final/6bba_af149c94
+  - data/biohub/final/6bba_afb141ff
+  - data/biohub/final/6bba_b1ae37b9
+  - data/biohub/final/6bba_b204cac7
+  - data/biohub/final/6bba_b329af44
+  - data/biohub/final/6bba_b693381b
+  - data/biohub/final/6bba_bb9f20c3
+  - data/biohub/final/6bba_bbb708ca
+  - data/biohub/final/6bba_c27cba08
+  - data/biohub/final/6bba_c328f2fd
+  - data/biohub/final/6bba_c73a1d11
+  - data/biohub/final/6bba_cdcfe533
+  - data/biohub/final/6bba_cf35214c
+  - data/biohub/final/6bba_cff5865f
+  - data/biohub/final/6bba_d0fc38b5
+  - data/biohub/final/6bba_d1acb6ff
+  - data/biohub/final/6bba_d2b9fc0c
+  - data/biohub/final/6bba_d3da753b
+  - data/biohub/final/6bba_d5eae175
+  - data/biohub/final/6bba_d6ecebbb
+  - data/biohub/final/6bba_d82a4fc6
+  - data/biohub/final/6bba_debd7bfa
+  - data/biohub/final/6bba_df673a83
+  - data/biohub/final/6bba_e16ffc58
+  # - data/biohub/final/6bba_e5e44988   # frame shift
+  - data/biohub/final/6bba_ebdf3b34
+  - data/biohub/final/6bba_ebff6e76
+  - data/biohub/final/6bba_ed9377fd
+  - data/biohub/final/6bba_edf14583
+  - data/biohub/final/6bba_eebc57a5
+  - data/biohub/final/6bba_ef7b4f7e
+  - data/biohub/final/6bba_f17befbc
+  - data/biohub/final/6bba_f1fde7e0
+  # - data/biohub/final/6bba_f20478e9   # frame shift
+  - data/biohub/final/6bba_f4ae811c
+  - data/biohub/final/6bba_f8ffd5e7
+  - data/biohub/final/6bba_fbc898dc
+  - data/biohub/final/6bba_fc516dc6
+
+input_val:
+- format: geff
+  sparse_gt: true
+  spacing: [1.625, 0.40625, 0.40625]
+  match_max_distance: 5
+  paths: 
+  - data/biohub/final/6bba_fc5f39dc
+  - data/biohub/final/6bba_fc83837d
+  - data/biohub/final/6bba_fe670320

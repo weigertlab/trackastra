@@ -1,0 +1,76 @@
+name: ctc3d
+ndim: 3
+epochs: 500
+warmup_epochs: 0
+augment: 3
+augment_details:
+  jitter: 0.8
+  drift: 4.0
+  tilt: 20
+  # frame_jump: 5
+  # frame_jump_p: 0.05
+window: 4
+batch_size: 32
+features: wrfeat2
+attn_dist_mode: none
+attn_mode: sparse
+max_neighbors: 16
+div_upweight: 2.0
+sparse_knn_mode: per_frame
+balance_batch_objects: true
+delta_cutoff: 1
+num_encoder_layers: 6
+causal_norm: quiet_softmax
+cache: true
+cachedir: runs/.cache
+d_model: 256
+dropout: 0.05
+detect_drop: 0.0
+node_loss: .1
+pos_embed_per_dim: 32
+feat_embed_per_dim: 8
+lr: 0.0001
+focal_loss_gamma: 0.0
+train_samples: 8192
+tracking_frequency: 5
+tracking_mode: greedy
+spatial_cutoff: 100  #um
+# max_detections: 256
+
+weight_by_dataset: false
+weight_by_ndivs: false
+
+input_train:
+- format: ctc
+  spacing: [1.0, .09, .09]
+  match_max_distance: 6
+  paths:
+  - data/ctc_2026/3d/Fluo-N3DH-CE/01
+  - data/ctc_2026/3d/Fluo-N3DH-CE/02
+- format: ctc
+  spacing: [6.0, 1.242, 1.242]
+  match_max_distance: 6
+  paths:
+  - data/ctc_2026/3d/Fluo-C3DL-MDA231/01
+  - data/ctc_2026/3d/Fluo-C3DL-MDA231/02
+- format: ctc
+  spacing: [2.03, .406, .406]
+  match_max_distance: 6
+  paths:
+  - data/ctc_2026/3d/Fluo-N3DL-DRO/01
+  - data/ctc_2026/3d/Fluo-N3DL-DRO/02
+
+
+input_val:
+- format: ctc
+  spacing: [1.0, .09, .09]
+  match_max_distance: 6
+  paths:
+  - data/ctc_2026/3d/Fluo-N3DH-CE/02
+- format: ctc
+  spacing: [2.03, .406, .406]
+  match_max_distance: 6
+  paths:
+  - data/ctc_2026/3d/Fluo-N3DL-DRO/02
+
+
