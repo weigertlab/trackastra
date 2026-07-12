@@ -245,11 +245,117 @@ def test_wrfeat3_dataset_keeps_fixed_width_and_2d_z_mask():
     sample = TrackingDataset(sequence, window_size=2, features="wrfeat3")[0]
 
     assert tuple(sample["features"].shape) == (2, 9)
-    expected = torch.tensor(
-        [True, True, True, True, True, False, False, False, True]
-    )
+    expected = torch.tensor([True, True, True, True, True, False, False, False, True])
     assert torch.equal(sample["feature_mask"][0], expected)
     assert torch.all(sample["features"][:, 5:8] == 0)
+
+
+def test_mixed_2d_3d_wrfeat3_batch_runs_through_3d_model():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    relation = np.eye(1, dtype=bool)
+    sequence_2d = _sequence(_wrfeat2_seg("2d"), lineage_index, relation)
+
+    seg_3d = DetectionSequence(
+        name="3d",
+        n_frames=2,
+        coords=np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32),
+        labels=np.array([1, 1]),
+        timepoints=np.array([0, 1], dtype=np.int64),
+        features={
+            "equivalent_diameter_area": np.full((2, 1), 2, dtype=np.float32),
+            "intensity": np.array([[0.25], [0.75]], dtype=np.float32),
+            "inertia_tensor": np.tile(np.eye(3, dtype=np.float32).ravel(), (2, 1)),
+            "border_dist": np.zeros((2, 1), dtype=np.float32),
+        },
+    )
+    sequence_3d = TrackingSequence(
+        root=Path("synthetic_3d"),
+        ndim=3,
+        detections=(seg_3d,),
+        gt=LineageGraph(
+            coords=np.zeros((0, 3), dtype=np.float32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            node_ids=np.zeros(0, dtype=object),
+            lineage_relation=relation,
+            lineage_parents=np.array([-1], dtype=np.int64),
+        ),
+        supervision=(DetectionSupervision(lineage_index=lineage_index),),
+    )
+
+    sample_2d = TrackingDataset(
+        sequence_2d, window_size=2, features="wrfeat3", model_coord_dim=3
+    )[0]
+    sample_3d = TrackingDataset(
+        sequence_3d, window_size=2, features="wrfeat3", model_coord_dim=3
+    )[0]
+    batch = collate_sequence_padding([sample_2d, sample_3d])
+
+    assert batch["coords"].shape == (2, 2, 4)
+    assert torch.all(batch["coords"][0, :, 1] == 0)
+    assert not bool(batch["feature_mask"][0, :, 5:8].any())
+    assert bool(batch["feature_mask"][1].all())
+
+    from trackastra.model import TrackingTransformer
+
+    model = TrackingTransformer(
+        coord_dim=3,
+        feat_dim=9,
+        d_model=32,
+        nhead=4,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+    ).eval()
+    with torch.no_grad():
+        association, _ = model(
+            batch["coords"].float(),
+            features=batch["features"].float(),
+            feature_mask=batch["feature_mask"],
+            padding_mask=batch["padding_mask"],
+        )
+    assert association.shape == (2, 2, 2)
+    assert torch.isfinite(association).all()
+
+
+def test_2d_position_noise_precedes_coordinate_lifting():
+    sequence = _sequence(_wrfeat2_seg("2d"), np.array([0, 0]), np.eye(1, dtype=bool))
+    sample = TrackingDataset(
+        sequence,
+        window_size=2,
+        features="wrfeat3",
+        augment=1,
+        position_noise=2.0,
+        model_coord_dim=3,
+    )[0]
+
+    assert torch.all(sample["coords0"][:, 1] == 0)
+    assert torch.all(sample["coords"][:, 1] == 0)
+
+
+def test_tracking_dataset_rejects_3d_source_for_2d_model():
+    seg = DetectionSequence(
+        name="3d",
+        n_frames=2,
+        coords=np.zeros((2, 3), dtype=np.float32),
+        labels=np.ones(2, dtype=np.int64),
+        timepoints=np.arange(2, dtype=np.int64),
+        features={},
+    )
+    sequence = TrackingSequence(
+        root=Path("synthetic_3d"),
+        ndim=3,
+        detections=(seg,),
+        gt=LineageGraph(
+            coords=np.zeros((0, 3), dtype=np.float32),
+            timepoints=np.zeros(0, dtype=np.int64),
+            node_ids=np.zeros(0, dtype=object),
+            lineage_relation=np.eye(1, dtype=bool),
+            lineage_parents=np.array([-1], dtype=np.int64),
+        ),
+        supervision=(DetectionSupervision(lineage_index=np.array([0, 0])),),
+    )
+
+    with pytest.raises(ValueError, match="Cannot lift 3D source coordinates to 2D"):
+        TrackingDataset(sequence, window_size=2, model_coord_dim=2)
 
 
 def test_feature_group_drop_validates_probability():

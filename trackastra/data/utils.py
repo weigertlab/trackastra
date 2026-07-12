@@ -42,6 +42,23 @@ def apply_spatial_spacing(
     return coords * np.asarray(spacing, dtype=coords.dtype)
 
 
+def lift_spatial_coords(coords: np.ndarray, target_ndim: int) -> np.ndarray:
+    """Lift 2D ``(y, x)`` coordinates to 3D ``(0, y, x)`` when requested."""
+    coords = np.asarray(coords)
+    if coords.ndim != 2:
+        raise ValueError(f"coords must be a 2D array, got shape {coords.shape}")
+    source_ndim = coords.shape[1]
+    if source_ndim == target_ndim and source_ndim in (2, 3):
+        return coords
+    if source_ndim == 2 and target_ndim == 3:
+        return np.concatenate(
+            (np.zeros((len(coords), 1), dtype=coords.dtype), coords), axis=1
+        )
+    raise ValueError(
+        f"Cannot lift {source_ndim}D source coordinates to {target_ndim}D model coordinates"
+    )
+
+
 def load_tiff_timeseries(
     dir: Path,
     dtype: str | type | None = None,

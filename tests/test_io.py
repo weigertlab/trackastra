@@ -153,6 +153,36 @@ def test_tracking_sequence_from_geff_spacing_auto_and_unit(monkeypatch, tmp_path
         TrackingSequence.from_geff(tmp_path / "track.geff", spacing="auto")
 
 
+def test_tracking_sequence_from_geff_derives_2d_axes_and_validates_override(
+    monkeypatch, tmp_path
+):
+    graph = nx.DiGraph()
+    graph.add_node(10, t=0, y=1, x=2)
+    graph.add_node(20, t=1, y=3, x=4)
+    graph.add_edge(10, 20)
+    metadata = SimpleNamespace(
+        axes=[
+            SimpleNamespace(name="t", type="time", scale=1.0),
+            SimpleNamespace(name="y", type="space", scale=2.0),
+            SimpleNamespace(name="x", type="space", scale=3.0),
+        ]
+    )
+    import geff
+
+    monkeypatch.setattr(geff, "read", lambda _path: (graph, metadata))
+
+    sequence = TrackingSequence.from_geff(
+        tmp_path / "track.geff", spacing="auto", source_ndim="auto"
+    )
+    assert sequence.ndim == 2
+    np.testing.assert_allclose(sequence.detections[0].coords, [[2, 6], [6, 12]])
+
+    with pytest.raises(ValueError, match="source_ndim=3"):
+        TrackingSequence.from_geff(tmp_path / "track.geff", source_ndim=3)
+    with pytest.raises(ValueError, match="do not match metadata"):
+        TrackingSequence.from_geff(tmp_path / "track.geff", coord_columns=("x", "y"))
+
+
 def test_tracking_sequence_from_geff_matches_proposal_csv(monkeypatch, tmp_path):
     graph = nx.DiGraph()
     graph.add_node(10, t=0, z=1, y=0, x=0)
@@ -424,6 +454,22 @@ def _write_ctc_fixture(base: Path, layout: str) -> Path:
     return root
 
 
+def _write_3d_ctc_fixture(base: Path, depth: int = 2) -> Path:
+    root = base / "volume"
+    images = root / "img"
+    tra = root / "TRA"
+    images.mkdir(parents=True)
+    tra.mkdir(parents=True)
+    for t in range(2):
+        image = np.arange(depth * 64, dtype=np.uint16).reshape(depth, 8, 8) + t
+        mask = np.zeros((depth, 8, 8), dtype=np.uint16)
+        mask[:, 2:4, 2:4] = 1
+        imwrite(images / f"t{t:03d}.tif", image)
+        imwrite(tra / f"man_track{t:03d}.tif", mask)
+    (tra / "man_track.txt").write_text("1 0 1 0\n")
+    return root
+
+
 @pytest.mark.parametrize("layout", ("standard", "simple"))
 def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout):
     root = _write_ctc_fixture(tmp_path, layout)
@@ -448,6 +494,49 @@ def test_tracking_sequence_from_ctc_supports_reference_layouts(tmp_path, layout)
     assert sample["assoc_matrix"][0, 1]
     assert sample["assoc_matrix"][0, 2]
     assert not sample["assoc_matrix"][1, 2]
+
+
+def test_tracking_sequence_from_ctc_auto_detects_2d_and_3d(tmp_path):
+    root_2d = _write_ctc_fixture(tmp_path / "two_d", "simple")
+    root_3d = _write_3d_ctc_fixture(tmp_path / "three_d")
+
+    sequence_2d = TrackingSequence.from_ctc(root_2d, n_workers=1)
+    sequence_3d = TrackingSequence.from_ctc(root_3d, n_workers=1)
+
+    assert sequence_2d.ndim == 2
+    assert sequence_3d.ndim == 3
+    assert sequence_2d.detections[0].features["inertia_tensor"].shape[1] == 4
+    assert sequence_3d.detections[0].features["inertia_tensor"].shape[1] == 9
+
+
+def test_ctc_explicit_2d_squeezes_singleton_z_and_rejects_real_3d(tmp_path):
+    singleton = _write_3d_ctc_fixture(tmp_path / "singleton", depth=1)
+    volume = _write_3d_ctc_fixture(tmp_path / "volume", depth=2)
+
+    sequence = TrackingSequence.from_ctc(singleton, ndim=2, n_workers=1)
+    assert sequence.ndim == 2
+    assert sequence.detections[0].features["inertia_tensor"].shape[1] == 4
+
+    with pytest.raises(ValueError, match="Expected 2D .* got shape"):
+        TrackingSequence.from_ctc(volume, ndim=2, n_workers=1)
+
+
+def test_detection_sequence_from_masks_normalizes_each_frame():
+    images = np.stack(
+        [
+            np.arange(64, dtype=np.float32).reshape(8, 8),
+            1000 + 10 * np.arange(64, dtype=np.float32).reshape(8, 8),
+        ]
+    )
+    masks = np.zeros((2, 8, 8), dtype=np.int32)
+    masks[:, 2:6, 2:6] = 1
+
+    detections = DetectionSequence.from_masks(
+        images, masks, normalize_imgs=True, keep_images=True
+    )
+
+    expected = np.stack([normalize(image) for image in images])
+    np.testing.assert_allclose(detections.images, expected)
 
 
 def test_tracking_sequence_from_ctc_spacing_scales_coords_and_geometry(tmp_path):

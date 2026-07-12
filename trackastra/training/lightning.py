@@ -238,14 +238,16 @@ class TrackingLightningModule(LightningModule):
             inference_config=self.inference_config,
             device=device,
         )
-        ndim = int(self.model.config.get("coord_dim", 2))
         cache: list[dict] = []
         used_names: set[str] = set()
         for index, inp in enumerate(self.tracking_inputs, start=1):
             root = Path(inp["root"])
             spacing = inp.get("spacing")
+            source_ndim = inp.get("source_ndim", "auto")
             imgs, masks, _image_path, gt_path = load_ctc_images_masks(
-                root, detection_folder=self.tracking_detection_folder, ndim=ndim
+                root,
+                detection_folder=self.tracking_detection_folder,
+                ndim=source_ndim,
             )
             # Go through the canonical detection path so spacing scales coordinates
             # and geometry exactly as TrackingSequence.from_ctc does for the windowed
@@ -256,7 +258,7 @@ class TrackingLightningModule(LightningModule):
                 imgs,
                 masks,
                 name=str(root),
-                ndim=ndim,
+                ndim=masks.ndim - 1,
                 spacing=spacing,
                 normalize_imgs=False,
                 keep_masks=True,

@@ -13,6 +13,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import joblib
 import networkx as nx
@@ -201,7 +202,7 @@ class DetectionSequence:
                     f"{image_frames.shape} and {masks.shape}"
                 )
             if normalize_imgs:
-                image_frames = normalize(image_frames)
+                image_frames = np.stack([normalize(image) for image in image_frames])
             if ndim == 3 and source_ndim == 2:
                 image_frames = image_frames[:, np.newaxis, ...]
             has_real_images = True
@@ -221,7 +222,8 @@ class DetectionSequence:
         )
         if n_workers > 0:
             frame_features_raw = joblib.Parallel(n_jobs=n_workers)(
-                joblib.delayed(_extract)(t, mask, image) for t, (mask, image) in iterable
+                joblib.delayed(_extract)(t, mask, image)
+                for t, (mask, image) in iterable
             )
         else:
             frame_features_raw = [
@@ -260,11 +262,15 @@ class DetectionSequence:
         frame_features = tuple(frame_features)
         source_features = tuple(source_features or frame_features)
         if len(frame_features) != len(source_features):
-            raise ValueError("frame_features and source_features must have equal length")
+            raise ValueError(
+                "frame_features and source_features must have equal length"
+            )
         n_frames = len(frame_features) if n_frames is None else int(n_frames)
         if not frame_features:
             if spacing is None:
-                raise ValueError("spacing is required when constructing empty detections")
+                raise ValueError(
+                    "spacing is required when constructing empty detections"
+                )
             ndim = len(spacing)
             return cls(
                 name=name,
@@ -424,7 +430,9 @@ class DetectionSequence:
                 labels[idx] = np.arange(1, len(idx) + 1, dtype=np.int32)
         else:
             if label_column not in df:
-                raise ValueError(f"Point detections are missing column {label_column!r}")
+                raise ValueError(
+                    f"Point detections are missing column {label_column!r}"
+                )
             labels = df[label_column].to_numpy(dtype=np.int32)[order]
         n_frames = int(timepoints.max()) + 1 if len(timepoints) else 0
         return cls(
@@ -444,7 +452,9 @@ class DetectionSequence:
     def from_csv(cls, path: str | Path, **kwargs) -> DetectionSequence:
         """Build detections from a CSV point table."""
         path = Path(path).expanduser()
-        return cls.from_df(pd.read_csv(path), name=kwargs.pop("name", path.stem), **kwargs)
+        return cls.from_df(
+            pd.read_csv(path), name=kwargs.pop("name", path.stem), **kwargs
+        )
 
     def to_wrfeatures(self) -> list[wrfeat.WRFeatures]:
         """Return one ``WRFeatures`` object per frame."""
@@ -531,11 +541,15 @@ class DetectionSupervision:
         object.__setattr__(self, "lineage_index", lineage_index)
         n = len(lineage_index)
         if self.gt_node_index is not None:
-            gt_node_index = _immutable_array(self.gt_node_index, ndim=1).astype(np.int64)
+            gt_node_index = _immutable_array(self.gt_node_index, ndim=1).astype(
+                np.int64
+            )
             if len(gt_node_index) != n:
                 raise ValueError("gt_node_index must be aligned with lineage_index")
             if np.any(gt_node_index < -1):
-                raise ValueError("gt_node_index may only use -1 for unmatched detections")
+                raise ValueError(
+                    "gt_node_index may only use -1 for unmatched detections"
+                )
             gt_node_index.setflags(write=False)
             object.__setattr__(self, "gt_node_index", gt_node_index)
         for field in (
@@ -743,7 +757,9 @@ class TrackingSequence:
             raise ValueError("supervision must align with detections")
         for det in detections:
             if det.coords.shape[1] != self.ndim:
-                raise ValueError("DetectionSequence dimensionality does not match sequence")
+                raise ValueError(
+                    "DetectionSequence dimensionality does not match sequence"
+                )
         if self.gt is not None:
             if self.gt.coords.shape[1] != self.ndim:
                 raise ValueError("LineageGraph dimensionality does not match sequence")
@@ -753,11 +769,15 @@ class TrackingSequence:
                 if len(sup) != len(det):
                     raise ValueError("DetectionSupervision must align with detections")
                 if np.any(sup.lineage_index >= len(self.gt.lineage_relation)):
-                    raise ValueError("DetectionSupervision references an unknown lineage")
+                    raise ValueError(
+                        "DetectionSupervision references an unknown lineage"
+                    )
                 if sup.gt_node_index is not None and np.any(
                     sup.gt_node_index >= len(self.gt.coords)
                 ):
-                    raise ValueError("DetectionSupervision references an unknown GT node")
+                    raise ValueError(
+                        "DetectionSupervision references an unknown GT node"
+                    )
         elif any(sup is not None for sup in supervision):
             raise ValueError("supervision requires a gt LineageGraph")
         object.__setattr__(self, "root", Path(self.root))
@@ -783,7 +803,7 @@ class TrackingSequence:
     def from_ctc(
         cls,
         root: str | Path,
-        ndim: int = 2,
+        ndim: Literal["auto", 2, 3] = "auto",
         use_gt: bool = True,
         detection_folders: Sequence[str | Path] = ("TRA",),
         slice_pct: tuple[float, float] = (0.0, 1.0),
@@ -808,6 +828,8 @@ class TrackingSequence:
         Detection folders also use standard CTC resolution, so requesting
         ``detection_folders=("SEG",)`` uses ``*_ST/SEG`` when present.
 
+        ``ndim="auto"`` inspects the raw image and mask TIFF frame shapes before any
+        singleton-axis promotion. Set it explicitly only to resolve an ambiguous input.
         ``validate=True`` runs the (relatively expensive) ``_check_ctc`` sanity
         checks on the GT masks and track file; it is off by default.
         """
@@ -841,7 +863,8 @@ class TrackingSequence:
         | Sequence[str | Path | pd.DataFrame]
         | None = None,
         spacing: tuple[float, ...] | str | None = None,
-        coord_columns: Sequence[str] = ("z", "y", "x"),
+        coord_columns: Sequence[str] | None = None,
+        source_ndim: Literal["auto", 2, 3] = "auto",
         time_column: str = "t",
         detection_coord_columns: Sequence[str] | None = None,
         detection_time_column: str | None = None,
@@ -857,8 +880,10 @@ class TrackingSequence:
         :class:`DetectionSet` each) unless ``detections`` is given explicitly.
         Explicit ``detections`` may be a single source or a sequence of sources.
 
-        ``spacing=None`` uses unit spacing. ``spacing="auto"`` requires GEFF axis
-        scales and uses them.
+        Spatial coordinate columns are derived from GEFF metadata unless
+        ``coord_columns`` is provided as a validated override. ``source_ndim`` may
+        enforce the detected width. ``spacing=None`` uses unit spacing;
+        ``spacing="auto"`` requires GEFF axis scales and uses them.
         """
         import geff
 
@@ -872,6 +897,7 @@ class TrackingSequence:
             detection_sources=detection_sources,
             spacing=spacing,
             coord_columns=coord_columns,
+            source_ndim=source_ndim,
             time_column=time_column,
             detection_coord_columns=detection_coord_columns,
             detection_time_column=detection_time_column,
@@ -936,6 +962,66 @@ def _resolve_detection_folder(root: Path, folder: str | Path) -> Path:
     raise FileNotFoundError(f"Could not find detection folder {folder!s} for {root}")
 
 
+def _first_tiff_frame_info(folder: Path) -> tuple[tuple[int, ...], str]:
+    files = sorted((*folder.glob("*.tif"), *folder.glob("*.tiff")))
+    if not files:
+        raise ValueError(f"No TIFF frames found in {folder}")
+    with tifffile.TiffFile(files[0]) as tif:
+        series = tif.series[0]
+        return tuple(int(value) for value in series.shape), str(series.axes)
+
+
+def _resolve_ctc_source_ndim(
+    image_path: Path,
+    mask_paths: Sequence[Path],
+    requested_ndim: Literal["auto", 2, 3],
+) -> int:
+    if requested_ndim not in ("auto", 2, 3):
+        raise ValueError(
+            f"source_ndim must be one of 'auto', 2, or 3, got {requested_ndim!r}"
+        )
+    infos = [("image", image_path, *_first_tiff_frame_info(image_path))]
+    infos.extend(("mask", path, *_first_tiff_frame_info(path)) for path in mask_paths)
+    if requested_ndim == "auto":
+        for kind, path, shape, axes in infos:
+            if len(shape) == 3 and any(axis in axes for axis in "CS"):
+                raise ValueError(
+                    f"Ambiguous multichannel {kind} TIFF at {path} with shape "
+                    f"{shape} and axes {axes!r}; set source_ndim explicitly"
+                )
+        detected = {len(shape) for _kind, _path, shape, _axes in infos}
+        if not detected <= {2, 3} or len(detected) != 1:
+            details = ", ".join(
+                f"{kind} {path}: {shape}" for kind, path, shape, _axes in infos
+            )
+            raise ValueError(f"CTC image and mask dimensionality disagree: {details}")
+        resolved_ndim = detected.pop()
+        shapes = [shape for _kind, _path, shape, _axes in infos]
+        if len(set(shapes)) != 1:
+            details = ", ".join(
+                f"{kind} {path}: {shape}" for kind, path, shape, _axes in infos
+            )
+            raise ValueError(f"CTC image and mask shapes disagree: {details}")
+        return resolved_ndim
+
+    normalized_shapes = []
+    for kind, path, shape, _axes in infos:
+        if requested_ndim == 2 and len(shape) == 3 and shape[0] == 1:
+            normalized_shapes.append(shape[1:])
+        elif len(shape) == requested_ndim:
+            normalized_shapes.append(shape)
+        else:
+            raise ValueError(
+                f"Expected {requested_ndim}D {kind} TIFF at {path}, got shape {shape}"
+            )
+    if len(set(normalized_shapes)) != 1:
+        details = ", ".join(
+            f"{kind} {path}: {shape}" for kind, path, shape, _axes in infos
+        )
+        raise ValueError(f"CTC image and mask shapes disagree: {details}")
+    return requested_ndim
+
+
 def _imread_as(path: Path, dtype: np.dtype) -> np.ndarray:
     return tifffile.imread(path).astype(dtype)
 
@@ -969,6 +1055,8 @@ def _load_tiffs(
 
 
 def _ensure_ndim(values: np.ndarray, ndim: int) -> np.ndarray:
+    if ndim == 2 and values.ndim == 4 and values.shape[1] == 1:
+        return values[:, 0]
     if ndim == 2 and values.ndim != 3:
         raise ValueError(f"Expected 2D data, got {values.ndim - 1}D data")
     if ndim == 3 and values.ndim == 3:
@@ -992,8 +1080,15 @@ def _correct_with_st(
     if not st_path.exists():
         return masks
     st_masks = _load_tiffs(
-        st_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32), desc="Loading ST masks"
+        st_path,
+        start,
+        stop,
+        temporal_step,
+        spatial_step,
+        np.dtype(np.int32),
+        desc="Loading ST masks",
     )
+    st_masks = _ensure_ndim(st_masks, masks.ndim - 1)
     return np.maximum(masks, st_masks)
 
 
@@ -1008,7 +1103,13 @@ def _load_normalized_images(
     """Load and percentile-normalize the image frames of a CTC sequence."""
     images = _ensure_ndim(
         _load_tiffs(
-            image_path, start, stop, temporal_step, spatial_step, np.dtype(np.float32), desc="Loading images"
+            image_path,
+            start,
+            stop,
+            temporal_step,
+            spatial_step,
+            np.dtype(np.float32),
+            desc="Loading images",
         ),
         ndim,
     )
@@ -1034,7 +1135,13 @@ def _load_refined_masks(
     """Load a CTC mask folder, ST-refining a ``_GT/TRA`` folder with its silver SEG."""
     masks = _ensure_ndim(
         _load_tiffs(
-            mask_path, start, stop, temporal_step, spatial_step, np.dtype(np.int32), desc="Loading CTC masks"
+            mask_path,
+            start,
+            stop,
+            temporal_step,
+            spatial_step,
+            np.dtype(np.int32),
+            desc="Loading CTC masks",
         ),
         ndim,
     )
@@ -1204,10 +1311,29 @@ def _spacing_from_geff_metadata(
     if missing:
         raise ValueError(f"GEFF metadata is missing axes {missing}")
     values = tuple(
-        1.0 if scales[name] is None else float(scales[name])
-        for name in coord_columns
+        1.0 if scales[name] is None else float(scales[name]) for name in coord_columns
     )
     return values
+
+
+def _coord_columns_from_geff_metadata(metadata) -> tuple[str, ...]:
+    axes = getattr(metadata, "axes", None)
+    if axes is None:
+        raise ValueError("GEFF metadata has no axes to resolve spatial coordinates")
+    typed = [axis for axis in axes if getattr(axis, "type", None) is not None]
+    if typed:
+        columns = tuple(
+            axis.name for axis in axes if getattr(axis, "type", None) == "space"
+        )
+    else:
+        # Compatibility with older GEFF metadata and lightweight test fixtures that
+        # predate typed axes. Preserve metadata order while excluding the time axis.
+        columns = tuple(axis.name for axis in axes if axis.name in ("z", "y", "x"))
+    if len(columns) not in (2, 3):
+        raise ValueError(
+            f"GEFF metadata must define two or three spatial axes, got {columns}"
+        )
+    return columns
 
 
 def _geff_tracklet_assignments(
@@ -1346,7 +1472,8 @@ def _tracking_sequence_from_geff_graph(
     root: Path,
     detection_sources: Sequence[str | Path | pd.DataFrame],
     spacing: tuple[float, ...] | str | None,
-    coord_columns: Sequence[str],
+    coord_columns: Sequence[str] | None,
+    source_ndim: Literal["auto", 2, 3],
     time_column: str,
     detection_coord_columns: Sequence[str] | None,
     detection_time_column: str | None,
@@ -1354,10 +1481,27 @@ def _tracking_sequence_from_geff_graph(
     match_max_distance: float | None,
     sparse_gt: bool,
 ) -> TrackingSequence:
-    coord_columns = tuple(coord_columns)
+    metadata_coord_columns = _coord_columns_from_geff_metadata(metadata)
+    if coord_columns is None:
+        coord_columns = metadata_coord_columns
+    else:
+        coord_columns = tuple(coord_columns)
+        if coord_columns != metadata_coord_columns:
+            raise ValueError(
+                "Explicit GEFF coord_columns do not match metadata spatial axes: "
+                f"got {coord_columns}, expected {metadata_coord_columns}"
+            )
     ndim = len(coord_columns)
     if ndim not in (2, 3):
         raise ValueError("GEFF point coordinates must be 2D or 3D")
+    if source_ndim not in ("auto", 2, 3):
+        raise ValueError(
+            f"source_ndim must be one of 'auto', 2, or 3, got {source_ndim!r}"
+        )
+    if source_ndim != "auto" and source_ndim != ndim:
+        raise ValueError(
+            f"GEFF metadata defines {ndim}D coordinates, but source_ndim={source_ndim}"
+        )
     if spacing is None:
         spacing = (1.0,) * ndim
     elif spacing == "auto":
@@ -1412,7 +1556,9 @@ def _tracking_sequence_from_geff_graph(
             ),
         )
 
-    gt_source_coords = np.asarray([node_coords[node] for node in nodes], dtype=np.float32)
+    gt_source_coords = np.asarray(
+        [node_coords[node] for node in nodes], dtype=np.float32
+    )
     gt_coords = apply_spatial_spacing(gt_source_coords, spacing)
     gt_timepoints = np.asarray([node_times[node] for node in nodes], dtype=np.int64)
     lineage_map, lineage_relation, lineage_parents = _geff_tracklet_assignments(
@@ -1450,7 +1596,9 @@ def _tracking_sequence_from_geff_graph(
     detection_sequences = []
     supervision = []
     if not detection_sources:
-        lineage_index = np.asarray([lineage_map[node] for node in nodes], dtype=np.int64)
+        lineage_index = np.asarray(
+            [lineage_map[node] for node in nodes], dtype=np.int64
+        )
         detection_sequences.append(
             _build_geff_detection_sequence(
                 name=Path(root).name,
@@ -1623,6 +1771,10 @@ def _resolve_point_detection_columns(
     ndim: int,
 ) -> tuple[str, tuple[str, ...]]:
     coord_columns = tuple(coord_columns)
+    if len(coord_columns) != ndim:
+        raise ValueError(
+            f"Point detection coordinate width must be {ndim}, got {coord_columns}"
+        )
     if time_column in detections and all(name in detections for name in coord_columns):
         return time_column, coord_columns
 
@@ -1631,11 +1783,7 @@ def _resolve_point_detection_columns(
     if axis_time in detections and all(name in detections for name in axis_coords):
         return axis_time, axis_coords
 
-    missing = [
-        name
-        for name in (time_column, *coord_columns)
-        if name not in detections
-    ]
+    missing = [name for name in (time_column, *coord_columns) if name not in detections]
     raise ValueError(
         f"Point detections are missing columns {missing}; also tried "
         f"{(axis_time, *axis_coords)}"
@@ -1720,7 +1868,7 @@ def _matching_with_spacing(
 def _load_ctc_sequence(
     sequence_type: type[TrackingSequence],
     root: str | Path,
-    ndim: int,
+    ndim: Literal["auto", 2, 3],
     use_gt: bool,
     detection_folders: Sequence[str | Path],
     slice_pct: tuple[float, float],
@@ -1742,8 +1890,6 @@ def _load_ctc_sequence(
         raise ValueError("Downscale factors must be positive integers")
     if spacing is not None and downscale_spatial != 1:
         raise ValueError("CTC spacing support requires downscale_spatial=1")
-    spacing = validate_spatial_spacing(spacing, ndim)
-    spacing_matrix = np.diag(spacing).astype(np.float32)
     root, image_path, gt_path, track_path = _resolve_paths(
         Path(root), image_folder, gt_folder, track_file, use_gt
     )
@@ -1769,6 +1915,13 @@ def _load_ctc_sequence(
             resolved_folders,
         )
     reference_mask_path = gt_path if use_gt else detection_paths[0]
+    ndim = _resolve_ctc_source_ndim(
+        image_path,
+        (reference_mask_path, *detection_paths),
+        ndim,
+    )
+    spacing = validate_spatial_spacing(spacing, ndim)
+    spacing_matrix = np.diag(spacing).astype(np.float32)
     n_frames = len(tuple(reference_mask_path.glob("*.tif")))
     start, stop = int(n_frames * slice_pct[0]), int(n_frames * slice_pct[1])
     gt_masks = _load_refined_masks(
@@ -1953,7 +2106,7 @@ def _resolve_inference_paths(root: Path) -> tuple[Path, Path, Path]:
 def load_ctc_images_masks(
     root: str | Path,
     detection_folder: str = "TRA",
-    ndim: int = 2,
+    ndim: Literal["auto", 2, 3] = 2,
 ) -> tuple[np.ndarray, np.ndarray, Path, Path]:
     """Load normalized images and ST-refined detection masks from a CTC-like folder.
 
@@ -1969,6 +2122,7 @@ def load_ctc_images_masks(
     """
     seq_root, image_path, gt_tra = _resolve_inference_paths(Path(root).expanduser())
     detection_path = _resolve_detection_folder(seq_root, detection_folder)
+    ndim = _resolve_ctc_source_ndim(image_path, (detection_path,), ndim)
     n_frames = len(tuple(detection_path.glob("*.tif")))
     images = _load_normalized_images(image_path, 0, n_frames, 1, 1, ndim)
     masks = _load_refined_masks(detection_path, 0, n_frames, 1, 1, ndim)

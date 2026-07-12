@@ -21,13 +21,12 @@ from torch.utils.data import Dataset
 
 from trackastra.data import wrfeat
 from trackastra.data.io import DetectionSequence, DetectionSupervision, TrackingSequence
+from trackastra.data.utils import lift_spatial_coords
 from trackastra.utils import blockwise_sum
 
 logger = logging.getLogger(__name__)
 
-FeatureMode = Literal[
-    "none", "intensity", "wrfeat2", "wrfeat2_no_intensity", "wrfeat3"
-]
+FeatureMode = Literal["none", "intensity", "wrfeat2", "wrfeat2_no_intensity", "wrfeat3"]
 _FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
 
 
@@ -79,7 +78,9 @@ class AugmentationConfig:
         frame_jump = float(values["frame_jump"])
         frame_jump_p = float(values["frame_jump_p"])
         if not np.isfinite(jitter) or jitter < 0:
-            raise ValueError(f"augment_details.jitter must be non-negative, got {jitter}")
+            raise ValueError(
+                f"augment_details.jitter must be non-negative, got {jitter}"
+            )
         if not np.isfinite(drift) or drift < 0:
             raise ValueError(f"augment_details.drift must be non-negative, got {drift}")
         if not np.isfinite(tilt) or tilt < 0:
@@ -156,7 +157,9 @@ def association_supervision_mask(
     if padding_mask is not None:
         if padding_mask.shape != timepoints.shape:
             raise ValueError("padding_mask must match timepoints shape")
-        pair_padding = padding_mask.bool().unsqueeze(1) | padding_mask.bool().unsqueeze(2)
+        pair_padding = padding_mask.bool().unsqueeze(1) | padding_mask.bool().unsqueeze(
+            2
+        )
         mask = mask & ~pair_padding
     return mask if batched else mask.squeeze(0)
 
@@ -384,6 +387,7 @@ class TrackingDataset(Dataset):
         normalize_diameter: float | None = None,
         feature_group_drop: Mapping[str, float] | None = None,
         dataset_index: int = 0,
+        model_coord_dim: int | None = None,
     ) -> None:
         if window_size <= 1:
             raise ValueError("window_size must be greater than one")
@@ -426,6 +430,10 @@ class TrackingDataset(Dataset):
         self.window_size = window_size
         self.features = features
         self.ndim = sequence.ndim
+        self.model_coord_dim = self.ndim if model_coord_dim is None else model_coord_dim
+        lift_spatial_coords(
+            np.zeros((0, self.ndim), dtype=np.float32), self.model_coord_dim
+        )
         self.augment = augment
         self.augment_config = augment_config
         self.position_noise = position_noise
@@ -503,7 +511,9 @@ class TrackingDataset(Dataset):
         features = OrderedDict(
             (name, values[sl].copy()) for name, values in seg.features.items()
         )
-        association = _association_target(lineage_index, self.sequence.gt.lineage_relation)
+        association = _association_target(
+            lineage_index, self.sequence.gt.lineage_relation
+        )
         return coords, labels, timepoints, features, association
 
     def _window_matched_gt(self, index: int) -> np.ndarray:
@@ -548,7 +558,9 @@ class TrackingDataset(Dataset):
         matched = gt_node_index >= 0
         idx = np.where(matched, gt_node_index, 0)
         node_in_degree = np.where(matched, gt.node_in_degree[idx], -1).astype(np.int64)
-        node_out_degree = np.where(matched, gt.node_out_degree[idx], -1).astype(np.int64)
+        node_out_degree = np.where(matched, gt.node_out_degree[idx], -1).astype(
+            np.int64
+        )
         return node_in_degree, node_out_degree
 
     def _window_object_count(self, index: int) -> int:
@@ -630,14 +642,23 @@ class TrackingDataset(Dataset):
             if np.random.rand() < prob:
                 feature_mask[:, columns] = False
                 feature_values[:, columns] = 0.0
+        source_coords = feature.coords
+        coords0_spatial = lift_spatial_coords(source_coords, self.model_coord_dim)
         coords0 = torch.from_numpy(
-            np.concatenate((feature.timepoints[:, None], feature.coords), axis=1)
+            np.concatenate((feature.timepoints[:, None], coords0_spatial), axis=1)
         ).float()
-        coords = coords0.clone()
+        coords_spatial = source_coords.copy()
         if self.augmenter is not None and self.position_noise:
-            coords[:, 1:] += torch.empty((1, self.ndim)).uniform_(
-                -self.position_noise, self.position_noise
+            noise = (
+                torch.empty((1, self.ndim))
+                .uniform_(-self.position_noise, self.position_noise)
+                .numpy()
             )
+            coords_spatial += noise
+        coords_spatial = lift_spatial_coords(coords_spatial, self.model_coord_dim)
+        coords = torch.from_numpy(
+            np.concatenate((feature.timepoints[:, None], coords_spatial), axis=1)
+        ).float()
         result = {
             "features": torch.from_numpy(feature_values).float(),
             "feature_mask": torch.from_numpy(feature_mask),
@@ -721,8 +742,10 @@ class TrackingDataset(Dataset):
         next_t = dict(zip(unique_t[:-1], unique_t[1:]))
         parents, children = np.nonzero(assoc > 0)
         next_frame = np.array(
-            [next_t.get(timepoints[p], np.inf) == timepoints[c]
-             for p, c in zip(parents, children)],
+            [
+                next_t.get(timepoints[p], np.inf) == timepoints[c]
+                for p, c in zip(parents, children)
+            ],
             dtype=bool,
         )
         parents, children = parents[next_frame], children[next_frame]

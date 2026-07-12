@@ -201,7 +201,10 @@ class Trackastra:
         configured_schema = inference_config.get("feature_schema")
         if expected_schema is not None:
             if configured_schema is None:
-                inference_config = {**inference_config, "feature_schema": expected_schema}
+                inference_config = {
+                    **inference_config,
+                    "feature_schema": expected_schema,
+                }
             elif configured_schema != expected_schema:
                 raise ValueError(
                     f"Feature schema for {feature_mode!r} does not match the current "
@@ -541,6 +544,7 @@ class Trackastra:
             progbar_class=progbar_class,
             as_torch=True,
             feature_mode=feature_mode,
+            model_coord_dim=int(self.transformer.config["coord_dim"]),
         )
         return features, windows, detections.dim, feature_mode
 

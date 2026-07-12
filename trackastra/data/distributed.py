@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer
 from typing import Any, Literal
-from tqdm import tqdm
+
 import joblib
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from torch.utils.data import (
     Dataset,
     DistributedSampler,
 )
+from tqdm import tqdm
 
 from .dataset import (
     TrackingDataset,
@@ -41,13 +42,31 @@ logger.setLevel(logging.INFO)
 class SequenceInputSpec:
     path: Path
     format: Literal["auto", "ctc", "geff"] = "auto"
+    source_ndim: Literal["auto", 2, 3] = "auto"
     spacing: tuple[float, ...] | Literal["auto"] | None = None
     sparse_gt: bool = False
     loader_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
-_SPEC_CORE_KEYS = {"path", "paths", "format", "spacing", "sparse_gt"}
+_SPEC_CORE_KEYS = {
+    "path",
+    "paths",
+    "format",
+    "source_ndim",
+    "spacing",
+    "sparse_gt",
+}
 _SequenceFormat = Literal["ctc", "geff"]
+
+
+def _normalize_source_ndim(value: object) -> Literal["auto", 2, 3]:
+    if value == "auto":
+        return "auto"
+    if value == 2:
+        return 2
+    if value == 3:
+        return 3
+    raise ValueError(f"source_ndim must be one of 'auto', 2, or 3, got {value!r}")
 
 
 def _normalize_spacing(
@@ -81,13 +100,16 @@ def _sequence_input_spec_from_mapping(
     if "path" not in item:
         raise ValueError("sequence input mapping must contain 'path'")
     if "paths" in item:
-        raise ValueError("sequence input mapping cannot contain both 'path' and 'paths'")
+        raise ValueError(
+            "sequence input mapping cannot contain both 'path' and 'paths'"
+        )
     fmt = item.get("format", "auto")
     if fmt not in ("auto", "ctc", "geff"):
         raise ValueError(f"format must be one of 'auto', 'ctc', or 'geff', got {fmt!r}")
     fmt = fmt  # type: ignore[assignment]
     if fmt == "geff" and "sparse_gt" not in item:
         raise ValueError("GEFF input specs must set sparse_gt explicitly")
+    source_ndim = _normalize_source_ndim(item.get("source_ndim", ndim or "auto"))
     loader_kwargs = {
         key: deepcopy(value)
         for key, value in item.items()
@@ -98,11 +120,18 @@ def _sequence_input_spec_from_mapping(
         and "detections" in loader_kwargs
         and "match_max_distance" not in loader_kwargs
     ):
-        raise ValueError("GEFF inputs with external detections require match_max_distance")
+        raise ValueError(
+            "GEFF inputs with external detections require match_max_distance"
+        )
     return SequenceInputSpec(
         path=Path(item["path"]),
         format=fmt,
-        spacing=_normalize_spacing(item.get("spacing"), ndim, fmt),
+        source_ndim=source_ndim,
+        spacing=_normalize_spacing(
+            item.get("spacing"),
+            source_ndim if source_ndim != "auto" else None,
+            fmt,
+        ),
         sparse_gt=bool(item.get("sparse_gt", False)),
         loader_kwargs=loader_kwargs,
     )
@@ -115,12 +144,20 @@ def normalize_sequence_input_specs(
     specs = []
     for item in inputs:
         if isinstance(item, str | Path):
-            specs.append(SequenceInputSpec(path=Path(item), format="ctc"))
+            specs.append(
+                SequenceInputSpec(
+                    path=Path(item),
+                    format="ctc",
+                    source_ndim=_normalize_source_ndim(ndim or "auto"),
+                )
+            )
             continue
         if not isinstance(item, Mapping):
             raise ValueError(f"Unsupported sequence input item {item!r}")
         if ("path" in item) == ("paths" in item):
-            raise ValueError("sequence input mapping must contain exactly one of path/paths")
+            raise ValueError(
+                "sequence input mapping must contain exactly one of path/paths"
+            )
         if "path" in item:
             specs.append(_sequence_input_spec_from_mapping(item, ndim))
             continue
@@ -134,7 +171,9 @@ def normalize_sequence_input_specs(
                 merged = {**group, "path": path_item}
             elif isinstance(path_item, Mapping):
                 if "path" not in path_item or "paths" in path_item:
-                    raise ValueError("path mappings inside paths must contain exactly path")
+                    raise ValueError(
+                        "path mappings inside paths must contain exactly path"
+                    )
                 merged = {**group, **path_item}
             else:
                 raise ValueError(f"Unsupported path item {path_item!r}")
@@ -554,6 +593,7 @@ class BalancedDataModule(LightningDataModule):
 
     def _ctc_loader_kwargs(self, inp: SequenceInputSpec, split: str) -> dict:
         kwargs = dict(root=inp.path, **self._sequence_kwargs_for_split(split))
+        kwargs["ndim"] = inp.source_ndim
         if inp.spacing is not None:
             if inp.spacing == "auto":
                 raise ValueError('spacing="auto" is only valid for GEFF inputs')
@@ -565,6 +605,7 @@ class BalancedDataModule(LightningDataModule):
         kwargs = dict(
             root_or_geff=inp.path,
             sparse_gt=inp.sparse_gt,
+            source_ndim=inp.source_ndim,
             **inp.loader_kwargs,
         )
         if inp.spacing is not None:
@@ -611,7 +652,7 @@ class BalancedDataModule(LightningDataModule):
                 f"  {split.upper()} {inp.path} ({fmt}): "
                 + ("loaded from cache" if hit else "cache miss, computing")
             )
-        else: 
+        else:
             logger.info(f"  {split.upper()} {inp.path} ({fmt}): loading from disk")
         return loader(**kwargs)
 
@@ -628,7 +669,10 @@ class BalancedDataModule(LightningDataModule):
         ):
             logger.info(f"Loading {split.upper()} data")
             start = default_timer()
-            sequences = tuple(self._load_sequence(inp, split) for inp in tqdm(inps, desc=f"Loading {split.upper()} data"))
+            sequences = tuple(
+                self._load_sequence(inp, split)
+                for inp in tqdm(inps, desc=f"Loading {split.upper()} data")
+            )
             logger.info(
                 f"Loaded {len(sequences)} {split.upper()} sequences (in"
                 f" {(default_timer() - start):.1f} s)\n\n"

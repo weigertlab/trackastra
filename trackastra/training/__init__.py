@@ -219,6 +219,7 @@ def _ctc_source_kwargs(
     sequence_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
     kwargs = {"root": spec.path, **deepcopy(dict(sequence_kwargs))}
+    kwargs["ndim"] = spec.source_ndim
     if spec.spacing is not None:
         if spec.spacing == "auto":
             raise ValueError('spacing="auto" is only valid for GEFF inputs')
@@ -231,6 +232,7 @@ def _geff_source_kwargs(spec: SequenceInputSpec) -> dict[str, Any]:
     kwargs = {
         "root_or_geff": spec.path,
         "sparse_gt": spec.sparse_gt,
+        "source_ndim": spec.source_ndim,
         **deepcopy(spec.loader_kwargs),
     }
     if spec.spacing is not None:
@@ -272,6 +274,7 @@ def tracking_inputs_from_sources(
         inputs.append(
             {
                 "root": Path(kwargs["root"]),
+                "source_ndim": kwargs.get("ndim", "auto"),
                 "spacing": None if spacing is None else [float(s) for s in spacing],
             }
         )
@@ -1199,13 +1202,13 @@ def _training_config_from_args(
         model_path=Path(args.model) if args.model is not None else None,
     )
     sequence_kwargs = {
-        "ndim": args.ndim,
         "detection_folders": args.detection_folders,
         "downscale_temporal": args.downscale_temporal,
         "downscale_spatial": args.downscale_spatial,
     }
     base_dataset_kwargs = {
         "window_size": args.window,
+        "model_coord_dim": args.ndim,
         "max_detections": args.max_detections,
         "features": args.features,
         "detect_drop_fraction": args.detect_drop_fraction,
@@ -1252,7 +1255,6 @@ def _training_config_from_args(
         split="train",
         sources=normalize_source_specs(
             args.input_train or (),
-            ndim=args.ndim,
             sequence_kwargs=sequence_kwargs,
             split_sequence_kwargs={"slice_pct": args.slice_pct_train},
         ),
@@ -1265,7 +1267,6 @@ def _training_config_from_args(
         split="val",
         sources=normalize_source_specs(
             args.input_val or (),
-            ndim=args.ndim,
             sequence_kwargs=sequence_kwargs,
             split_sequence_kwargs={"slice_pct": args.slice_pct_val},
         ),

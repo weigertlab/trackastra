@@ -22,6 +22,7 @@ from trackastra.data.utils import load_tiff_timeseries
 try:
     # Optional fast (vectorized) regionprops backend; falls back to skimage below.
     from fast_regionprops import regionprops_table_fast
+
     FAST_REGIONPROPS_INSTALLED = True
 except ImportError:
     FAST_REGIONPROPS_INSTALLED = False
@@ -109,9 +110,7 @@ WRFEAT3_VERSION = 1
 WRFEAT3_CHANNELS = (
     FeatureChannel("log_equivalent_diameter", (FEATURE_DIAMETER,)),
     FeatureChannel("mean_normalized_intensity", (FEATURE_INTENSITY,)),
-    FeatureChannel(
-        "log_normalized_second_moment", (FEATURE_DIAMETER, FEATURE_INERTIA)
-    ),
+    FeatureChannel("log_normalized_second_moment", (FEATURE_DIAMETER, FEATURE_INERTIA)),
     FeatureChannel("xy_anisotropy", (FEATURE_INERTIA,)),
     FeatureChannel("xy_orientation", (FEATURE_INERTIA,)),
     FeatureChannel("z_elongation", (FEATURE_INERTIA,), available_ndims=(3,)),
@@ -135,13 +134,8 @@ def feature_channels(mode: str, ndim: int) -> tuple[FeatureChannel, ...]:
         q_count = 2 if ndim == 2 else 5
         channels = [
             FeatureChannel("log_equivalent_diameter", (FEATURE_DIAMETER,)),
-            FeatureChannel(
-                "log_compactness", (FEATURE_DIAMETER, FEATURE_INERTIA)
-            ),
-            *(
-                FeatureChannel(f"q{i + 1}", (FEATURE_INERTIA,))
-                for i in range(q_count)
-            ),
+            FeatureChannel("log_compactness", (FEATURE_DIAMETER, FEATURE_INERTIA)),
+            *(FeatureChannel(f"q{i + 1}", (FEATURE_INERTIA,)) for i in range(q_count)),
             FeatureChannel("log_border_dist", (FEATURE_BORDER_DIST,)),
         ]
         if mode == "wrfeat2":
@@ -241,7 +235,9 @@ def normalize_diameter_factor(
         if values is not None:
             diameters.append(values[:, 0])
     if not diameters:
-        raise ValueError("normalize_diameter requires equivalent_diameter_area features")
+        raise ValueError(
+            "normalize_diameter requires equivalent_diameter_area features"
+        )
     diameters = np.concatenate(diameters)
     valid = diameters[np.isfinite(diameters) & (diameters > 0)]
     if len(valid) == 0:
@@ -499,9 +495,7 @@ def _stack_wrfeat3(features: dict[str, np.ndarray], ndim: int) -> np.ndarray:
     ball_measure = unit_ball * (np.maximum(diameter, 0) / 2) ** ndim
     moment = trace_s / np.maximum(ball_measure ** (2 / ndim), eps)
     isotropic_ref = (
-        (1 / 2) / np.pi
-        if ndim == 2
-        else (3 / 5) / (4 * np.pi / 3) ** (2 / 3)
+        (1 / 2) / np.pi if ndim == 2 else (3 / 5) / (4 * np.pi / 3) ** (2 / 3)
     )
     normalized_moment = moment / isotropic_ref
 
@@ -924,11 +918,13 @@ def _rotation_matrix(theta: float, axis: tuple[float, float, float] = (1, 0, 0))
         raise ValueError("rotation axis must be non-zero")
     axis = axis / norm
     a0, a1, a2 = axis
-    K = np.array([
-        [0, -a2, a1],
-        [a2, 0, -a0],
-        [-a1, a0, 0],
-    ])
+    K = np.array(
+        [
+            [0, -a2, a1],
+            [a2, 0, -a0],
+            [-a1, a0, 0],
+        ]
+    )
     eye = np.eye(3)
     return eye + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
 
@@ -1003,7 +999,9 @@ class WRRandomAffine(WRBaseAugmentation):
         degrees = np.random.uniform(-self.degrees, self.degrees) / 180 * np.pi
         rotation = _rotation_matrix(degrees)
         if features.ndim == 3 and self.tilt_degrees:
-            tilt = np.random.uniform(-self.tilt_degrees, self.tilt_degrees) / 180 * np.pi
+            tilt = (
+                np.random.uniform(-self.tilt_degrees, self.tilt_degrees) / 180 * np.pi
+            )
             psi = np.random.uniform(-np.pi, np.pi)
             tilt_axis = (0, np.cos(psi), np.sin(psi))
             rotation = rotation @ _rotation_matrix(tilt, axis=tilt_axis)
@@ -1015,9 +1013,7 @@ class WRRandomAffine(WRBaseAugmentation):
         shx = np.random.uniform(-self.shear[1], self.shear[1])
 
         self._M = (
-            rotation
-            @ _scale_matrix(scale, scale, scale)
-            @ _shear_matrix(shy, shx)
+            rotation @ _scale_matrix(scale, scale, scale) @ _shear_matrix(shy, shx)
         )
 
         # M is by default 3D , we need to remove the last dimension for 2D
@@ -1297,7 +1293,10 @@ def build_windows(
     progbar_class=tqdm,
     as_torch: bool = False,
     feature_mode: Literal["wrfeat2", "wrfeat2_no_intensity", "wrfeat3"] = "wrfeat2",
+    model_coord_dim: int | None = None,
 ) -> list[dict]:
+    from trackastra.data.utils import lift_spatial_coords
+
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")
     if as_torch:
@@ -1320,9 +1319,12 @@ def build_windows(
         labels = feat.labels
         timepoints = feat.timepoints
         coords = feat.coords
+        if model_coord_dim is not None:
+            coords = lift_spatial_coords(coords, model_coord_dim)
 
         if len(feat) == 0:
-            coords = np.zeros((0, feat.ndim), dtype=int)
+            coord_dim = feat.ndim if model_coord_dim is None else model_coord_dim
+            coords = np.zeros((0, coord_dim), dtype=int)
 
         if type(feat).features_stacked_for is WRFeatures.features_stacked_for:
             stacked_features, feature_mask = feat.stacked_with_mask(feature_mode)

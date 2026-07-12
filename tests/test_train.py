@@ -13,7 +13,7 @@ import trackastra.training as training_api
 import trackastra.training.runtime as runtime_api
 import yaml
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
-from trackastra.data import distributed
+from trackastra.data import distributed, wrfeat
 from trackastra.data.dataset import (
     TrackingDataset,
     collate_sequence_padding,
@@ -541,6 +541,61 @@ def test_tracking_eval_reuses_and_clears_cached_gt(monkeypatch):
     assert not gt_data.annotated
     assert len(pred_loads) == 2
     assert all(not run_checks for _path, run_checks in pred_loads)
+
+
+def test_tracking_cache_keeps_2d_features_and_lifts_model_windows(monkeypatch):
+    calls = []
+    images = np.stack(
+        [np.arange(64, dtype=np.float32).reshape(8, 8) + t for t in range(2)]
+    )
+    masks = np.zeros((2, 8, 8), dtype=np.int32)
+    masks[:, 2:6, 2:6] = 1
+
+    def load_ctc_images_masks(root, detection_folder, ndim):
+        calls.append((Path(root), detection_folder, ndim))
+        return images, masks, Path(root), Path(root) / "TRA"
+
+    monkeypatch.setattr("trackastra.data.load_ctc_images_masks", load_ctc_images_masks)
+    loaders = ModuleType("traccuracy.loaders")
+    loaders.load_ctc_data = lambda *_args, **_kwargs: SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "traccuracy", ModuleType("traccuracy"))
+    monkeypatch.setitem(sys.modules, "traccuracy.loaders", loaders)
+
+    model = TrackingTransformer(
+        coord_dim=3,
+        feat_dim=9,
+        d_model=16,
+        nhead=1,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        window=2,
+    )
+    inference_config = {
+        "features": "wrfeat3",
+        "feature_schema": wrfeat.feature_schema_manifest("wrfeat3"),
+        "normalize_diameter": None,
+        "pretrained_feats_model": None,
+        "pretrained_feats_mode": None,
+        "pretrained_feats_additional_props": None,
+    }
+    module = TrackingLightningModule(
+        model,
+        tracking_inputs=[
+            {"root": Path("movie_2d"), "source_ndim": 2, "spacing": [0.4, 0.4]}
+        ],
+        tracking_detection_folder="TRA",
+        inference_config=inference_config,
+    )
+
+    module._build_tracking_cache()
+
+    assert calls == [(Path("movie_2d"), "TRA", 2)]
+    movie = module._tracking_cache[0]
+    assert movie["spatial_dim"] == 2
+    assert movie["features"][0].coords.shape[1] == 2
+    assert movie["windows"][0]["coords"].shape[1] == 3
+    assert torch.all(movie["windows"][0]["coords"][:, 0] == 0)
+    assert not bool(movie["windows"][0]["feature_mask"][:, 5:8].any())
 
 
 def test_tracking_lam_split_sweep_reuses_candidate_graph(monkeypatch):
@@ -1346,7 +1401,9 @@ def test_sequence_input_specs_expand_supported_forms():
         ndim=2,
     )
 
-    assert specs[0] == SequenceInputSpec(path=Path("ctc_single/01"), format="ctc")
+    assert specs[0] == SequenceInputSpec(
+        path=Path("ctc_single/01"), format="ctc", source_ndim=2
+    )
     assert specs[1].path == Path("ctc/01")
     assert specs[1].format == "ctc"
     assert specs[1].spacing == (2.0, 1.0)
@@ -1356,6 +1413,7 @@ def test_sequence_input_specs_expand_supported_forms():
     assert specs[2].loader_kwargs == {"detection_folders": ["TRA", "SEG"]}
     assert specs[3].path == Path("movie")
     assert specs[3].format == "geff"
+    assert specs[3].source_ndim == 2
     assert specs[3].sparse_gt is True
     assert specs[3].spacing == "auto"
     assert specs[3].loader_kwargs == {"match_max_distance": 16}
@@ -1376,6 +1434,35 @@ def test_sequence_input_specs_validate_ambiguous_or_incomplete_items():
             [{"path": "ctc/01", "format": "ctc", "spacing": "auto"}],
             ndim=2,
         )
+    with pytest.raises(ValueError, match="source_ndim must be"):
+        normalize_sequence_input_specs(
+            [{"path": "ctc/01", "format": "ctc", "source_ndim": 4}]
+        )
+
+
+def test_sequence_input_specs_merge_source_ndim_group_and_path_overrides():
+    specs = normalize_sequence_input_specs(
+        [
+            {
+                "format": "ctc",
+                "source_ndim": 2,
+                "spacing": [0.4, 0.4],
+                "paths": [
+                    "ctc/01",
+                    {
+                        "path": "ctc/02",
+                        "source_ndim": 3,
+                        "spacing": [1.0, 0.4, 0.4],
+                    },
+                ],
+            }
+        ]
+    )
+
+    assert specs[0].source_ndim == 2
+    assert specs[0].spacing == (0.4, 0.4)
+    assert specs[1].source_ndim == 3
+    assert specs[1].spacing == (1.0, 0.4, 0.4)
 
 
 def test_normalize_source_specs_returns_direct_loader_kwargs(tmp_path):
@@ -1422,6 +1509,7 @@ def test_normalize_source_specs_returns_direct_loader_kwargs(tmp_path):
         "kwargs": {
             "root_or_geff": geff_path,
             "sparse_gt": True,
+            "source_ndim": 2,
             "match_max_distance": 16,
             "spacing": "auto",
         },
@@ -2094,9 +2182,11 @@ cachedir: sequence-cache
     assert model_config.feat_dim == 8
     assert model_config.model_path == Path("saved-model")
     assert train_data_config.sources[0]["kwargs"]["root_or_geff"] == Path("train_a")
+    assert train_data_config.sources[0]["kwargs"]["source_ndim"] == "auto"
     assert train_data_config.sources[0]["kwargs"]["spacing"] == (4.0, 1.0, 1.0)
     assert train_data_config.dataset_kwargs["detect_drop"] == 0.25
     assert train_data_config.dataset_kwargs["augment"] == 4
+    assert train_data_config.dataset_kwargs["model_coord_dim"] == 3
     assert train_data_config.dataset_kwargs["augment_details"] == {
         "jitter": 2.5,
         "drift": 7.0,
@@ -2123,6 +2213,36 @@ cachedir: sequence-cache
     }
     assert "feature_embed_mode" not in train_config.runtime_kwargs["training_args"]
     assert "feat_embed_per_dim" not in train_config.runtime_kwargs["training_args"]
+
+
+def test_parse_training_config_separates_source_and_model_dimensions(
+    monkeypatch, tmp_path
+):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+ndim: 3
+features: wrfeat3
+input_train:
+- format: ctc
+  source_ndim: 2
+  spacing: [0.4, 0.4]
+  paths:
+  - movie_2d
+  - path: movie_3d
+    source_ndim: 3
+    spacing: [1.0, 0.4, 0.4]
+"""
+    )
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    model_config, train_data, _val_data, _train_config = parse_training_config()
+
+    assert model_config.coord_dim == 3
+    assert train_data.sources[0]["kwargs"]["ndim"] == 2
+    assert train_data.sources[1]["kwargs"]["ndim"] == 3
+    assert "ndim" not in train_data.sequence_kwargs
+    assert train_data.dataset_kwargs["model_coord_dim"] == 3
 
 
 def test_parse_training_config_records_wrfeat3_schema(monkeypatch, tmp_path):
@@ -2302,7 +2422,12 @@ def test_balanced_datamodule_dispatches_ctc_and_geff(monkeypatch):
         (
             "geff",
             Path("movie/track.geff"),
-            {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"},
+            {
+                "sparse_gt": True,
+                "source_ndim": 2,
+                "match_max_distance": 16,
+                "spacing": "auto",
+            },
         ),
     ]
 
@@ -2353,8 +2478,24 @@ def test_balanced_datamodule_auto_detects_geff_directory(monkeypatch, tmp_path):
     module.setup("fit")
 
     assert sequence_calls == [
-        (geff_root, {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"}),
-        (geff_root, {"sparse_gt": True, "match_max_distance": 16, "spacing": "auto"}),
+        (
+            geff_root,
+            {
+                "sparse_gt": True,
+                "source_ndim": 2,
+                "match_max_distance": 16,
+                "spacing": "auto",
+            },
+        ),
+        (
+            geff_root,
+            {
+                "sparse_gt": True,
+                "source_ndim": 2,
+                "match_max_distance": 16,
+                "spacing": "auto",
+            },
+        ),
     ]
 
 
@@ -2425,6 +2566,7 @@ def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path)
             {
                 "root_or_geff": Path("movie/track.geff"),
                 "sparse_gt": True,
+                "source_ndim": 2,
                 "match_max_distance": 16,
             },
         ),
@@ -2436,6 +2578,7 @@ def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path)
             {
                 "root_or_geff": Path("movie/track.geff"),
                 "sparse_gt": True,
+                "source_ndim": 2,
                 "match_max_distance": 16,
             },
         ),
@@ -2452,7 +2595,7 @@ def test_tracking_inputs_filter_geff_sources(tmp_path):
             {"format": "geff", "kwargs": {"root_or_geff": geff_root}},
         ],
         tracking_frequency=1,
-    ) == [{"root": ctc_root, "spacing": None}]
+    ) == [{"root": ctc_root, "source_ndim": "auto", "spacing": None}]
 
 
 def test_tracking_inputs_carry_spacing(tmp_path):
@@ -2466,7 +2609,13 @@ def test_tracking_inputs_carry_spacing(tmp_path):
             }
         ],
         tracking_frequency=1,
-    ) == [{"root": ctc_root, "spacing": [1.625, 0.40625, 0.40625]}]
+    ) == [
+        {
+            "root": ctc_root,
+            "source_ndim": "auto",
+            "spacing": [1.625, 0.40625, 0.40625],
+        }
+    ]
 
 
 def download_gt_data(url: str, data_dir: str | Path):
