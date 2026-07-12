@@ -2,7 +2,7 @@ import pytest
 import torch
 import yaml
 from trackastra.model import TrackingTransformer
-from trackastra.model.model import DecoderLayer, EncoderLayer
+from trackastra.model.model import DecoderLayer, EncoderLayer, ModelConfig
 from trackastra.model.model_parts import (
     FeatureEmbedding,
     MaskedRunningNorm,
@@ -12,6 +12,18 @@ from trackastra.model.sparse_attn import build_knn_index
 
 # Mark all tests in this module as core/inference tests
 pytestmark = pytest.mark.core
+
+
+def test_model_config_resolves_saved_constructor_values():
+    kwargs = ModelConfig(
+        num_encoder_layers=12,
+        num_decoder_layers=None,
+        max_neighbors=(8,),
+        encoder_only=True,
+    ).transformer_kwargs()
+
+    assert kwargs["num_decoder_layers"] == 0
+    assert kwargs["max_neighbors"] == (8, 8)
 
 
 class _ZeroModule(torch.nn.Module):

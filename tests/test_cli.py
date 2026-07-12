@@ -16,11 +16,13 @@ pytestmark = pytest.mark.core
 def example_dataset():
     img_dir = Path("test_data/img")
     img_dir.mkdir(exist_ok=True, parents=True)
-    img = np.array([
-        [0, 1, 1],  # t=0
-        [0, 1, 0],  # t=1
-        [1, 1, 0],  # t=2
-    ])
+    img = np.array(
+        [
+            [0, 1, 1],  # t=0
+            [0, 1, 0],  # t=1
+            [1, 1, 0],  # t=2
+        ]
+    )
     img = np.expand_dims(img, -1)
     for i in range(img.shape[0]):
         imwrite(img_dir / f"emp_{i}.tif", img[i])
@@ -37,11 +39,13 @@ def example_dataset():
         dtype=int,
     )
     np.savetxt(tra_dir / "man_track.txt", man_track, fmt="%i")
-    y = np.array([
-        [00, 10, 11],  # t=0
-        [00, 10, 00],  # t=1
-        [20, 22, 00],  # t=2
-    ])
+    y = np.array(
+        [
+            [00, 10, 11],  # t=0
+            [00, 10, 00],  # t=1
+            [20, 22, 00],  # t=2
+        ]
+    )
     y = np.expand_dims(y, -1)
     for i in range(y.shape[0]):
         imwrite(tra_dir / f"track_{i}.tif", y[i])
@@ -113,9 +117,7 @@ def test_predict_parser_reads_test_movies_from_config(tmp_path, predict_script):
     assert args.input_test == [Path("movie_a"), Path("movie_b")]
     assert args.detection_folders == ["SEG"]
     assert args.spatial_cutoff is None
-    assert predict_script.parse_args(
-        ["-m", "model", "-c", str(config), "-f"]
-    ).overwrite
+    assert predict_script.parse_args(["-m", "model", "-c", str(config), "-f"]).overwrite
 
 
 def test_tracking_frequency_uses_completed_epoch_numbers(train_script):
@@ -123,27 +125,6 @@ def test_tracking_frequency_uses_completed_epoch_numbers(train_script):
     assert train_script._is_tracking_epoch(9, 10)
     assert train_script._is_tracking_epoch(19, 10)
     assert not train_script._is_tracking_epoch(9, 0)
-
-
-def test_resolve_ctc_paths(tmp_path, predict_script):
-    simple = tmp_path / "simple"
-    (simple / "img").mkdir(parents=True)
-    (simple / "TRA").mkdir()
-    assert predict_script.resolve_ctc_paths(simple, "TRA") == (
-        simple / "img",
-        simple / "TRA",
-        simple / "TRA",
-    )
-
-    sequence = tmp_path / "dataset" / "01"
-    sequence.mkdir(parents=True)
-    (tmp_path / "dataset" / "01_GT" / "TRA").mkdir(parents=True)
-    (tmp_path / "dataset" / "01_ST" / "SEG").mkdir(parents=True)
-    assert predict_script.resolve_ctc_paths(sequence, "SEG") == (
-        sequence,
-        tmp_path / "dataset" / "01_ST" / "SEG",
-        tmp_path / "dataset" / "01_GT" / "TRA",
-    )
 
 
 def test_evaluate_ctc_uses_ctc_metrics(monkeypatch, predict_script):
@@ -309,20 +290,19 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         ),
     )
     monkeypatch.setattr("trackastra.tracking.graph_to_ctc", fake_graph_to_ctc)
-    monkeypatch.setattr(
-        predict_script,
-        "evaluate_ctc",
-        lambda gt, pred, return_matched=False: {
-            "TRA": 0.5,
-            "AOGM": 4.0,
-            "DET": 0.6,
-            "LNK": 0.7,
-        },
-    )
+
+    def fake_evaluate_ctc(gt, pred, return_matched=False):
+        values = {"TRA": 0.5, "AOGM": 4.0, "DET": 0.6, "LNK": 0.7}
+        return (values, None) if return_matched else values
+
+    monkeypatch.setattr(predict_script, "evaluate_ctc", fake_evaluate_ctc)
     args = SimpleNamespace(
         model="trained_model",
         device="cpu",
         input_test=[movie],
+        imgs=None,
+        masks=None,
+        name=None,
         detection_folders=["TRA"],
         outdir=tmp_path / "results",
         overwrite=False,
@@ -331,6 +311,12 @@ def test_predict_run_writes_and_evaluates_ctc_output(
         spacing=None,
         normalize_diameter=None,
         errormovie=False,
+        error_report=False,
+        node_prior=0.0,
+        lam_appear=None,
+        lam_disappear=None,
+        lam_split=None,
+        geff=False,
     )
 
     result = predict_script.run(args)
@@ -369,4 +355,135 @@ def test_predict_run_writes_and_evaluates_ctc_output(
     output = capsys.readouterr().out
     assert "movie" in output
     assert "Mean" in output
-    assert "0.500000" in output
+    assert "0.5000" in output
+
+
+def test_predict_parser_accepts_imgs_masks_without_config(predict_script):
+    args = predict_script.parse_args(
+        ["-m", "model", "--imgs", "movie/img", "--masks", "movie/masks"]
+    )
+    assert args.imgs == Path("movie/img")
+    assert args.masks == Path("movie/masks")
+    assert args.input_test is None
+
+
+def test_predict_run_requires_masks_or_input_test(predict_script):
+    args = predict_script.parse_args(["-m", "model"])
+    with pytest.raises(ValueError, match="--masks"):
+        predict_script.run(args)
+
+    args = predict_script.parse_args(["-m", "model", "--imgs", "movie/img"])
+    with pytest.raises(ValueError, match="--imgs requires --masks"):
+        predict_script.run(args)
+
+
+def test_node_prior_lambdas_are_individually_overridable(predict_script):
+    assert predict_script._node_prior_kwargs("greedy", 0.0) == {}
+
+    shared = predict_script._node_prior_kwargs("greedy", 0.5)["greedy_config"]
+    assert (shared.lam_appear, shared.lam_disappear, shared.lam_split) == (
+        0.5,
+        0.5,
+        0.5,
+    )
+
+    # a single lam_* is enough to switch the prior on, and overrides the shared value
+    only_split = predict_script._node_prior_kwargs("ilp", 0.0, lam_split=1.5)[
+        "ilp_config"
+    ]
+    assert (only_split.lam_appear, only_split.lam_split) == (0.0, 1.5)
+
+    override = predict_script._node_prior_kwargs("greedy", 0.5, lam_split=2.0)
+    assert override["greedy_config"].lam_split == 2.0
+
+
+def test_name_overrides_the_movie_output_folder(predict_script):
+    args = predict_script.parse_args(
+        ["-m", "model", "--masks", "movie/masks", "--name", "my_run"]
+    )
+    assert args.name == "my_run"
+
+    # --name is per-movie, so it is ambiguous for more than one input movie
+    with pytest.raises(ValueError, match="single movie output folder"):
+        predict_script.predict_and_evaluate(
+            model=SimpleNamespace(transformer=SimpleNamespace(config={"coord_dim": 2})),
+            input_paths=[Path("a/01"), Path("b/01")],
+            detection_folder="TRA",
+            outdir=Path("out"),
+            model_name="model",
+            out_name="my_run",
+        )
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_write_geff_is_readable_and_json_safe(tmp_path, predict_script, ndim):
+    """The store must open with geff.read and survive inTRACKtive's JSON-encoded attrs."""
+    geff = pytest.importorskip("geff")
+
+    graph = nx.DiGraph()
+    for node, t in enumerate([0, 1, 2]):
+        graph.add_node(
+            node,
+            time=np.int64(t),
+            label=np.uint16(node + 1),
+            coords=np.arange(ndim, dtype=np.float32) + t,
+            # model-internal diagnostics that must not land in the store
+            weight=np.float32(0.9),
+            a=np.float32(0.1),
+            c=np.float32(0.2),
+            s=np.float32(0.3),
+        )
+    graph.add_edges_from([(0, 1), (1, 2)])
+
+    store = tmp_path / "movie.geff"
+    predict_script._write_geff(graph, ndim, store)
+
+    out, meta = geff.read(store)
+    assert out.number_of_nodes() == 3
+    assert out.number_of_edges() == 2
+
+    coord_names = ("z", "y", "x")[3 - ndim :]
+    # inTRACKtive locates the time axis by type, not by name
+    assert [(a.name, a.type) for a in meta.axes] == [
+        ("t", "time"),
+        *[(n, "space") for n in coord_names],
+    ]
+
+    attrs = out.nodes[0]
+    assert set(attrs) == {"t", "label", *coord_names}
+    # float32 coords are not JSON serializable downstream, so they must be float64
+    for name in coord_names:
+        assert not isinstance(attrs[name], np.float32)
+
+    # the caller's graph keeps its original attributes
+    assert "coords" in graph.nodes[0] and "time" in graph.nodes[0]
+
+
+def test_prepare_output_errors_before_any_tracking(
+    tmp_path, monkeypatch, predict_script
+):
+    """A collision on the *second* movie must raise before the first one is tracked."""
+    first, second = tmp_path / "a" / "01", tmp_path / "b" / "01"
+    outdir = tmp_path / "results"
+    existing = outdir / "model" / "b_01"
+    existing.mkdir(parents=True)
+    (existing / "man_track.txt").write_text("1 0 0 0\n")
+
+    tracked = []
+
+    def fail_if_called(*args, **kwargs):
+        tracked.append(args)
+        raise AssertionError("tracking must not start when an output already exists")
+
+    monkeypatch.setattr("trackastra.data.load_ctc_images_masks", fail_if_called)
+
+    with pytest.raises(FileExistsError, match="b_01"):
+        predict_script.predict_and_evaluate(
+            model=SimpleNamespace(transformer=SimpleNamespace(config={"coord_dim": 2})),
+            input_paths=[first, second],
+            detection_folder="TRA",
+            outdir=outdir,
+            model_name="model",
+            overwrite=False,
+        )
+    assert tracked == []

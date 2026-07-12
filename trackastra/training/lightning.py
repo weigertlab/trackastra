@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -72,6 +74,7 @@ from trackastra.utils import (
 
 logger = logging.getLogger(__name__)
 
+
 # define the LightningModule that contains the TrackingTransformer (to separate torch and lightning)
 # this contains all the training/loss logic
 class TrackingLightningModule(LightningModule):
@@ -93,7 +96,7 @@ class TrackingLightningModule(LightningModule):
         focal_loss_gamma: float = 0.0,
         delta_cutoff: int = 2,
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
-        tracking_input_paths: list[str] | None = None,
+        tracking_inputs: list[Mapping[str, Any]] | None = None,
         tracking_detection_folder: str = "TRA",
         tracking_mode: str = "greedy",
         # The inference contract (features, normalize_diameter, pretrained_feats_*)
@@ -105,21 +108,22 @@ class TrackingLightningModule(LightningModule):
         grad_log_every_n_epochs: int = 10,
         log_edge_rates: bool = True,
         node_loss: float = 0.0,
-        consistency_weight: float = 0.0,
+        consistency_weight: float = 0.1,
         node_in_weights=None,
         node_out_weights=None,
         compile: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["model", "node_in_weights", "node_out_weights"])
+        self.save_hyperparameters(
+            ignore=["model", "node_in_weights", "node_out_weights"]
+        )
         self.grad_log_every_n_epochs = grad_log_every_n_epochs
         # pre-solver association FP/FN by link type (regular vs division); accumulated
         # per epoch and pooled across DDP ranks at epoch end (see _log_edge_error_rates)
         self.log_edge_rates = log_edge_rates
         self._edge_counts: dict[str, dict] = {}
-        self._assoc_time_counts: dict[
-            str, dict[tuple[int, int, int], np.ndarray]
-        ] = {}
+        self._assoc_time_counts: dict[str, dict[tuple[int, int, int], np.ndarray]] = {}
+        self._dataset_assoc_counts: dict[str, dict[int, np.ndarray]] = {}
 
         self.model = model
         # Compile only the training-step forward path. Store the wrapper WITHOUT
@@ -138,7 +142,9 @@ class TrackingLightningModule(LightningModule):
         if assoc_loss not in ("bce", "child_ce"):
             raise ValueError(f"Unknown assoc_loss {assoc_loss!r}")
         if assoc_loss == "child_ce" and causal_norm != "quiet_softmax":
-            raise ValueError("assoc_loss='child_ce' requires causal_norm='quiet_softmax'")
+            raise ValueError(
+                "assoc_loss='child_ce' requires causal_norm='quiet_softmax'"
+            )
         if loss_norm not in ("matrix", "decision"):
             raise ValueError(f"Unknown loss_norm {loss_norm!r}")
         if assoc_loss == "child_ce" and loss_norm != "decision":
@@ -157,7 +163,7 @@ class TrackingLightningModule(LightningModule):
 
         self.lr = learning_rate
         self.tracking_frequency = tracking_frequency
-        self.tracking_input_paths = tracking_input_paths or []
+        self.tracking_inputs = list(tracking_inputs or [])
         self.tracking_detection_folder = tracking_detection_folder
         self.tracking_mode = tracking_mode
         self.inference_config = inference_config or {}
@@ -174,23 +180,21 @@ class TrackingLightningModule(LightningModule):
         # as buffers so they follow the module to its device; None -> unweighted CE.
         self.node_loss = node_loss
         # Degree-consistency: pull the edge-implied out-degree toward the node head's
-        # prediction (node head teaches edges). Needs the node head, hence node_loss>0.
-        self.consistency_weight = consistency_weight
-        if consistency_weight > 0 and node_loss <= 0:
-            raise ValueError(
-                "consistency_weight > 0 requires node_loss > 0 (needs the node head)"
-            )
+        # prediction (node head teaches edges). It is inactive without the node head.
+        self.consistency_weight = consistency_weight if node_loss > 0 else 0.0
         if node_loss > 0 and not getattr(self.model, "node_head", False):
-            raise ValueError(
-                "node_loss > 0 requires a model built with node_head=True"
-            )
+            raise ValueError("node_loss > 0 requires a model built with node_head=True")
         self.register_buffer(
             "node_in_weights",
-            None if node_in_weights is None else torch.as_tensor(node_in_weights).float(),
+            None
+            if node_in_weights is None
+            else torch.as_tensor(node_in_weights).float(),
         )
         self.register_buffer(
             "node_out_weights",
-            None if node_out_weights is None else torch.as_tensor(node_out_weights).float(),
+            None
+            if node_out_weights is None
+            else torch.as_tensor(node_out_weights).float(),
         )
         self._node_violation_warned = False
         self.loss_spike_debug_dir: Path | None = None
@@ -206,6 +210,7 @@ class TrackingLightningModule(LightningModule):
         # the trainer to a directory; one human-readable CSV is written per epoch
         # and the index->root map is dumped once on first use.
         self.batch_provenance_path: Path | None = None
+        self.dataset_metrics_path: Path | None = None
         self.tracking_metrics_path: Path | None = None
         self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
@@ -221,7 +226,7 @@ class TrackingLightningModule(LightningModule):
         """
         from traccuracy.loaders import load_ctc_data
 
-        from trackastra.data import load_ctc_images_masks
+        from trackastra.data import DetectionSequence, load_ctc_images_masks
         from trackastra.model import Trackastra
 
         device = next(self.model.parameters()).device.type
@@ -236,22 +241,36 @@ class TrackingLightningModule(LightningModule):
         ndim = int(self.model.config.get("coord_dim", 2))
         cache: list[dict] = []
         used_names: set[str] = set()
-        for index, root in enumerate(self.tracking_input_paths, start=1):
-            root = Path(root)
+        for index, inp in enumerate(self.tracking_inputs, start=1):
+            root = Path(inp["root"])
+            spacing = inp.get("spacing")
             imgs, masks, _image_path, gt_path = load_ctc_images_masks(
                 root, detection_folder=self.tracking_detection_folder, ndim=ndim
             )
-            # normalize_imgs=False mirrors the original predict_and_evaluate call;
-            # normalize_diameter falls through to inference_config inside _predict.
-            features, windows = self._tracking_model._extract_features_windows(
+            # Go through the canonical detection path so spacing scales coordinates
+            # and geometry exactly as TrackingSequence.from_ctc does for the windowed
+            # dataset; otherwise the eval would run on voxel-index coordinates while
+            # the model was trained in physical units. load_ctc_images_masks already
+            # normalizes the images, hence normalize_imgs=False.
+            detections = DetectionSequence.from_masks(
                 imgs,
                 masks,
+                name=str(root),
+                ndim=ndim,
+                spacing=spacing,
                 normalize_imgs=False,
+                keep_masks=True,
+                keep_images=True,
+            )
+            features, windows, _dim, _mode = (
+                self._tracking_model._extract_detection_windows(detections)
             )
             seq_dir = root.parent if root.name == "TRA" else root
             seq_name = seq_dir.name.removesuffix("_GT")
             dataset = seq_dir.parent.name.removesuffix("_GT")
-            name = f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
+            name = (
+                f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
+            )
             if name in used_names:
                 name = f"{name}_{index}"
             used_names.add(name)
@@ -503,12 +522,13 @@ class TrackingLightningModule(LightningModule):
         The edge-implied out-degree of a source is the sum of its predicted forward
         edge probabilities over candidate successors (row block-sum of ``prob``); the
         node-head expected out-degree is ``E[deg] = p1 + 2*p2`` under the out-degree
-        softmax. MSE between them, with gradients flowing into both heads (mutual
+        softmax. Smooth L1 between them sends gradients into both heads (mutual
         consistency): the edge head is pulled toward the node head's out-degree and
         the node head toward the edge-implied one; both remain anchored by their own
-        GT losses (association BCE and node CE).
+        GT losses (association BCE and node CE). Its linear regime prevents large
+        initial degree disagreements from dominating the other loss terms.
 
-        Each source's squared error is weighted by ``node_out_weights[out_tgt]``, the
+        Each source's error is weighted by ``node_out_weights[out_tgt]``, the
         same class weights the node CE uses, so rare divisions are not drowned out by
         abundant continuations (an unweighted mean would spend almost all its gradient
         on out-degree-1 nodes the edge head already handles). Falls back to a plain
@@ -552,7 +572,9 @@ class TrackingLightningModule(LightningModule):
         )
         if not bool(valid.any()):
             return A_pred.new_zeros(())
-        err = (edge_out - node_out)[valid] ** 2
+        err = torch.nn.functional.smooth_l1_loss(
+            edge_out, node_out, reduction="none", beta=1.0
+        )[valid]
         if self.node_out_weights is not None:
             w = self.node_out_weights[out_tgt[valid].long()]
             return (w * err).sum() / w.sum()
@@ -598,12 +620,14 @@ class TrackingLightningModule(LightningModule):
         # mask as all-present anyway).
         mask_kw = {} if feat_mask is None else {"feature_mask": feat_mask}
         if self.node_loss > 0:
-            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = self._forward_model(
-                coords,
-                feats,
-                padding_mask=padding_mask,
-                return_node_logits=True,
-                **mask_kw,
+            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = (
+                self._forward_model(
+                    coords,
+                    feats,
+                    padding_mask=padding_mask,
+                    return_node_logits=True,
+                    **mask_kw,
+                )
             )
         else:
             A_pred, neighbor_mask = self._forward_model(
@@ -736,6 +760,7 @@ class TrackingLightningModule(LightningModule):
 
         edge_counts = None
         assoc_time_counts = None
+        dataset_assoc_counts = None
         if self.log_edge_rates:
             with torch.no_grad():
                 if self.causal_norm != "none":
@@ -763,6 +788,14 @@ class TrackingLightningModule(LightningModule):
                     batch.get("dataset_index"),
                     batch.get("seg_index"),
                 )
+                dataset_assoc_counts = self._dataset_assoc_counts_for_batch(
+                    A,
+                    prob,
+                    timepoints,
+                    mask,
+                    division_tracks,
+                    batch.get("dataset_index"),
+                )
                 if node_div_counts is not None:
                     edge_counts.update(node_div_counts)
 
@@ -776,6 +809,7 @@ class TrackingLightningModule(LightningModule):
             mask_valid=mask_valid,
             edge_counts=edge_counts,
             assoc_time_counts=assoc_time_counts,
+            dataset_assoc_counts=dataset_assoc_counts,
             node_loss_out=node_loss_out,
             node_loss_in=node_loss_in,
             consistency_loss=consistency_loss,
@@ -840,6 +874,150 @@ class TrackingLightningModule(LightningModule):
         acc = self._assoc_time_counts.setdefault(stage, {})
         for key, value in counts.items():
             acc[key] = acc[key] + value if key in acc else value.copy()
+
+    @staticmethod
+    def _dataset_assoc_counts_for_batch(
+        A: torch.Tensor,
+        prob: torch.Tensor,
+        timepoints: torch.Tensor,
+        mask: torch.Tensor,
+        gt_division: torch.Tensor,
+        dataset_index: torch.Tensor | None,
+        threshold: float = 0.5,
+    ) -> dict[int, np.ndarray]:
+        """Return regular and division TP/FP/FN counts grouped by dataset."""
+        if dataset_index is None:
+            return {}
+        supervised = mask.bool()
+        gt_pos = (A > 0.5) & supervised
+        gt_regular = gt_pos & ~gt_division
+        gt_div = gt_pos & gt_division
+        pred_pos = (prob >= threshold) & supervised
+        pred = pred_pos.to(A.dtype)
+        row = blockwise_sum_batched(pred, timepoints, dim=-1, reduce="sum")
+        col = blockwise_sum_batched(pred, timepoints, dim=-2, reduce="sum")
+        pred_division = pred * (row + col) > 2
+        pred_regular = pred_pos & ~pred_division
+        false_pos = pred_pos & ~gt_pos
+
+        dataset_ids = dataset_index.detach().to("cpu").numpy()
+        out = {}
+        for current in np.unique(dataset_ids):
+            selected = torch.as_tensor(
+                dataset_ids == current, device=A.device, dtype=torch.bool
+            )[:, None, None]
+            values = (
+                int(np.sum(dataset_ids == current)),
+                int((supervised & selected).sum()),
+                int((gt_regular & pred_pos & selected).sum()),
+                int((false_pos & pred_regular & selected).sum()),
+                int((gt_regular & ~pred_pos & selected).sum()),
+                int((gt_div & pred_pos & selected).sum()),
+                int((false_pos & pred_division & selected).sum()),
+                int((gt_div & ~pred_pos & selected).sum()),
+            )
+            out[int(current)] = np.asarray(values, dtype=np.int64)
+        return out
+
+    def _accumulate_dataset_assoc_counts(
+        self, stage: str, counts: dict[int, np.ndarray] | None
+    ) -> None:
+        if not counts:
+            return
+        acc = self._dataset_assoc_counts.setdefault(stage, {})
+        for dataset_index, value in counts.items():
+            acc[dataset_index] = (
+                acc[dataset_index] + value if dataset_index in acc else value.copy()
+            )
+
+    @staticmethod
+    def _merge_dataset_assoc_counts(
+        items: list[dict[str, dict[int, np.ndarray]]],
+    ) -> dict[str, dict[int, np.ndarray]]:
+        merged: dict[str, dict[int, np.ndarray]] = {}
+        for item in items:
+            for stage, counts in item.items():
+                acc = merged.setdefault(stage, {})
+                for dataset_index, value in counts.items():
+                    array = np.asarray(value, dtype=np.int64)
+                    acc[dataset_index] = (
+                        acc[dataset_index] + array
+                        if dataset_index in acc
+                        else array.copy()
+                    )
+        return merged
+
+    def _gather_dataset_assoc_counts(self) -> dict[str, dict[int, np.ndarray]]:
+        local = {
+            stage: {
+                dataset_index: value.copy() for dataset_index, value in counts.items()
+            }
+            for stage, counts in self._dataset_assoc_counts.items()
+        }
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            gathered = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(gathered, local)
+            return self._merge_dataset_assoc_counts(gathered)
+        return self._merge_dataset_assoc_counts([local])
+
+    def _dataset_metric_rows(
+        self, counts: dict[str, dict[int, np.ndarray]]
+    ) -> list[dict[str, Any]]:
+        rows = []
+        for stage in ("train", "val"):
+            roots = self._dataset_root_map_for_stage(stage)
+            for dataset_index, value in sorted(counts.get(stage, {}).items()):
+                samples, supervised, reg_tp, reg_fp, reg_fn, div_tp, div_fp, div_fn = (
+                    int(x) for x in value
+                )
+                regular = metrics_from_counts(reg_tp, reg_fp, reg_fn)
+                division = metrics_from_counts(div_tp, div_fp, div_fn)
+                rows.append(
+                    {
+                        "epoch": int(self.current_epoch),
+                        "global_step": int(self.global_step),
+                        "split": stage,
+                        "dataset_index": dataset_index,
+                        "dataset_root": roots.get(dataset_index, ""),
+                        "sampled_windows": samples,
+                        "supervised_pairs": supervised,
+                        "regular_gt_edges": reg_tp + reg_fn,
+                        "regular_pred_edges": reg_tp + reg_fp,
+                        "regular_tp": reg_tp,
+                        "regular_fp": reg_fp,
+                        "regular_fn": reg_fn,
+                        "regular_f1": regular["f1"],
+                        "regular_jaccard": regular["jaccard"],
+                        "division_gt_edges": div_tp + div_fn,
+                        "division_pred_edges": div_tp + div_fp,
+                        "division_tp": div_tp,
+                        "division_fp": div_fp,
+                        "division_fn": div_fn,
+                        "division_f1": division["f1"],
+                        "division_jaccard": division["jaccard"],
+                    }
+                )
+        return rows
+
+    def _write_dataset_metrics(self) -> None:
+        """Upsert compact per-epoch, per-dataset association metrics."""
+        counts = self._gather_dataset_assoc_counts()
+        if not self.trainer.is_global_zero or self.dataset_metrics_path is None:
+            return
+        rows = self._dataset_metric_rows(counts)
+        if not rows:
+            return
+        path = self.dataset_metrics_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        current = pd.DataFrame(rows)
+        if path.exists():
+            previous = pd.read_csv(path)
+            current = pd.concat((previous, current), ignore_index=True)
+            current = current.drop_duplicates(
+                subset=("epoch", "split", "dataset_index"), keep="last"
+            )
+        current = current.sort_values(["epoch", "split", "dataset_index"])
+        current.to_csv(path, index=False)
 
     @staticmethod
     def _merge_assoc_time_counts(
@@ -1092,21 +1270,60 @@ class TrackingLightningModule(LightningModule):
         if not label:
             label = str(dataset_index)
         if len(label) > max_len:
-            label = f"...{label[-(max_len - 3):]}"
+            label = f"...{label[-(max_len - 3) :]}"
         return label
 
-    def _dataset_root_map_for_stage(self, stage: str) -> dict[int, str]:
-        if stage in self._assoc_time_dataset_maps:
-            return self._assoc_time_dataset_maps[stage]
-        mapping: dict[int, str] = {}
+    @staticmethod
+    def _loader_datasets(loader) -> list:
+        """Return the map-style dataset(s) behind a trainer loader object.
+
+        Handles a bare ``DataLoader``, a list/tuple of loaders, or a Lightning
+        ``CombinedLoader`` (which exposes its child loaders via ``flattened``).
+        """
+        if loader is None:
+            return []
+        flattened = getattr(loader, "flattened", None)
+        items = flattened if flattened is not None else loader
+        if not isinstance(items, (list, tuple)):
+            items = [items]
+        return [getattr(item, "dataset", item) for item in items]
+
+    def _stage_subdatasets(self, stage: str) -> list:
+        """Per-source sub-datasets for a split, however the trainer was fed.
+
+        Supports both a ``LightningDataModule`` (``dm.datasets[stage]``) and the
+        plain-dataloader path used by ``scripts/train.py`` (bundles handed to
+        ``trainer.fit``), where the sources live on the loader's ``ConcatDataset``.
+        """
         dm = getattr(self.trainer, "datamodule", None)
-        datasets = getattr(dm, "datasets", {}) if dm is not None else {}
-        split_ds = datasets.get(stage) if isinstance(datasets, dict) else None
-        for sub in getattr(split_ds, "datasets", []) or []:
-            mapping[int(getattr(sub, "dataset_index", -1))] = str(
-                getattr(sub, "root", "")
-            )
-        self._assoc_time_dataset_maps[stage] = mapping
+        datasets = getattr(dm, "datasets", None) if dm is not None else None
+        if isinstance(datasets, dict):
+            subs = getattr(datasets.get(stage), "datasets", None)
+            if subs:
+                return list(subs)
+        loader = getattr(
+            self.trainer,
+            "train_dataloader" if stage == "train" else "val_dataloaders",
+            None,
+        )
+        for ds in self._loader_datasets(loader):
+            subs = getattr(ds, "datasets", None)
+            if subs:
+                return list(subs)
+            if hasattr(ds, "dataset_index"):
+                return [ds]
+        return []
+
+    def _dataset_root_map_for_stage(self, stage: str) -> dict[int, str]:
+        cached = self._assoc_time_dataset_maps.get(stage)
+        if cached:
+            return cached
+        mapping: dict[int, str] = {
+            int(getattr(sub, "dataset_index", -1)): str(getattr(sub, "root", ""))
+            for sub in self._stage_subdatasets(stage)
+        }
+        if mapping:
+            self._assoc_time_dataset_maps[stage] = mapping
         return mapping
 
     @classmethod
@@ -1146,7 +1363,9 @@ class TrackingLightningModule(LightningModule):
 
         dataset_indices = sorted({dataset_index for dataset_index, _bin in pooled})
         labels = [
-            cls._short_dataset_label(dataset_roots.get(dataset_index, ""), dataset_index)
+            cls._short_dataset_label(
+                dataset_roots.get(dataset_index, ""), dataset_index
+            )
             for dataset_index in dataset_indices
         ]
         label_counts = {label: labels.count(label) for label in labels}
@@ -1163,13 +1382,37 @@ class TrackingLightningModule(LightningModule):
             den = tp + fp + fn
             if den > 0:
                 matrix[row_for_dataset[dataset_index], bin_index] = (fp + fn) / den
+        for row in range(matrix.shape[0]):
+            matrix[row] = cls._nearest_fill_interior(matrix[row])
         return matrix, labels
+
+    @staticmethod
+    def _nearest_fill_interior(row: np.ndarray) -> np.ndarray:
+        """Fill NaN gaps between the first and last measured bin with the nearest
+        measured value (ties resolve to the earlier bin).
+
+        Short movies have fewer timepoints than time bins, so ``int(frac * n_bins)``
+        leaves interior columns empty; this paints those holes from the closest real
+        measurement. Leading/trailing NaNs are left untouched so the plot never
+        extrapolates past a movie's actual time span.
+        """
+        finite = np.flatnonzero(np.isfinite(row))
+        if finite.size == 0:
+            return row
+        filled = row.copy()
+        for i in range(int(finite[0]) + 1, int(finite[-1])):
+            if np.isfinite(filled[i]):
+                continue
+            filled[i] = row[finite[np.argmin(np.abs(finite - i))]]
+        return filled
 
     @staticmethod
     def _draw_assoc_time_panel(ax, matrix, labels, title, *, cmap, vmax):
         n_bins = matrix.shape[1]
         if matrix.shape[0] == 0:
-            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes
+            )
             ax.set_axis_off()
             ax.set_box_aspect(1 / n_bins)
             return None
@@ -1214,9 +1457,7 @@ class TrackingLightningModule(LightningModule):
             gathered.get("val", {}),
             self._dataset_root_map_for_stage("val"),
         )
-        finite_parts = [
-            x[np.isfinite(x)] for x in (train_matrix, val_matrix) if x.size
-        ]
+        finite_parts = [x[np.isfinite(x)] for x in (train_matrix, val_matrix) if x.size]
         if not finite_parts:
             return
         finite = np.concatenate(finite_parts)
@@ -1324,10 +1565,7 @@ class TrackingLightningModule(LightningModule):
             trigger=trigger,
         )
         torch.save(payload, path)
-        msg = (
-            f"Saved {trigger} spike debug batch to {path} "
-            f"(loss={loss_value:.6g}"
-        )
+        msg = f"Saved {trigger} spike debug batch to {path} (loss={loss_value:.6g}"
         if grad_norm_value is not None:
             msg += f", grad_norm={grad_norm_value:.6g}"
         msg += ")"
@@ -1359,7 +1597,10 @@ class TrackingLightningModule(LightningModule):
             return
         if self.current_epoch < _LOSS_SPIKE_DEBUG_MIN_EPOCH:
             return
-        if np.isfinite(grad_norm_value) and grad_norm_value < _GRAD_SPIKE_DEBUG_THRESHOLD:
+        if (
+            np.isfinite(grad_norm_value)
+            and grad_norm_value < _GRAD_SPIKE_DEBUG_THRESHOLD
+        ):
             return
         if self._last_train_debug_context is None:
             return
@@ -1377,6 +1618,7 @@ class TrackingLightningModule(LightningModule):
     def on_train_epoch_start(self):
         self._edge_counts["train"] = {}
         self._assoc_time_counts["train"] = {}
+        self._dataset_assoc_counts["train"] = {}
         self._viz_epoch_count = 0
 
     def _maybe_save_window_viz(self, batch: dict) -> None:
@@ -1419,6 +1661,7 @@ class TrackingLightningModule(LightningModule):
     def on_validation_epoch_start(self):
         self._edge_counts["val"] = {}
         self._assoc_time_counts["val"] = {}
+        self._dataset_assoc_counts["val"] = {}
 
     def checkpoint_path(self, logdir):
         path = Path(logdir) / "checkpoints" / "last.ckpt"
@@ -1487,16 +1730,16 @@ class TrackingLightningModule(LightningModule):
         """Build the dataset_index -> source folder map and dump it once."""
         if self._batch_provenance_map_written or self.batch_provenance_path is None:
             return
-        self._batch_provenance_map_written = True
         if int(getattr(self.trainer, "global_rank", 0)) != 0:
+            self._batch_provenance_map_written = True
             return
-        mapping: dict[int, str] = {}
-        dm = getattr(self.trainer, "datamodule", None)
-        train_ds = getattr(dm, "datasets", {}).get("train") if dm is not None else None
-        for sub in getattr(train_ds, "datasets", []) or []:
-            mapping[int(getattr(sub, "dataset_index", -1))] = str(
-                getattr(sub, "root", "")
-            )
+        mapping = {
+            int(getattr(sub, "dataset_index", -1)): str(getattr(sub, "root", ""))
+            for sub in self._stage_subdatasets("train")
+        }
+        if not mapping:
+            return
+        self._batch_provenance_map_written = True
         self._batch_provenance_map = mapping
         path = self.batch_provenance_path / "batch_provenance_index.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1544,11 +1787,16 @@ class TrackingLightningModule(LightningModule):
         loss_value = self._maybe_save_loss_spike_debug("train", batch, batch_idx, out)
         self._last_train_debug_context = (batch, batch_idx, out, loss_value)
         if torch.isnan(loss):
-            logger.warning("NaN train loss at epoch=%s batch_idx=%s, skipping", self.current_epoch, batch_idx)
+            logger.warning(
+                "NaN train loss at epoch=%s batch_idx=%s, skipping",
+                self.current_epoch,
+                batch_idx,
+            )
             return None
 
         self._accumulate_edge_counts("train", out["edge_counts"])
         self._accumulate_assoc_time_counts("train", out["assoc_time_counts"])
+        self._accumulate_dataset_assoc_counts("train", out["dataset_assoc_counts"])
 
         self.log(
             "train_loss",
@@ -1626,7 +1874,11 @@ class TrackingLightningModule(LightningModule):
         loss = out["loss"]
         self._maybe_save_loss_spike_debug("val", batch, batch_idx, out)
         if torch.isnan(loss):
-            logger.warning("NaN validation loss at epoch=%s batch_idx=%s, skipping", self.current_epoch, batch_idx)
+            logger.warning(
+                "NaN validation loss at epoch=%s batch_idx=%s, skipping",
+                self.current_epoch,
+                batch_idx,
+            )
             return None
 
         self.log(
@@ -1642,6 +1894,7 @@ class TrackingLightningModule(LightningModule):
 
         self._accumulate_edge_counts("val", out["edge_counts"])
         self._accumulate_assoc_time_counts("val", out["assoc_time_counts"])
+        self._accumulate_dataset_assoc_counts("val", out["dataset_assoc_counts"])
 
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
@@ -1657,6 +1910,7 @@ class TrackingLightningModule(LightningModule):
         self._log_assoc_error_plot()
         self._log_assoc_time_plot()
         self._log_node_error_plot()
+        self._write_dataset_metrics()
 
         # Hack to make lightning progress bars with loss values persistent
         print(" ")
@@ -1664,7 +1918,7 @@ class TrackingLightningModule(LightningModule):
         if (
             _is_tracking_epoch(self.current_epoch, self.tracking_frequency)
             and self.trainer.is_global_zero
-            and self.tracking_input_paths
+            and self.tracking_inputs
         ):
             try:
                 metrics = self._run_tracking_eval()
@@ -1760,5 +2014,6 @@ class TrackingLightningModule(LightningModule):
                 pass
             else:
                 raise ValueError(f"Unknown logger {self.logger}")
+
 
 __all__ = ["TrackingLightningModule"]

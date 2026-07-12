@@ -52,6 +52,31 @@ def test_tracking_dataset_default_window_and_features():
     assert params["features"].default == "wrfeat2"
 
 
+def test_tracking_dataset_counts_max_detections_per_frame():
+    timepoints = np.array([0, 0, 0, 0, 1, 3, 3, 3], dtype=np.int64)
+    seg = DetectionSequence(
+        name="points",
+        n_frames=4,
+        coords=np.zeros((len(timepoints), 2), dtype=np.float32),
+        labels=np.arange(1, len(timepoints) + 1),
+        timepoints=timepoints,
+        features={},
+    )
+    relation = np.eye(len(timepoints), dtype=bool)
+    sequence = _sequence(seg, np.arange(len(timepoints)), relation)
+
+    uncapped = TrackingDataset(sequence, window_size=4, features="none")
+    capped = TrackingDataset(
+        sequence,
+        window_size=4,
+        features="none",
+        max_detections=2,
+    )
+
+    assert uncapped.n_objects == (8,)
+    assert capped.n_objects == (5,)  # min(4, 2) + min(1, 2) + 0 + min(3, 2)
+
+
 def test_tracking_dataset_augment_details_override_jitter_and_drift():
     lineage_index = np.array([0, 0], dtype=np.int64)
     seg = DetectionSequence(

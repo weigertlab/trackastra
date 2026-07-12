@@ -202,7 +202,8 @@ class BalancedBatchSampler(BatchSampler):
             ``(n_objects / median_n_objects) ** oversample_density`` renormalized to mean 1, so
             only the within-dataset distribution shifts toward denser (harder)
             windows -- the dataset mixture is preserved. 0 disables it. ``n_objects``
-            is the post-crop count already capped at ``max_detections``.
+            is the sum of the per-frame counts capped at ``max_detections``; lineage
+            closure may make the sampled window slightly larger.
         weight_by_dataset: if True, the probability of sampling an element is inversely proportional to the length of the dataset
         balance_batch_objects: if True, use a variable batch size so that the total
             number of detections per batch is held roughly constant (``batch_size``
@@ -252,9 +253,10 @@ class BalancedBatchSampler(BatchSampler):
         logger.debug(f"{oversample_density=}")
         logger.debug(f"{weight_by_dataset=}")
 
-        # Budget on the total number of detections per (padded) batch. Since
-        # n_objects is already capped at max_detections, this reflects the
-        # post-cap GPU-side size. batch_size stays the upper cap on item count.
+        # Budget on the estimated total number of detections per (padded) batch.
+        # n_objects applies max_detections per frame but does not predict additions
+        # from the random crop's lineage closure. batch_size stays the upper cap on
+        # item count.
         if balance_batch_objects and len(self.n_objects) > 0:
             n_ref = float(np.percentile(np.asarray(self.n_objects), balance_pct))
             self.object_budget = max(1.0, batch_size * n_ref)

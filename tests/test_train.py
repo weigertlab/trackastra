@@ -56,7 +56,7 @@ from trackastra.training import (
     parse_training_config,
     resolve_model_checkpoint_reference,
     resume_checkpoint_path,
-    tracking_input_paths_from_sources,
+    tracking_inputs_from_sources,
 )
 from trackastra.training.callbacks import EpochMetricsCSV, TrackastraModelCheckpoint
 from trackastra.training.lightning import TrackingLightningModule
@@ -656,8 +656,23 @@ def test_assoc_time_error_matrix_pools_normalized_stream_bins():
     assert labels == ["Fluo-N3DH-CE/01"]
     assert matrix.shape == (1, 3)
     assert matrix[0, 0] == pytest.approx(3 / 4)
-    assert np.isnan(matrix[0, 1])
+    # bin 1 has no timepoints (n_bins=3 exceeds the stream length); the interior
+    # gap is nearest-filled from the closest measured bin (tie -> earlier bin 0).
+    assert matrix[0, 1] == pytest.approx(3 / 4)
     assert matrix[0, 2] == pytest.approx(0.0)
+
+
+def test_nearest_fill_interior_only_fills_gaps_between_measurements():
+    fill = TrackingLightningModule._nearest_fill_interior
+    nan = np.nan
+    # interior gaps filled from nearest measured bin; ties -> earlier bin
+    out = fill(np.array([nan, 1.0, nan, nan, 5.0, nan], dtype=np.float32))
+    assert np.isnan(out[0]) and np.isnan(out[5])  # leading/trailing preserved
+    assert out[1] == pytest.approx(1.0)
+    assert out[2] == pytest.approx(1.0)  # equidistant -> earlier bin
+    assert out[3] == pytest.approx(5.0)
+    # all-NaN row is left untouched
+    assert np.all(np.isnan(fill(np.full(4, nan, dtype=np.float32))))
 
 
 def test_assoc_time_dataset_labels_are_compact():
@@ -670,6 +685,38 @@ def test_assoc_time_dataset_labels_are_compact():
         == "44b6_0113de3b"
     )
     assert TrackingLightningModule._short_dataset_label("", 4) == "4"
+
+
+def test_dataset_metric_rows_and_csv_upsert(tmp_path):
+    module = SimpleNamespace(
+        current_epoch=2,
+        global_step=17,
+        dataset_metrics_path=tmp_path / "debug" / "dataset_metrics.csv",
+        trainer=SimpleNamespace(is_global_zero=True),
+        _dataset_root_map_for_stage=lambda stage: {
+            3: f"data/{stage}/three",
+            4: f"data/{stage}/four",
+        },
+    )
+    counts = {
+        "train": {3: np.array([12, 100, 8, 1, 2, 3, 2, 1])},
+        "val": {4: np.array([4, 20, 2, 0, 0, 0, 0, 0])},
+    }
+    module._gather_dataset_assoc_counts = lambda: counts
+    module._dataset_metric_rows = lambda values: (
+        TrackingLightningModule._dataset_metric_rows(module, values)
+    )
+
+    TrackingLightningModule._write_dataset_metrics(module)
+    TrackingLightningModule._write_dataset_metrics(module)
+
+    metrics = pd.read_csv(module.dataset_metrics_path)
+    assert len(metrics) == 2
+    train = metrics[metrics["split"] == "train"].iloc[0]
+    assert train["dataset_root"] == "data/train/three"
+    assert train["sampled_windows"] == 12
+    assert train["regular_f1"] == pytest.approx(16 / 19)
+    assert train["division_jaccard"] == pytest.approx(3 / 6)
 
 
 class _SamplerDataset(Dataset):
@@ -961,7 +1008,8 @@ def test_degree_consistency_loss_teaches_edges_from_node_head():
     loss = lm._degree_consistency_loss(
         A_pred, out_logits, out_tgt, succ_avail, timepoints, mask, mask_invalid
     )
-    assert abs(loss.detach().item() - (0.6 - 2.0) ** 2) < 1e-3
+    # Smooth L1 is linear beyond beta=1: abs(0.6 - 2.0) - 0.5 = 0.9.
+    assert abs(loss.detach().item() - 0.9) < 1e-3
 
     loss.backward()
     # mutual consistency: gradients flow into both the edge logits and the node head
@@ -1010,9 +1058,9 @@ def test_degree_consistency_loss_weights_by_out_degree_class():
     # nodes 0,1 at t=0 each have one candidate successor (node 2 at t=1)
     A_pred = torch.full((1, 3, 3), torch.logit(torch.tensor(0.5)))
     out_logits = torch.zeros(1, 3, 3)
-    out_logits[0, 0, 2] = 10.0  # node 0 -> division, edge_out 0.5 vs 2.0 -> err 2.25
+    out_logits[0, 0, 2] = 10.0  # node 0 -> division, edge_out 0.5 vs 2.0 -> err 1.0
     out_logits[0, 1, 1] = (
-        10.0  # node 1 -> continuation, edge_out 0.5 vs 1.0 -> err 0.25
+        10.0  # node 1 -> continuation, edge_out 0.5 vs 1.0 -> err 0.125
     )
     timepoints = torch.tensor([[0, 0, 1]])
     mask = torch.zeros(1, 3, 3)
@@ -1025,18 +1073,17 @@ def test_degree_consistency_loss_weights_by_out_degree_class():
     loss = lm._degree_consistency_loss(
         A_pred, out_logits, out_tgt, succ_avail, timepoints, mask, mask_invalid
     )
-    # weighted mean = (9*2.25 + 1*0.25) / (9 + 1) = 2.05; unweighted mean = 1.25
-    assert abs(float(loss) - 2.05) < 1e-3
+    # weighted mean = (9*1.0 + 1*0.125) / (9 + 1) = 0.9125.
+    assert abs(float(loss) - 0.9125) < 1e-3
 
 
-def test_consistency_weight_requires_node_loss():
-    import pytest
-
+def test_consistency_weight_is_inactive_without_node_loss():
     model = TrackingTransformer(
         coord_dim=2, feat_dim=4, d_model=16, num_encoder_layers=1, num_decoder_layers=1
     )
-    with pytest.raises(ValueError, match="requires node_loss"):
-        TrackingLightningModule(model, consistency_weight=1.0, node_loss=0.0)
+    module = TrackingLightningModule(model, consistency_weight=1.0, node_loss=0.0)
+
+    assert module.consistency_weight == 0.0
 
 
 def test_balanced_batch_sampler_partial_batch():
@@ -1108,6 +1155,102 @@ def test_write_sampler_prob_debug_csv(tmp_path):
     for _dataset_index, group in df.groupby("dataset_index"):
         assert group["sample_prob_within_dataset"].sum() == pytest.approx(1.0)
         assert group["dataset_prob_mass"].nunique() == 1
+
+
+def test_write_dataset_summary_debug_csv(tmp_path):
+    segment = DetectionSequence(
+        name="points",
+        n_frames=2,
+        coords=np.array([[0, 0], [5, 0], [0.5, 0], [5.5, 0]], dtype=np.float32),
+        labels=np.array([1, 2, 1, 2]),
+        timepoints=np.array([0, 0, 1, 1], dtype=np.int64),
+        features={"intensity": np.ones((4, 1), dtype=np.float32)},
+    )
+    sequence = TrackingSequence(
+        root=Path("toy.geff"),
+        ndim=2,
+        detections=(segment,),
+        gt=LineageGraph(
+            coords=np.array([[0, 0], [0.5, 0]], dtype=np.float32),
+            timepoints=np.array([0, 1]),
+            node_ids=np.array(["a", "b"]),
+            lineage_relation=np.eye(1, dtype=bool),
+            lineage_parents=np.array([-1]),
+            node_in_degree=np.array([0, 1]),
+            node_out_degree=np.array([1, 0]),
+            node_predecessor_set_available=np.array([False, True]),
+            node_successor_set_available=np.array([True, False]),
+        ),
+        supervision=(
+            DetectionSupervision(
+                lineage_index=np.array([0, -1, 0, -1]),
+                gt_node_index=np.array([0, -1, 1, -1]),
+                matched_gt=np.array([True, False, True, False]),
+                gt_predecessor_set_available=np.array([False, False, True, False]),
+                gt_successor_set_available=np.array([True, False, False, False]),
+            ),
+        ),
+    )
+    dataset = ConcatDataset(
+        [
+            TrackingDataset(
+                sequence,
+                window_size=2,
+                features="intensity",
+                max_detections=1,
+            )
+        ]
+    )
+    sampler = BalancedBatchSampler(dataset, batch_size=1, num_samples=5)
+    loader = DataLoader(dataset, batch_sampler=sampler)
+    path = tmp_path / "debug" / "dataset_summary.csv"
+
+    training_api._write_dataset_summary_debug(
+        loader,
+        path,
+        candidate_k=1,
+        candidate_mode="per_frame",
+        spatial_cutoff=1.0,
+        delta_cutoff=1,
+    )
+
+    row = pd.read_csv(path).iloc[0]
+    assert row["dataset_root"] == "toy.geff"
+    assert row["source_format"] == "geff"
+    assert row["expected_samples_per_epoch"] == pytest.approx(5.0)
+    assert row["matched_detection_fraction"] == pytest.approx(0.5)
+    assert row["matched_gt_node_fraction"] == pytest.approx(1.0)
+    assert row["candidate_recall_at_k"] == pytest.approx(1.0)
+    assert row["cutoff_recall"] == pytest.approx(1.0)
+    assert bool(row["intensity_available"])
+    assert not bool(row["shape_available"])
+
+
+def test_dataset_assoc_counts_group_by_dataset_and_link_type():
+    timepoints = torch.tensor([[0, 1, 1], [0, 1, 1]])
+    dataset_index = torch.tensor([3, 4])
+    A = torch.zeros((2, 3, 3))
+    A[0, 0, 1] = 1
+    A[1, 0, 1:] = 1
+    prob = torch.zeros_like(A)
+    prob[0, 0, 1:] = 0.9
+    prob[1, 0, 1] = 0.9
+    mask = torch.zeros_like(A)
+    mask[:, 0, 1:] = 1
+    gt_division = torch.zeros_like(A, dtype=torch.bool)
+    gt_division[1, 0, 1:] = True
+
+    counts = TrackingLightningModule._dataset_assoc_counts_for_batch(
+        A,
+        prob,
+        timepoints,
+        mask,
+        gt_division,
+        dataset_index,
+    )
+
+    np.testing.assert_array_equal(counts[3], np.array([1, 2, 1, 0, 0, 0, 1, 0]))
+    np.testing.assert_array_equal(counts[4], np.array([1, 2, 0, 0, 0, 1, 0, 1]))
 
 
 def test_balanced_batch_sampler_iter_len_match_variable_batch():
@@ -1804,6 +1947,7 @@ def test_configure_lightning_module_runtime_paths(tmp_path):
     assert module.loss_spike_debug_dir == tmp_path / "debug" / "debug_loss_spikes"
     assert module.batch_provenance_path == tmp_path / "debug"
     assert module.viz_debug_dir == tmp_path / "debug" / "viz"
+    assert module.dataset_metrics_path == tmp_path / "debug" / "dataset_metrics.csv"
     assert module.tracking_metrics_path == tmp_path / "metrics"
 
     configure_lightning_module_runtime_paths(
@@ -1815,6 +1959,7 @@ def test_configure_lightning_module_runtime_paths(tmp_path):
     assert module.loss_spike_debug_dir is None
     assert module.batch_provenance_path is None
     assert module.viz_debug_dir is None
+    assert module.dataset_metrics_path is None
     assert module.tracking_metrics_path is None
 
 
@@ -1925,8 +2070,9 @@ cachedir: sequence-cache
     assert train_config.batch_size == 3
     assert train_config.resume is False
     assert train_config.cache_dir == Path("sequence-cache")
+    assert train_config.loss_kwargs["consistency_weight"] == 0.1
     assert train_config.tracking_kwargs["tracking_frequency"] == 2
-    assert train_config.tracking_kwargs["tracking_input_paths"] == []
+    assert train_config.tracking_kwargs["tracking_inputs"] == []
     assert train_config.tracking_kwargs["inference_config"] == {
         "features": "wrfeat2_no_intensity",
         "normalize_diameter": 14,
@@ -1936,6 +2082,31 @@ cachedir: sequence-cache
     }
     assert "feature_embed_mode" not in train_config.runtime_kwargs["training_args"]
     assert "feat_embed_per_dim" not in train_config.runtime_kwargs["training_args"]
+
+
+def test_parse_training_config_rejects_model_with_resume(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("{}")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(config),
+            "--model",
+            "pretrained-model",
+            "--resume",
+            "t",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="--model/-m and --resume cannot") as error:
+        parse_training_config()
+
+    message = str(error.value)
+    assert "--timestamp f" in message
+    assert "checkpoints/last.ckpt" in message
+    assert "architecture settings unchanged" in message
 
 
 def test_balanced_datamodule_uses_split_kwargs(monkeypatch):
@@ -2205,17 +2376,31 @@ def test_balanced_datamodule_cache_wraps_concrete_loaders(monkeypatch, tmp_path)
     ]
 
 
-def test_tracking_input_paths_filter_geff_sources(tmp_path):
+def test_tracking_inputs_filter_geff_sources(tmp_path):
     ctc_root = tmp_path / "ctc"
     geff_root = tmp_path / "movie"
 
-    assert tracking_input_paths_from_sources(
+    assert tracking_inputs_from_sources(
         [
             {"format": "ctc", "kwargs": {"root": ctc_root}},
             {"format": "geff", "kwargs": {"root_or_geff": geff_root}},
         ],
         tracking_frequency=1,
-    ) == [ctc_root]
+    ) == [{"root": ctc_root, "spacing": None}]
+
+
+def test_tracking_inputs_carry_spacing(tmp_path):
+    ctc_root = tmp_path / "ctc"
+
+    assert tracking_inputs_from_sources(
+        [
+            {
+                "format": "ctc",
+                "kwargs": {"root": ctc_root, "spacing": (1.625, 0.40625, 0.40625)},
+            }
+        ],
+        tracking_frequency=1,
+    ) == [{"root": ctc_root, "spacing": [1.625, 0.40625, 0.40625]}]
 
 
 def download_gt_data(url: str, data_dir: str | Path):

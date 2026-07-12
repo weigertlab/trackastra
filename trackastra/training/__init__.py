@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import logging
 import os
 import warnings
@@ -13,9 +12,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import joblib
+import pandas as pd
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from trackastra import model as model_api
+from trackastra.data import wrfeat
 from trackastra.data.dataset import TrackingDataset, collate_sequence_padding
 from trackastra.data.distributed import (
     BalancedBatchSampler,
@@ -119,7 +120,9 @@ class TrackingDatasetBundle:
             return self._train_dataloader(loader_kwargs, distributed=distributed)
         return self._val_dataloader(loader_kwargs)
 
-    def _train_dataloader(self, loader_kwargs: dict[str, Any], *, distributed: bool) -> DataLoader:
+    def _train_dataloader(
+        self, loader_kwargs: dict[str, Any], *, distributed: bool
+    ) -> DataLoader:
         if distributed:
             sampler = BalancedDistributedSampler(
                 self.dataset,
@@ -148,7 +151,9 @@ class TrackingDatasetBundle:
     def _val_dataloader(self, loader_kwargs: dict[str, Any]) -> DataLoader:
         loader_kwargs["persistent_workers"] = False
         num_workers = loader_kwargs.get("num_workers", 0)
-        loader_kwargs["num_workers"] = 0 if num_workers == 0 else max(1, num_workers // 2)
+        loader_kwargs["num_workers"] = (
+            0 if num_workers == 0 else max(1, num_workers // 2)
+        )
         return DataLoader(
             self.dataset,
             shuffle=False,
@@ -249,12 +254,16 @@ def _input_label(item: object) -> str:
     return repr(item)
 
 
-def tracking_input_paths_from_sources(
+def tracking_inputs_from_sources(
     sources: Sequence[Mapping[str, Any]],
     tracking_frequency: int,
-) -> list[Path]:
-    """Return CTC validation roots from normalized sources."""
-    paths = []
+) -> list[dict[str, Any]]:
+    """Return CTC validation roots and their spacing from normalized sources.
+
+    The spacing is carried along so full-movie tracking validation extracts
+    features in the same model units the windowed dataset trains on.
+    """
+    inputs = []
     skipped_geff = []
     for source in sources:
         fmt = source.get("format")
@@ -264,7 +273,13 @@ def tracking_input_paths_from_sources(
             continue
         if fmt != "ctc":
             raise ValueError(f"Unknown source format {fmt!r}")
-        paths.append(Path(kwargs["root"]))
+        spacing = kwargs.get("spacing")
+        inputs.append(
+            {
+                "root": Path(kwargs["root"]),
+                "spacing": None if spacing is None else [float(s) for s in spacing],
+            }
+        )
     if tracking_frequency > 0 and skipped_geff:
         logger.warning(
             "full-movie tracking validation is CTC-only; skipping %d GEFF validation"
@@ -272,7 +287,7 @@ def tracking_input_paths_from_sources(
             len(skipped_geff),
             ", ".join(skipped_geff),
         )
-    return paths
+    return inputs
 
 
 def normalize_source_specs(
@@ -441,13 +456,12 @@ def _write_sampler_prob_debug(loader: DataLoader, path: Path | str | None) -> No
         probs = sampler.get_probs(idxs)
         for i, prob in zip(idxs, probs):
             within_dataset_probs[i] = float(prob)
-        dataset_prob_mass[dataset_index] = float(sum(float(global_probs[i]) for i in idxs))
+        dataset_prob_mass[dataset_index] = float(
+            sum(float(global_probs[i]) for i in idxs)
+        )
 
     datasets = getattr(getattr(loader, "dataset", None), "datasets", [])
-    roots = {
-        i: str(getattr(dataset, "root", ""))
-        for i, dataset in enumerate(datasets)
-    }
+    roots = {i: str(getattr(dataset, "root", "")) for i, dataset in enumerate(datasets)}
     local_index_by_dataset: dict[int, int] = {}
     rows = []
     for global_index in all_indices:
@@ -474,10 +488,309 @@ def _write_sampler_prob_debug(loader: DataLoader, path: Path | str | None) -> No
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def _percentile(values: Any, q: float) -> float:
+    """Return one percentile, or NaN for an empty array."""
+    import numpy as np
+
+    values = np.asarray(values)
+    return float(np.percentile(values, q)) if values.size else float("nan")
+
+
+def _positive_detection_edges(
+    dataset: TrackingDataset,
+    *,
+    delta_cutoff: int,
+) -> list[tuple[int, int, int]]:
+    """Return positive detection edges as ``(segment, source, target)``."""
+    import numpy as np
+
+    relation = dataset.sequence.gt.lineage_relation
+    edges = []
+    for seg_index, (segment, supervision) in enumerate(
+        zip(dataset.sequence.detections, dataset.sequence.supervision)
+    ):
+        if supervision is None:
+            continue
+        lineage = np.asarray(supervision.lineage_index)
+        matched = lineage >= 0
+        times = np.asarray(segment.timepoints)
+        for source_time in np.unique(times[matched]):
+            source = np.flatnonzero((times == source_time) & matched)
+            for delta in range(1, delta_cutoff + 1):
+                target = np.flatnonzero((times == source_time + delta) & matched)
+                if not len(target):
+                    continue
+                rows, cols = np.nonzero(
+                    relation[np.ix_(lineage[source], lineage[target])]
+                )
+                edges.extend(
+                    (seg_index, int(source[row]), int(target[col]))
+                    for row, col in zip(rows, cols)
+                )
+    return edges
+
+
+def _candidate_link_audit(
+    dataset: TrackingDataset,
+    *,
+    candidate_k: int,
+    candidate_mode: str,
+    spatial_cutoff: float,
+    delta_cutoff: int,
+    max_edges: int = 10_000,
+) -> dict[str, float | int]:
+    """Audit a bounded deterministic sample of positive links against target-frame kNN."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    edges = _positive_detection_edges(dataset, delta_cutoff=delta_cutoff)
+    n_positive = len(edges)
+    if n_positive > max_edges:
+        take = np.linspace(0, n_positive - 1, max_edges, dtype=np.int64)
+        edges = [edges[i] for i in take]
+
+    hits = 0
+    within_cutoff = 0
+    distances = []
+    for seg_index in range(len(dataset.sequence.detections)):
+        segment = dataset.sequence.detections[seg_index]
+        coords = np.asarray(segment.coords)
+        times = np.asarray(segment.timepoints)
+        segment_edges = [
+            (source, target) for seg, source, target in edges if seg == seg_index
+        ]
+        for target_time in sorted({int(times[target]) for _, target in segment_edges}):
+            target_frame = np.flatnonzero(times == target_time)
+            current = [
+                (source, target)
+                for source, target in segment_edges
+                if int(times[target]) == target_time
+            ]
+            if not current or not len(target_frame):
+                continue
+            local_target = {int(index): i for i, index in enumerate(target_frame)}
+            sources = np.asarray([source for source, _ in current], dtype=np.int64)
+            targets = np.asarray([target for _, target in current], dtype=np.int64)
+            distance = np.linalg.norm(coords[targets] - coords[sources], axis=1)
+            distances.extend(distance.tolist())
+            within_cutoff += int(np.sum(distance <= spatial_cutoff))
+
+            if candidate_mode in ("per_frame", "next_frame"):
+                k = min(candidate_k, len(target_frame))
+                _distance, neighbors = cKDTree(coords[target_frame]).query(
+                    coords[sources], k=k
+                )
+                neighbors = np.asarray(neighbors)
+                if neighbors.ndim == 1:
+                    neighbors = neighbors[:, None]
+                target_local = np.asarray(
+                    [local_target[int(target)] for target in targets]
+                )
+                hits += int(np.sum(np.any(neighbors == target_local[:, None], axis=1)))
+
+    audited = len(edges)
+    return {
+        "positive_edges": n_positive,
+        "candidate_edges_audited": audited,
+        "candidate_recall_at_k": (
+            hits / audited
+            if audited and candidate_mode in ("per_frame", "next_frame")
+            else float("nan")
+        ),
+        "cutoff_recall": within_cutoff / audited if audited else float("nan"),
+        "positive_distance_p50": _percentile(distances, 50),
+        "positive_distance_p90": _percentile(distances, 90),
+        "positive_distance_p99": _percentile(distances, 99),
+    }
+
+
+def _dataset_summary_rows(
+    loader: DataLoader,
+    *,
+    candidate_k: int,
+    candidate_mode: str,
+    spatial_cutoff: float,
+    delta_cutoff: int,
+    max_candidate_edges: int = 10_000,
+) -> list[dict[str, Any]]:
+    """Build one cheap diagnostic row per training dataset."""
+    import numpy as np
+
+    sampler = _balanced_sampler_from_loader(loader)
+    datasets = getattr(getattr(loader, "dataset", None), "datasets", [])
+    if sampler is None or not datasets:
+        return []
+
+    all_indices = np.arange(len(sampler.n_objects))
+    global_probs = sampler.get_probs(all_indices)
+    expected_samples = (
+        int(sampler.num_samples)
+        if sampler.num_samples is not None
+        else len(all_indices)
+    )
+    rows = []
+    for dataset_index, dataset in enumerate(datasets):
+        window_mask = np.asarray(sampler.dataset_ids) == dataset_index
+        window_objects = np.asarray(sampler.n_objects)[window_mask]
+        window_divs = np.asarray(sampler.n_divs)[window_mask]
+        sample_weights = np.asarray(sampler.sample_weight)[window_mask]
+        probability_mass = float(global_probs[window_mask].sum())
+
+        frame_counts = []
+        feature_sets = []
+        matched_count = 0
+        matched_gt_nodes = set()
+        predecessor_available = []
+        successor_available = []
+        for segment, supervision in zip(
+            dataset.sequence.detections, dataset.sequence.supervision
+        ):
+            feature_sets.append(set(segment.features))
+            frame_counts.extend(
+                int(np.sum(segment.timepoints == time))
+                for time in range(segment.n_frames)
+            )
+            if supervision is None:
+                continue
+            matched = (
+                np.asarray(supervision.matched_gt, dtype=bool)
+                if supervision.matched_gt is not None
+                else np.asarray(supervision.lineage_index) >= 0
+            )
+            matched_count += int(matched.sum())
+            if supervision.gt_node_index is not None:
+                matched_gt_nodes.update(
+                    int(index)
+                    for index in np.asarray(supervision.gt_node_index)[matched]
+                    if index >= 0
+                )
+            if supervision.gt_predecessor_set_available is not None:
+                predecessor_available.extend(
+                    np.asarray(supervision.gt_predecessor_set_available)[
+                        matched
+                    ].tolist()
+                )
+            if supervision.gt_successor_set_available is not None:
+                successor_available.extend(
+                    np.asarray(supervision.gt_successor_set_available)[matched].tolist()
+                )
+
+        n_detections = sum(len(segment) for segment in dataset.sequence.detections)
+        feature_properties = set.intersection(*feature_sets) if feature_sets else set()
+        gt = dataset.sequence.gt
+        if gt.node_out_degree is None or gt.node_successor_set_available is None:
+            division_nodes = 0
+            eligible_division_nodes = 0
+        else:
+            gt_successor_available = np.asarray(
+                gt.node_successor_set_available, dtype=bool
+            )
+            division_nodes = int(
+                np.sum((gt.node_out_degree >= 2) & gt_successor_available)
+            )
+            eligible_division_nodes = int(gt_successor_available.sum())
+        shape_properties = set(wrfeat.FEATURE_DROP_GROUPS["shape"])
+        audit = _candidate_link_audit(
+            dataset,
+            candidate_k=candidate_k,
+            candidate_mode=candidate_mode,
+            spatial_cutoff=spatial_cutoff,
+            delta_cutoff=delta_cutoff,
+            max_edges=max_candidate_edges,
+        )
+        rows.append(
+            {
+                "dataset_index": dataset_index,
+                "dataset_root": str(dataset.root),
+                "source_format": "geff"
+                if Path(dataset.root).suffix == ".geff"
+                else "ctc",
+                "n_frames": max(seg.n_frames for seg in dataset.sequence.detections),
+                "n_windows": int(window_mask.sum()),
+                "sample_probability_mass": probability_mass,
+                "expected_samples_per_epoch": probability_mass * expected_samples,
+                "n_detections": n_detections,
+                "detections_per_frame_p50": _percentile(frame_counts, 50),
+                "detections_per_frame_p90": _percentile(frame_counts, 90),
+                "detections_per_frame_max": max(frame_counts, default=0),
+                "crop_pressure_fraction": (
+                    float(np.mean(np.asarray(frame_counts) > dataset.max_detections))
+                    if dataset.max_detections is not None and frame_counts
+                    else 0.0
+                ),
+                "window_objects_p50": _percentile(window_objects, 50),
+                "window_objects_p90": _percentile(window_objects, 90),
+                "window_divisions_mean": float(window_divs.mean()),
+                "window_divisions_max": int(window_divs.max(initial=0)),
+                "division_window_fraction": float(np.mean(window_divs > 0)),
+                "sample_weight_mean": float(sample_weights.mean()),
+                "n_gt_nodes": len(gt.coords),
+                "n_matched_detections": matched_count,
+                "matched_detection_fraction": matched_count / n_detections
+                if n_detections
+                else 0.0,
+                "matched_gt_node_fraction": (
+                    len(matched_gt_nodes) / len(gt.coords)
+                    if len(gt.coords)
+                    else float("nan")
+                ),
+                "predecessor_available_fraction": (
+                    float(np.mean(predecessor_available))
+                    if predecessor_available
+                    else float("nan")
+                ),
+                "successor_available_fraction": (
+                    float(np.mean(successor_available))
+                    if successor_available
+                    else float("nan")
+                ),
+                "division_nodes": division_nodes,
+                "division_nodes_per_1000": (
+                    1000 * division_nodes / eligible_division_nodes
+                    if eligible_division_nodes
+                    else float("nan")
+                ),
+                "intensity_available": wrfeat.FEATURE_INTENSITY in feature_properties,
+                "shape_available": shape_properties.issubset(feature_properties),
+                "feature_properties": ";".join(sorted(feature_properties)),
+                "candidate_k": candidate_k,
+                "candidate_mode": candidate_mode,
+                "spatial_cutoff": spatial_cutoff,
+                **audit,
+            }
+        )
+    return rows
+
+
+def _write_dataset_summary_debug(
+    loader: DataLoader,
+    path: Path | str | None,
+    *,
+    candidate_k: int,
+    candidate_mode: str,
+    spatial_cutoff: float,
+    delta_cutoff: int,
+    max_candidate_edges: int = 10_000,
+) -> None:
+    """Write one default startup diagnostic row per training dataset."""
+    if path is None or int(os.environ.get("RANK", "0")) != 0:
+        return
+    rows = _dataset_summary_rows(
+        loader,
+        candidate_k=candidate_k,
+        candidate_mode=candidate_mode,
+        spatial_cutoff=spatial_cutoff,
+        delta_cutoff=delta_cutoff,
+        max_candidate_edges=max_candidate_edges,
+    )
+    if not rows:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
 
 
 def _dataset_feature_dim(dataset: Any) -> int | None:
@@ -493,7 +806,9 @@ def _dataset_feature_dim(dataset: Any) -> int | None:
     if not dims:
         return None
     if len(dims) > 1:
-        raise ValueError(f"Training datasets have inconsistent feature dimensions: {sorted(dims)}")
+        raise ValueError(
+            f"Training datasets have inconsistent feature dimensions: {sorted(dims)}"
+        )
     return next(iter(dims))
 
 
@@ -565,7 +880,9 @@ def resolve_model_checkpoint_reference(path: Path | str) -> tuple[Path, Path | N
     path = Path(path).expanduser()
     if path.is_dir():
         if not (path / "config.yaml").exists():
-            raise FileNotFoundError(f"Could not find model config: {path / 'config.yaml'}")
+            raise FileNotFoundError(
+                f"Could not find model config: {path / 'config.yaml'}"
+            )
         return path, None
     if not path.is_file():
         raise FileNotFoundError(f"Could not find model path: {path}")
@@ -611,7 +928,9 @@ def _validate_model_config(folder: Path, expected_config: Mapping[str, Any]) -> 
 
     errors = []
     for key, value in loaded_config.items():
-        if key in expected_config and not _config_values_match(value, expected_config[key]):
+        if key in expected_config and not _config_values_match(
+            value, expected_config[key]
+        ):
             errors.append(
                 f"Loaded model config {key}={value}, but current config "
                 f"{key}={expected_config[key]}."
@@ -719,8 +1038,12 @@ class TrackastraTrainer:
             model_config = getattr(model, "config", {}) or {}
             n_in = model_config.get("max_in_degree", 1) + 1
             n_out = model_config.get("max_out_degree", 2) + 1
-            module_kwargs["node_in_weights"] = node_degree_class_weights(in_counts, n_in)
-            module_kwargs["node_out_weights"] = node_degree_class_weights(out_counts, n_out)
+            module_kwargs["node_in_weights"] = node_degree_class_weights(
+                in_counts, n_in
+            )
+            module_kwargs["node_out_weights"] = node_degree_class_weights(
+                out_counts, n_out
+            )
             logger.info(
                 "Node in-degree class weights: %s (counts=%s)",
                 module_kwargs["node_in_weights"].tolist(),
@@ -746,7 +1069,9 @@ class TrackastraTrainer:
         resume_path = (
             ckpt_path
             if ckpt_path is not None
-            else resume_checkpoint_path(logdir=runtime.logdir, resume=self.config.resume)
+            else resume_checkpoint_path(
+                logdir=runtime.logdir, resume=self.config.resume
+            )
         )
         train_loader = train_dataset.dataloader(distributed=self.config.distributed)
         _write_sampler_prob_debug(
@@ -754,6 +1079,27 @@ class TrackastraTrainer:
             None
             if runtime.logdir is None
             else Path(runtime.logdir) / "debug" / "sampling_probs.csv",
+        )
+        model_config = getattr(model, "config", {}) or {}
+        max_neighbors = model_config.get("max_neighbors", (16,))
+        candidate_k = (
+            int(max_neighbors)
+            if isinstance(max_neighbors, int)
+            else max(int(value) for value in max_neighbors)
+        )
+        _write_dataset_summary_debug(
+            train_loader,
+            None
+            if runtime.logdir is None
+            else Path(runtime.logdir) / "debug" / "dataset_summary.csv",
+            candidate_k=candidate_k,
+            candidate_mode=(
+                str(model_config.get("sparse_knn_mode", "global"))
+                if model_config.get("attn_mode") == "sparse"
+                else "dense"
+            ),
+            spatial_cutoff=float(model_config.get("spatial_cutoff", float("inf"))),
+            delta_cutoff=int(module_kwargs.get("delta_cutoff", 1)),
         )
         result = trainer.fit(
             lightning_module,
@@ -803,6 +1149,14 @@ def _training_config_from_args(
     args: Any,
 ) -> tuple[model_api.ModelConfig, DataSplitConfig, DataSplitConfig, TrainConfig]:
     """Convert parsed training CLI args into public config objects."""
+    if args.model is not None and args.resume:
+        raise ValueError(
+            "--model/-m and --resume cannot be used together. Use --model without "
+            "--resume to initialize a new run. To resume, omit --model, set "
+            "--timestamp f, set --name to the exact existing run-directory name "
+            "under --outdir, keep the model architecture settings unchanged, and "
+            "ensure <outdir>/<name>/checkpoints/last.ckpt exists."
+        )
     if not 0 <= args.feature_drop <= 1:
         raise ValueError(f"feature_drop must be in [0, 1], got {args.feature_drop}")
     if args.feature_drop > 0 and args.features not in (
@@ -949,7 +1303,7 @@ def _training_config_from_args(
         },
         tracking_kwargs={
             "tracking_frequency": args.tracking_frequency,
-            "tracking_input_paths": tracking_input_paths_from_sources(
+            "tracking_inputs": tracking_inputs_from_sources(
                 val_data_config.sources,
                 tracking_frequency=args.tracking_frequency,
             ),

@@ -57,7 +57,9 @@ def create_run_name(name: str | None, *, timestamp: bool) -> str:
 
 
 @rank_zero_only
-def _init_wandb(project: str, name: str, config: dict[str, Any], save_dir: Path) -> None:
+def _init_wandb(
+    project: str, name: str, config: dict[str, Any], save_dir: Path
+) -> None:
     import wandb
 
     _ = wandb.init(project=project, name=name, config=config, dir=save_dir)
@@ -208,4 +210,9 @@ def configure_lightning_module_runtime_paths(
         module.loss_spike_debug_dir = None
         module.batch_provenance_path = None
         module.viz_debug_dir = None
-    module.tracking_metrics_path = Path(logdir) / "metrics" if logdir is not None else None
+    module.dataset_metrics_path = (
+        Path(logdir) / "debug" / "dataset_metrics.csv" if logdir is not None else None
+    )
+    module.tracking_metrics_path = (
+        Path(logdir) / "metrics" if logdir is not None else None
+    )

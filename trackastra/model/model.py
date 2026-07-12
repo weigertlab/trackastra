@@ -73,14 +73,24 @@ class ModelConfig:
     model_path: Path | None = None
 
     def transformer_kwargs(self) -> dict[str, Any]:
-        """Return kwargs accepted by TrackingTransformer."""
+        """Return resolved kwargs accepted and saved by TrackingTransformer."""
+        num_decoder_layers = self.num_decoder_layers
+        if self.encoder_only:
+            num_decoder_layers = 0
+        elif num_decoder_layers is None:
+            num_decoder_layers = self.num_encoder_layers
+
+        max_neighbors = self.max_neighbors
+        if len(max_neighbors) == 1:
+            max_neighbors = (max_neighbors[0], max_neighbors[0])
+
         return {
             "coord_dim": self.coord_dim,
             "feat_dim": self.feat_dim,
             "d_model": self.d_model,
             "pos_embed_per_dim": self.pos_embed_per_dim,
             "num_encoder_layers": self.num_encoder_layers,
-            "num_decoder_layers": self.num_decoder_layers,
+            "num_decoder_layers": num_decoder_layers,
             "dropout": self.dropout,
             "window": self.window,
             "spatial_cutoff": self.spatial_cutoff,
@@ -88,7 +98,7 @@ class ModelConfig:
             "attn_positional_bias_n_spatial": self.attn_positional_bias_n_spatial,
             "attn_dist_mode": self.attn_dist_mode,
             "attn_mode": self.attn_mode,
-            "max_neighbors": self.max_neighbors,
+            "max_neighbors": max_neighbors,
             "sparse_knn_mode": self.sparse_knn_mode,
             "logit_norm": self.logit_norm,
             "head_mode": self.head_mode,

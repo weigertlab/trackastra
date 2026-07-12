@@ -1,9 +1,19 @@
-"""Predict and evaluate Trackastra models on configured CTC test movies."""
+"""Predict and evaluate Trackastra models on configured CTC test movies.
+
+Two input modes:
+
+* ``--input_test`` (normally from the config): CTC-like movie roots with ground
+  truth. Tracks and evaluates against the GT ``TRA`` folder.
+* ``--imgs``/``--masks``: a raw image/mask folder (or single ``T,(Z),Y,X`` tiff)
+  pair with no ground truth. Tracks and writes CTC results only.
+"""
 
 import argparse
+import shutil
 from pathlib import Path
 
 import configargparse
+import numpy as np
 import pandas as pd
 from trackastra.utils import str2bool
 
@@ -16,19 +26,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ignore_unknown_config_file_keys=True,
         allow_abbrev=False,
     )
-    parser.add_argument(
-        "-c", "--config", required=True, is_config_file=True, help="YAML config path"
-    )
+    parser.add_argument("-c", "--config", is_config_file=True, help="YAML config path")
     parser.add_argument("-m", "--model", required=True, help="model folder or name")
     parser.add_argument(
         "-o", "--outdir", type=Path, default=Path("predictions"), help="CTC results"
     )
     parser.add_argument(
+        "-n",
+        "--name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the movie output folder, i.e. results go to OUTDIR/<model>/NAME. "
+            "Defaults to the movie folder name (CTC) or the mask folder's parent "
+            "(--masks). Only valid for a single input movie."
+        ),
+    )
+    parser.add_argument(
         "--input_test",
         type=Path,
         nargs="+",
-        required=True,
-        help="test movie roots (normally read from the config)",
+        default=None,
+        help="test movie roots with ground truth (normally read from the config)",
+    )
+    parser.add_argument(
+        "-i",
+        "--imgs",
+        "--img",
+        dest="imgs",
+        type=Path,
+        default=None,
+        help=(
+            "image folder or single T,(Z),Y,X tiff. Use with --masks to track a movie "
+            "that has no ground truth; evaluation, errors.csv and error.mp4 are skipped."
+        ),
+    )
+    parser.add_argument(
+        "--masks",
+        "--mask",
+        dest="masks",
+        type=Path,
+        default=None,
+        help=(
+            "mask folder or single T,(Z),Y,X tiff. Selects predict-only mode "
+            "(no evaluation). --imgs may be omitted for a mask-only model."
+        ),
     )
     parser.add_argument(
         "--detection-folder",
@@ -77,9 +119,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.0,
         help=(
-            "Single weight (lambda) applied to all node-degree priors "
+            "Shared weight (lambda) applied to all node-degree priors "
             "(appear/disappear/split) in greedy or ILP tracking. 0 disables them "
             "(default). Requires a model trained with node_head=True."
+        ),
+    )
+    for prior in ("appear", "disappear", "split"):
+        parser.add_argument(
+            f"--lam_{prior}",
+            f"--lam-{prior}",
+            dest=f"lam_{prior}",
+            type=float,
+            default=None,
+            help=f"Weight for the {prior} node-degree prior; overrides --node_prior.",
+        )
+    parser.add_argument(
+        "--geff",
+        type=str2bool,
+        default=True,
+        help=(
+            "also write the tracks as a GEFF zarr store next to the CTC folder, "
+            "i.e. OUTDIR/<model>/<movie>.geff"
         ),
     )
     parser.add_argument("-f", "--overwrite", action="store_true")
@@ -98,47 +158,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="write errors.csv with official CTC FN/FP/WS edges and model diagnostics",
     )
     return parser.parse_args(argv)
-
-
-def resolve_ctc_paths(root: Path, detection_folder: str) -> tuple[Path, Path, Path]:
-    """Resolve image, detection, and ground-truth TRA paths for common CTC layouts."""
-    root = root.expanduser()
-    if root.name == "TRA":
-        gt_path = root
-        gt_root = root.parent
-        sequence = (
-            gt_root.parent / gt_root.name.removesuffix("_GT")
-            if gt_root.name.endswith("_GT")
-            else gt_root
-        )
-    elif root.name.endswith("_GT"):
-        gt_path = root / "TRA"
-        sequence = root.parent / root.name.removesuffix("_GT")
-    else:
-        sequence = root
-        ctc_gt = Path(f"{sequence}_GT") / "TRA"
-        gt_path = ctc_gt if ctc_gt.exists() else sequence / "TRA"
-
-    image_path = sequence / "img" if (sequence / "img").exists() else sequence
-    if detection_folder == "TRA":
-        mask_path = gt_path
-    else:
-        candidates = (
-            sequence / detection_folder,
-            Path(f"{sequence}_{detection_folder}"),
-            Path(f"{sequence}_ST") / detection_folder,
-            Path(f"{sequence}_GT") / detection_folder,
-        )
-        mask_path = next((path for path in candidates if path.exists()), candidates[0])
-
-    for kind, path in (
-        ("image", image_path),
-        ("detection", mask_path),
-        ("ground-truth TRA", gt_path),
-    ):
-        if not path.exists():
-            raise FileNotFoundError(f"Could not find {kind} path for {root}: {path}")
-    return image_path, mask_path, gt_path
 
 
 def ctc_metrics_from_data(
@@ -199,7 +218,9 @@ def link_type_breakdown(matched) -> dict[str, float]:
     gt, pred = matched.gt_graph, matched.pred_graph
 
     def n_division(graph, edges):
-        return sum(1 for source, _target in edges if graph.graph.out_degree(source) >= 2)
+        return sum(
+            1 for source, _target in edges if graph.graph.out_degree(source) >= 2
+        )
 
     gt_div = n_division(gt, gt.edges)
     pred_div = n_division(pred, pred.edges)
@@ -243,16 +264,122 @@ def _write_error_report(
         print("  errors.csv: 0 edge errors")
 
 
+def _node_prior_kwargs(
+    mode: str,
+    node_prior: float = 0.0,
+    lam_appear: float | None = None,
+    lam_disappear: float | None = None,
+    lam_split: float | None = None,
+) -> dict:
+    """Map the node-degree prior weights onto the solver config for ``mode``.
+
+    ``node_prior`` is the shared default for all three priors (appear/disappear/split);
+    each ``lam_*`` overrides it individually. All zero -> current behavior (no config
+    passed, i.e. the plain threshold/fixed-cost solver).
+    """
+    from trackastra.tracking import GreedyConfig, ILPConfig
+
+    lam = dict(
+        lam_appear=node_prior if lam_appear is None else lam_appear,
+        lam_disappear=node_prior if lam_disappear is None else lam_disappear,
+        lam_split=node_prior if lam_split is None else lam_split,
+    )
+    if not any(lam.values()):
+        return {}
+    if mode in ("greedy", "greedy_nodiv"):
+        return {"greedy_config": GreedyConfig(**lam)}
+    if mode == "ilp":
+        return {"ilp_config": ILPConfig(**lam)}
+    return {}
+
+
+def _load_frames(path: Path) -> np.ndarray:
+    """Load a time series from a folder of tiffs or a single T,(Z),Y,X tiff."""
+    import tifffile
+    from trackastra.data import load_tiff_timeseries
+
+    path = Path(path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"No such image/mask path: {path}")
+    return load_tiff_timeseries(path) if path.is_dir() else tifffile.imread(path)
+
+
+def _movie_name(root: Path) -> str:
+    """Self-describing output-folder name for a CTC movie root."""
+    seq_dir = root.parent if root.name == "TRA" else root
+    seq_name = seq_dir.name.removesuffix("_GT")
+    dataset = seq_dir.parent.name.removesuffix("_GT")
+    # CTC sequences are named "01", "02", ...; prefix the dataset (e.g.
+    # "Fluo-N2DL-HeLa_01") so the output folder is self-describing.
+    return f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
+
+
+def _movie_names(input_paths: list[Path]) -> list[str]:
+    """Unique output-folder name per input root, in order."""
+    names: list[str] = []
+    used: set[str] = set()
+    for index, root in enumerate(input_paths, start=1):
+        name = _movie_name(Path(root))
+        if name in used:
+            name = f"{name}_{index}"
+        used.add(name)
+        names.append(name)
+    return names
+
+
+def _geff_path(output_path: Path) -> Path:
+    """Sibling GEFF store for a CTC output folder: ``<movie>/`` -> ``<movie>.geff``."""
+    return output_path.parent / f"{output_path.name}.geff"
+
+
+def _write_geff(graph, ndim: int, path: Path) -> None:
+    """Write the solution graph as a GEFF store that ``geff.read(path)`` can open.
+
+    ``trackastra.tracking.write_to_geff`` nests the graph in a subgroup of an outer
+    zarr (``<store>/tracking_graph.geff``, next to a ``segmentation`` array), so the
+    outer store is not itself a GEFF group. Here the tracked masks already sit in the
+    sibling CTC folder, so the GEFF group is written directly at ``path``.
+    """
+    import geff
+
+    coord_names = ("z", "y", "x")[3 - ndim :]
+    graph = graph.copy()  # keep the caller's graph (and its "time"/"coords") intact
+    for _node, data in graph.nodes(data=True):
+        coords = data.pop("coords")
+        # Plain python floats -> float64 in the store. float32 coordinates survive
+        # geff.read but blow up downstream: inTRACKtive JSON-encodes their mean into
+        # zarr attrs, and numpy float32 is not JSON serializable.
+        data.update(
+            {n: float(v) for n, v in zip(coord_names, coords[-ndim:], strict=True)}
+        )
+        data["t"] = int(data.pop("time"))
+        data["label"] = int(data["label"])
+        # drop model-internal diagnostics (node-degree logits, edge weight)
+        for key in ("a", "c", "s", "weight"):
+            data.pop(key, None)
+
+    geff.write(
+        graph,
+        store=path,
+        axis_names=["t", *coord_names],
+        axis_types=["time", *["space"] * ndim],
+        overwrite=True,
+    )
+
+
 def _prepare_output(path: Path, overwrite: bool) -> None:
     generated = list(path.glob("man_track*.tif")) if path.exists() else []
     track_file = path / "man_track.txt"
     if track_file.exists():
         generated.append(track_file)
-    if generated and not overwrite:
-        raise FileExistsError(f"CTC results already exist in {path}; use --overwrite")
+    geff = _geff_path(path)
+    if (generated or geff.exists()) and not overwrite:
+        raise FileExistsError(f"Results already exist for {path}; use --overwrite")
     if overwrite:
         for output in generated:
             output.unlink()
+        if geff.exists():
+            shutil.rmtree(geff)
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -272,24 +399,34 @@ def predict_and_evaluate(
     error_report: bool = False,
     link_breakdown: bool = True,
     node_prior: float = 0.0,
+    lam_appear: float | None = None,
+    lam_disappear: float | None = None,
+    lam_split: float | None = None,
+    out_name: str | None = None,
+    geff: bool = False,
 ) -> pd.DataFrame:
     """Track and evaluate CTC movies with an already loaded Trackastra model."""
     from trackastra.data import DetectionSequence, load_ctc_images_masks
-    from trackastra.tracking import GreedyConfig, ILPConfig, graph_to_ctc
+    from trackastra.tracking import graph_to_ctc
 
-    # A single lambda drives all three node-degree priors (appear/disappear/split)
-    # for whichever solver `mode` selects. 0 -> current behavior (no config passed).
-    node_prior_kwargs: dict = {}
-    if node_prior != 0:
-        lam = dict(lam_appear=node_prior, lam_disappear=node_prior, lam_split=node_prior)
-        if mode in ("greedy", "greedy_nodiv"):
-            node_prior_kwargs["greedy_config"] = GreedyConfig(**lam)
-        elif mode == "ilp":
-            node_prior_kwargs["ilp_config"] = ILPConfig(**lam)
+    node_prior_kwargs = _node_prior_kwargs(
+        mode, node_prior, lam_appear, lam_disappear, lam_split
+    )
+
+    if out_name is not None and len(input_paths) != 1:
+        raise ValueError(
+            f"--name sets a single movie output folder, but got {len(input_paths)} "
+            "input movies"
+        )
+    names = [out_name] if out_name is not None else _movie_names(input_paths)
+    output_paths = [outdir / model_name / name for name in names]
+    # Check (and clear) every output up front: a collision on the last movie must not
+    # surface only after the earlier ones have been tracked, which takes minutes.
+    for output_path in output_paths:
+        _prepare_output(output_path, overwrite)
 
     rows = []
-    used_names: set[str] = set()
-    for index, root in enumerate(input_paths, start=1):
+    for root, name, output_path in zip(input_paths, names, output_paths, strict=True):
         root = Path(root)
         transformer = getattr(model, "transformer", None)
         config = getattr(transformer, "config", {})
@@ -299,20 +436,6 @@ def predict_and_evaluate(
             detection_folder=detection_folder,
             ndim=ndim,
         )
-        if root.name == "TRA":
-            seq_dir = root.parent
-        else:
-            seq_dir = root
-        seq_name = seq_dir.name.removesuffix("_GT")
-        dataset = seq_dir.parent.name.removesuffix("_GT")
-        # CTC sequences are named "01", "02", ...; prefix the dataset (e.g.
-        # "Fluo-N2DL-HeLa_01") so the output folder is self-describing.
-        name = f"{dataset}_{seq_name}" if seq_name.isdigit() and dataset else seq_name
-        if name in used_names:
-            name = f"{name}_{index}"
-        used_names.add(name)
-        output_path = outdir / model_name / name
-        _prepare_output(output_path, overwrite)
 
         detections = DetectionSequence.from_masks(
             imgs,
@@ -324,7 +447,9 @@ def predict_and_evaluate(
             keep_masks=True,
             keep_images=True,
         )
-        track_kwargs = dict(mode=mode, spatial_cutoff=spatial_cutoff, **node_prior_kwargs)
+        track_kwargs = dict(
+            mode=mode, spatial_cutoff=spatial_cutoff, **node_prior_kwargs
+        )
         if error_report:
             track_kwargs["return_details"] = True
         result = model.track(
@@ -334,11 +459,16 @@ def predict_and_evaluate(
         )
         graph = result.graph
         details = (
-            {"candidate_graph": result.candidate_graph, "predictions": result.predictions}
+            {
+                "candidate_graph": result.candidate_graph,
+                "predictions": result.predictions,
+            }
             if error_report
             else None
         )
         graph_to_ctc(graph, result.masks, outdir=output_path)
+        if geff:
+            _write_geff(graph, ndim, _geff_path(output_path))
         need_matched = error_report or link_breakdown
         evaluated = evaluate_ctc(gt_path, output_path, return_matched=need_matched)
         values, matched = evaluated if need_matched else (evaluated, None)
@@ -389,13 +519,96 @@ def predict_and_evaluate(
     return results
 
 
-def run(args: argparse.Namespace) -> pd.DataFrame:
+def predict_only(
+    model,
+    masks_path: Path,
+    imgs_path: Path | None,
+    outdir: Path,
+    model_name: str,
+    mode: str = "greedy",
+    spatial_cutoff: int | None = None,
+    spacing: tuple[float, ...] | None = None,
+    normalize_diameter: float | None = None,
+    overwrite: bool = False,
+    node_prior: float = 0.0,
+    lam_appear: float | None = None,
+    lam_disappear: float | None = None,
+    lam_split: float | None = None,
+    out_name: str | None = None,
+    geff: bool = False,
+) -> Path:
+    """Track a raw image/mask pair and write CTC results, without ground truth.
+
+    Same tracking path as ``predict_and_evaluate``: the frames are wrapped in a
+    ``DetectionSequence`` and handed to ``model.track``. Only the evaluation half is
+    dropped, since there is no GT to score against.
+    """
+    from trackastra.data import DetectionSequence
+    from trackastra.tracking import graph_to_ctc
+    from trackastra.utils import normalize
+
+    config = getattr(getattr(model, "transformer", None), "config", {})
+    ndim = int(config.get("coord_dim", 2))
+
+    # Claim the output before loading anything: a collision must not surface only
+    # after the tiffs are read and the movie is tracked.
+    masks_path = Path(masks_path).expanduser()
+    if out_name is not None:
+        name = out_name
+    else:
+        name = masks_path.parent.name if masks_path.is_dir() else masks_path.stem
+    output_path = outdir / model_name / name
+    _prepare_output(output_path, overwrite)
+
+    masks = _load_frames(masks_path)
+    imgs = _load_frames(imgs_path) if imgs_path is not None else None
+    if imgs is not None:
+        if len(imgs) != len(masks):
+            raise ValueError(
+                f"Image and mask frame counts differ: {len(imgs)} images, "
+                f"{len(masks)} masks"
+            )
+        # Normalize per frame, as load_ctc_images_masks does. DetectionSequence's own
+        # normalize_imgs=True would take percentiles over the whole movie at once,
+        # which is not what the model was trained on.
+        imgs = np.stack([normalize(frame) for frame in imgs])
+
+    detections = DetectionSequence.from_masks(
+        imgs,
+        masks,
+        name=name,
+        ndim=ndim,
+        spacing=spacing,
+        normalize_imgs=False,  # already normalized per frame above
+        keep_masks=True,
+        keep_images=True,
+    )
+    result = model.track(
+        detections,
+        mode=mode,
+        spatial_cutoff=spatial_cutoff,
+        normalize_diameter=normalize_diameter,
+        **_node_prior_kwargs(mode, node_prior, lam_appear, lam_disappear, lam_split),
+    )
+    graph_to_ctc(result.graph, result.masks, outdir=output_path)
+    if geff:
+        _write_geff(result.graph, ndim, _geff_path(output_path))
+    print(
+        f"{name}: {result.graph.number_of_nodes()} nodes, "
+        f"{result.graph.number_of_edges()} edges -> {output_path}"
+    )
+    return output_path
+
+
+def run(args: argparse.Namespace) -> pd.DataFrame | Path:
     from trackastra.model import Trackastra
 
-    if len(args.detection_folders) != 1:
+    if args.masks is None and args.imgs is not None:
+        raise ValueError("--imgs requires --masks")
+    if args.masks is None and not args.input_test:
         raise ValueError(
-            "Prediction requires one detection folder; override the config with "
-            "--detection-folder FOLDER"
+            "Provide either --masks (with optional --imgs) to predict without ground "
+            "truth, or --input_test / a config with CTC movie roots to also evaluate."
         )
 
     model_path = Path(args.model).expanduser()
@@ -405,6 +618,32 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     else:
         model_name = args.model
         model = Trackastra.from_pretrained(args.model, device=args.device)
+
+    if args.masks is not None:
+        return predict_only(
+            model=model,
+            masks_path=args.masks,
+            imgs_path=args.imgs,
+            outdir=args.outdir,
+            model_name=model_name,
+            mode=args.mode,
+            spatial_cutoff=args.spatial_cutoff,
+            spacing=tuple(args.spacing) if args.spacing is not None else None,
+            normalize_diameter=args.normalize_diameter,
+            overwrite=args.overwrite,
+            node_prior=args.node_prior,
+            lam_appear=args.lam_appear,
+            lam_disappear=args.lam_disappear,
+            lam_split=args.lam_split,
+            out_name=args.name,
+            geff=args.geff,
+        )
+
+    if len(args.detection_folders) != 1:
+        raise ValueError(
+            "Prediction requires one detection folder; override the config with "
+            "--detection-folder FOLDER"
+        )
     return predict_and_evaluate(
         model=model,
         input_paths=args.input_test,
@@ -419,6 +658,11 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         errormovie=args.errormovie,
         error_report=getattr(args, "error_report", False),
         node_prior=args.node_prior,
+        lam_appear=args.lam_appear,
+        lam_disappear=args.lam_disappear,
+        lam_split=args.lam_split,
+        out_name=args.name,
+        geff=args.geff,
     )
 
 

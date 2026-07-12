@@ -550,9 +550,12 @@ class TrackingDataset(Dataset):
         return node_in_degree, node_out_degree
 
     def _window_object_count(self, index: int) -> int:
-        _seg, _supervision, sl = self._window_slice(index)
-        count = sl.stop - sl.start
-        return min(count, self.max_detections) if self.max_detections else count
+        seg, _supervision, sl = self._window_slice(index)
+        timepoints = seg.timepoints[sl]
+        if self.max_detections is None:
+            return len(timepoints)
+        _, counts = np.unique(timepoints, return_counts=True)
+        return int(np.minimum(counts, self.max_detections).sum())
 
     def _window_division_count(self, index: int) -> int:
         _, _, timepoints, _, association = self._window_arrays(index)

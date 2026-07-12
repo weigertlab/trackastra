@@ -259,10 +259,10 @@ def create_train_parser() -> configargparse.ArgumentParser:
     parser.add_argument(
         "--consistency_weight",
         type=float,
-        default=0.0,
+        default=0.1,
         help="weight of the degree-consistency loss pulling the edge-implied "
-        "out-degree toward the node head's prediction (needs --node_loss>0); 0 "
-        "disables it (default: %(default)s)",
+        "out-degree toward the node head's prediction; only active when "
+        "--node_loss>0 (default: %(default)s)",
     )
     parser.add_argument(
         "--max_out_degree",
