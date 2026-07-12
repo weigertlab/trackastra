@@ -97,8 +97,10 @@ def test_wrfeat2_feature_dim_supports_2d_and_3d():
     assert _feature_dim(2, "intensity") == 1
     assert _feature_dim(2, "wrfeat2") == 6
     assert _feature_dim(2, "wrfeat2_no_intensity") == 5
+    assert _feature_dim(2, "wrfeat3") == 9
     assert _feature_dim(3, "wrfeat2") == 9
     assert _feature_dim(3, "wrfeat2_no_intensity") == 8
+    assert _feature_dim(3, "wrfeat3") == 9
 
     with pytest.raises(ValueError, match="Unknown feature mode"):
         _feature_dim(2, "wrfeat")
@@ -2121,6 +2123,31 @@ cachedir: sequence-cache
     }
     assert "feature_embed_mode" not in train_config.runtime_kwargs["training_args"]
     assert "feat_embed_per_dim" not in train_config.runtime_kwargs["training_args"]
+
+
+def test_parse_training_config_records_wrfeat3_schema(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("ndim: 2\nfeatures: wrfeat3\n")
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    model_config, _train_data, _val_data, train_config = parse_training_config()
+
+    assert model_config.feat_dim == 9
+    assert train_config.tracking_kwargs["inference_config"]["feature_schema"] == {
+        "name": "wrfeat3",
+        "version": 1,
+        "channels": [
+            "log_equivalent_diameter",
+            "mean_normalized_intensity",
+            "log_normalized_second_moment",
+            "xy_anisotropy",
+            "xy_orientation",
+            "z_elongation",
+            "zy_coupling",
+            "zx_coupling",
+            "log_border_dist",
+        ],
+    }
 
 
 def test_parse_training_config_rejects_model_with_resume(monkeypatch, tmp_path):

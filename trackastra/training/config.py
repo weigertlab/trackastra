@@ -272,6 +272,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
             "intensity",
             "wrfeat2",
             "wrfeat2_no_intensity",
+            "wrfeat3",
         ],
         default="wrfeat2",
     )
@@ -366,8 +367,9 @@ def create_train_parser() -> configargparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "per-window probability of masking each wrfeat2 group (intensity, shape) "
-            "during training, so the model stays robust to datasets missing a group"
+            "per-window probability of masking each derived feature group "
+            "(intensity, shape) during training, so the model stays robust to "
+            "datasets missing a group"
         ),
     )
     parser.add_argument(

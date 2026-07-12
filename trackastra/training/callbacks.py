@@ -11,6 +11,7 @@ import lightning as pl
 import numpy as np
 import yaml
 
+from trackastra.data.wrfeat import feature_schema_manifest
 from trackastra.model import INFERENCE_CONFIG_KEYS
 
 
@@ -122,9 +123,18 @@ class TrackastraModelCheckpoint(pl.pytorch.callbacks.Callback):
             self._logdir.mkdir(parents=True, exist_ok=True)
             with open(self._logdir / "train_config.yaml", "w") as f:
                 yaml.safe_dump(self._training_args, f)
-            inference_config = getattr(pl_module, "inference_config", None) or {
-                k: self._training_args.get(k) for k in INFERENCE_CONFIG_KEYS
-            }
+            inference_config = getattr(pl_module, "inference_config", None)
+            if not inference_config:
+                inference_config = {
+                    key: self._training_args.get(key)
+                    for key in INFERENCE_CONFIG_KEYS
+                    if key != "feature_schema"
+                }
+                schema = feature_schema_manifest(
+                    str(self._training_args.get("features"))
+                )
+                if schema is not None:
+                    inference_config["feature_schema"] = schema
             with open(self._logdir / "inference_config.yaml", "w") as f:
                 yaml.safe_dump(inference_config, f)
 

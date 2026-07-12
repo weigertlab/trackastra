@@ -238,6 +238,20 @@ def test_feature_group_drop_masks_intensity_every_window():
     assert bool(mask[:, [0, 2, 3, 4, 5]].all())
 
 
+def test_wrfeat3_dataset_keeps_fixed_width_and_2d_z_mask():
+    lineage_index = np.array([0, 0], dtype=np.int64)
+    sequence = _sequence(_wrfeat2_seg("full"), lineage_index, np.eye(1, dtype=bool))
+
+    sample = TrackingDataset(sequence, window_size=2, features="wrfeat3")[0]
+
+    assert tuple(sample["features"].shape) == (2, 9)
+    expected = torch.tensor(
+        [True, True, True, True, True, False, False, False, True]
+    )
+    assert torch.equal(sample["feature_mask"][0], expected)
+    assert torch.all(sample["features"][:, 5:8] == 0)
+
+
 def test_feature_group_drop_validates_probability():
     lineage_index = np.array([0, 0], dtype=np.int64)
     sequence = _sequence(_wrfeat2_seg("full"), lineage_index, np.eye(1, dtype=bool))

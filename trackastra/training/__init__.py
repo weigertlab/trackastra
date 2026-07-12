@@ -182,15 +182,10 @@ def _lightning_trainer_class():
 
 
 def _feature_dim(ndim: int, features: str) -> int:
-    if features == "none":
-        return 0
-    if features == "intensity":
-        return 1
-    if features == "wrfeat2":
-        return 6 if ndim == 2 else 9
-    if features == "wrfeat2_no_intensity":
-        return 5 if ndim == 2 else 8
-    raise ValueError(f"Unknown feature mode {features!r}")
+    try:
+        return wrfeat.feature_output_dim(features, ndim)
+    except ValueError as e:
+        raise ValueError(f"Unknown feature mode {features!r}") from e
 
 
 def _resolve_source_format(
@@ -943,7 +938,15 @@ def _inference_config_from_args(args: Any) -> dict[str, Any]:
     """Build the inference config saved beside trained models."""
     from trackastra.model import INFERENCE_CONFIG_KEYS
 
-    return {key: getattr(args, key, None) for key in INFERENCE_CONFIG_KEYS}
+    config = {
+        key: getattr(args, key, None)
+        for key in INFERENCE_CONFIG_KEYS
+        if key != "feature_schema"
+    }
+    schema = wrfeat.feature_schema_manifest(args.features)
+    if schema is not None:
+        config["feature_schema"] = schema
+    return config
 
 
 @dataclass(frozen=True)
@@ -1162,8 +1165,11 @@ def _training_config_from_args(
     if args.feature_drop > 0 and args.features not in (
         "wrfeat2",
         "wrfeat2_no_intensity",
+        "wrfeat3",
     ):
-        raise ValueError("feature_drop requires wrfeat2 or wrfeat2_no_intensity")
+        raise ValueError(
+            "feature_drop requires wrfeat2, wrfeat2_no_intensity, or wrfeat3"
+        )
     model_config = model_api.ModelConfig(
         coord_dim=args.ndim,
         feat_dim=_feature_dim(args.ndim, args.features),

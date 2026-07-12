@@ -25,7 +25,9 @@ from trackastra.utils import blockwise_sum
 
 logger = logging.getLogger(__name__)
 
-FeatureMode = Literal["none", "intensity", "wrfeat2", "wrfeat2_no_intensity"]
+FeatureMode = Literal[
+    "none", "intensity", "wrfeat2", "wrfeat2_no_intensity", "wrfeat3"
+]
 _FEATURE_MODES = tuple(wrfeat.FEATURE_RECIPES)
 
 
@@ -677,8 +679,8 @@ class TrackingDataset(Dataset):
 
         One node per detection with its ``(t, (z), y, x)`` coordinates and a
         ``radius`` recovered from the log1p-diameter feature (column 0 of the
-        ``wrfeat2`` stack); ``assoc_matrix[i, j] > 0`` becomes a parent -> child
-        edge. ``radius`` is registered as the standard GEFF sphere property.
+        derived region-feature stack); ``assoc_matrix[i, j] > 0`` becomes a parent
+        -> child edge. ``radius`` is registered as the standard GEFF sphere property.
 
         Args:
             item: A dict returned by :meth:`__getitem__`.
@@ -703,7 +705,7 @@ class TrackingDataset(Dataset):
         axis_units = [None] + ["micrometer"] * ndim
 
         features = item["features"].numpy()
-        # column 0 of the wrfeat2 stack is log1p(diameter); radius = diameter / 2
+        # column 0 of the derived feature stack is log1p(diameter)
         if features.shape[1] > 0:
             radius = np.expm1(np.maximum(features[:, 0], 0.0)) / 2.0
         else:

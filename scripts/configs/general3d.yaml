@@ -16,7 +16,7 @@ attn_dist_mode: none
 attn_mode: sparse
 head_mode: edge_mlp
 max_neighbors: 8
-div_upweight: 2.0
+div_upweight: 1.0
 sparse_knn_mode: per_frame
 balance_batch_objects: true
 delta_cutoff: 1
@@ -38,7 +38,7 @@ tracking_mode: greedy
 spatial_cutoff: 100  #um
 max_detections: 320
 weight_by_dataset: false
-oversample_divs: 0.5  
+# oversample_divs: 0.5  
 
 input_train:
 - format: geff

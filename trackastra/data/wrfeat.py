@@ -6,6 +6,7 @@ import itertools
 import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from functools import reduce
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -86,7 +87,86 @@ FEATURE_RECIPES = {
         FEATURE_INERTIA,
         FEATURE_BORDER_DIST,
     ),
+    "wrfeat3": (
+        FEATURE_DIAMETER,
+        FEATURE_INTENSITY,
+        FEATURE_INERTIA,
+        FEATURE_BORDER_DIST,
+    ),
 }
+
+
+@dataclass(frozen=True)
+class FeatureChannel:
+    """One ordered derived-feature channel and its availability contract."""
+
+    name: str
+    sources: tuple[str, ...]
+    available_ndims: tuple[int, ...] = (2, 3)
+
+
+WRFEAT3_VERSION = 1
+WRFEAT3_CHANNELS = (
+    FeatureChannel("log_equivalent_diameter", (FEATURE_DIAMETER,)),
+    FeatureChannel("mean_normalized_intensity", (FEATURE_INTENSITY,)),
+    FeatureChannel(
+        "log_normalized_second_moment", (FEATURE_DIAMETER, FEATURE_INERTIA)
+    ),
+    FeatureChannel("xy_anisotropy", (FEATURE_INERTIA,)),
+    FeatureChannel("xy_orientation", (FEATURE_INERTIA,)),
+    FeatureChannel("z_elongation", (FEATURE_INERTIA,), available_ndims=(3,)),
+    FeatureChannel("zy_coupling", (FEATURE_INERTIA,), available_ndims=(3,)),
+    FeatureChannel("zx_coupling", (FEATURE_INERTIA,), available_ndims=(3,)),
+    FeatureChannel("log_border_dist", (FEATURE_BORDER_DIST,)),
+)
+
+
+def feature_channels(mode: str, ndim: int) -> tuple[FeatureChannel, ...]:
+    """Return the authoritative ordered channel schema for a feature recipe."""
+    if ndim not in (2, 3):
+        raise ValueError(f"Only 2D and 3D features are supported, got ndim={ndim}")
+    if mode == "none":
+        return ()
+    if mode == "intensity":
+        return (FeatureChannel("mean_normalized_intensity", (FEATURE_INTENSITY,)),)
+    if mode == "wrfeat3":
+        return WRFEAT3_CHANNELS
+    if mode in ("wrfeat2", "wrfeat2_no_intensity"):
+        q_count = 2 if ndim == 2 else 5
+        channels = [
+            FeatureChannel("log_equivalent_diameter", (FEATURE_DIAMETER,)),
+            FeatureChannel(
+                "log_compactness", (FEATURE_DIAMETER, FEATURE_INERTIA)
+            ),
+            *(
+                FeatureChannel(f"q{i + 1}", (FEATURE_INERTIA,))
+                for i in range(q_count)
+            ),
+            FeatureChannel("log_border_dist", (FEATURE_BORDER_DIST,)),
+        ]
+        if mode == "wrfeat2":
+            channels.insert(
+                1,
+                FeatureChannel("mean_normalized_intensity", (FEATURE_INTENSITY,)),
+            )
+        return tuple(channels)
+    raise ValueError(f"Unknown feature recipe {mode!r}")
+
+
+def feature_output_dim(mode: str, ndim: int) -> int:
+    """Number of scalar output channels for a named feature recipe."""
+    return len(feature_channels(mode, ndim))
+
+
+def feature_schema_manifest(mode: str) -> dict[str, object] | None:
+    """Serializable schema contract for versioned feature recipes."""
+    if mode != "wrfeat3":
+        return None
+    return {
+        "name": "wrfeat3",
+        "version": WRFEAT3_VERSION,
+        "channels": [channel.name for channel in WRFEAT3_CHANNELS],
+    }
 
 
 def canonical_feature_name(name: str) -> str:
@@ -351,22 +431,97 @@ def _stack_wrfeat2(features: dict[str, np.ndarray], ndim: int, mode: str) -> np.
     return np.stack(channels, axis=-1).astype(np.float32, copy=False)
 
 
-def _wrfeat2_column_sources(mode: str, ndim: int) -> list[tuple[str, ...]]:
-    """Source properties each ``wrfeat2`` output column depends on, in column order.
+def _stack_wrfeat3(features: dict[str, np.ndarray], ndim: int) -> np.ndarray:
+    """Dimension-harmonized nine-channel region-feature representation."""
+    diameter = features[FEATURE_DIAMETER][:, 0]
+    inertia = features[FEATURE_INERTIA].reshape(-1, ndim, ndim)
+    intensity = features[FEATURE_INTENSITY][:, 0]
+    border_dist = features[FEATURE_BORDER_DIST][:, 0]
+    eps = np.finfo(np.float32).eps
+
+    trace_i = np.trace(inertia, axis1=1, axis2=2)
+    trace_s = trace_i / (ndim - 1)
+    covariance = trace_s[:, None, None] * np.eye(ndim, dtype=inertia.dtype) - inertia
+
+    if ndim == 2:
+        syy = covariance[:, 0, 0]
+        sxx = covariance[:, 1, 1]
+        syx = covariance[:, 0, 1]
+    else:
+        syy = covariance[:, 1, 1]
+        sxx = covariance[:, 2, 2]
+        syx = covariance[:, 1, 2]
+    xy_trace = syy + sxx
+    p1 = np.divide(
+        syy - sxx,
+        xy_trace,
+        out=np.zeros_like(trace_s),
+        where=np.abs(xy_trace) > eps,
+    )
+    p2 = np.divide(
+        2 * syx,
+        xy_trace,
+        out=np.zeros_like(trace_s),
+        where=np.abs(xy_trace) > eps,
+    )
+
+    if ndim == 2:
+        p3 = np.zeros_like(trace_s)
+        p4 = np.zeros_like(trace_s)
+        p5 = np.zeros_like(trace_s)
+    else:
+        szz = covariance[:, 0, 0]
+        szy = covariance[:, 0, 1]
+        szx = covariance[:, 0, 2]
+        z_denom = szz + 0.5 * xy_trace
+        zy_denom = szz + syy
+        zx_denom = szz + sxx
+        p3 = np.divide(
+            szz - 0.5 * xy_trace,
+            z_denom,
+            out=np.zeros_like(trace_s),
+            where=np.abs(z_denom) > eps,
+        )
+        p4 = np.divide(
+            2 * szy,
+            zy_denom,
+            out=np.zeros_like(trace_s),
+            where=np.abs(zy_denom) > eps,
+        )
+        p5 = np.divide(
+            2 * szx,
+            zx_denom,
+            out=np.zeros_like(trace_s),
+            where=np.abs(zx_denom) > eps,
+        )
+
+    unit_ball = np.pi if ndim == 2 else 4 * np.pi / 3
+    ball_measure = unit_ball * (np.maximum(diameter, 0) / 2) ** ndim
+    moment = trace_s / np.maximum(ball_measure ** (2 / ndim), eps)
+    isotropic_ref = (
+        (1 / 2) / np.pi
+        if ndim == 2
+        else (3 / 5) / (4 * np.pi / 3) ** (2 / 3)
+    )
+    normalized_moment = moment / isotropic_ref
+
+    channels = [
+        np.log1p(np.maximum(diameter, 0)),
+        intensity,
+        np.log1p(np.maximum(normalized_moment, 0)),
+        *[np.clip(p, -1, 1) for p in (p1, p2, p3, p4, p5)],
+        np.log1p(np.maximum(border_dist, 0)),
+    ]
+    return np.stack(channels, axis=-1).astype(np.float32, copy=False)
+
+
+def _derived_column_sources(mode: str, ndim: int) -> list[tuple[str, ...]]:
+    """Source properties each derived output column depends on, in column order.
 
     A column is available only when all of its sources are present. The order
-    mirrors the channel assembly in :func:`_stack_wrfeat2`.
+    is defined by :func:`feature_channels`.
     """
-    q_count = 2 if ndim == 2 else 5
-    cols: list[tuple[str, ...]] = [
-        (FEATURE_DIAMETER,),
-        (FEATURE_DIAMETER, FEATURE_INERTIA),
-        *([(FEATURE_INERTIA,)] * q_count),
-        (FEATURE_BORDER_DIST,),
-    ]
-    if mode == "wrfeat2":
-        cols.insert(1, (FEATURE_INTENSITY,))
-    return cols
+    return [channel.sources for channel in feature_channels(mode, ndim)]
 
 
 def _prop_width(name: str, ndim: int) -> int:
@@ -386,7 +541,7 @@ FEATURE_DROP_GROUPS = {
 def feature_group_columns(mode: str, ndim: int, group: str) -> np.ndarray:
     """Boolean mask over stacked output columns belonging to a drop group.
 
-    Only defined for the ``wrfeat2`` family, whose derived columns map to source
+    Only defined for derived region-feature recipes whose columns map to source
     properties; other recipes have no grouped columns.
     """
     if group not in FEATURE_DROP_GROUPS:
@@ -394,10 +549,12 @@ def feature_group_columns(mode: str, ndim: int, group: str) -> np.ndarray:
             f"Unknown feature drop group {group!r}; "
             f"expected one of {sorted(FEATURE_DROP_GROUPS)}"
         )
-    if mode not in ("wrfeat2", "wrfeat2_no_intensity"):
-        raise ValueError(f"feature drop groups require a wrfeat2 mode, got {mode!r}")
+    if mode not in ("wrfeat2", "wrfeat2_no_intensity", "wrfeat3"):
+        raise ValueError(
+            f"feature drop groups require a derived region-feature mode, got {mode!r}"
+        )
     props = set(FEATURE_DROP_GROUPS[group])
-    sources = _wrfeat2_column_sources(mode, ndim)
+    sources = _derived_column_sources(mode, ndim)
     return np.array([bool(props & set(srcs)) for srcs in sources], dtype=bool)
 
 
@@ -445,10 +602,9 @@ class WRFeatures:
     def features_stacked_for(self, mode: str):
         """Return the configured shallow feature representation.
 
-        ``wrfeat2`` is derived after geometric augmentation so its normalized
-        inertia components remain consistent with the transformed coordinates.
-        In 3D the symmetric traceless inertia tensor contributes its five
-        independent components.
+        Region-feature recipes are derived after geometric augmentation so their
+        normalized inertia components remain consistent with the transformed
+        coordinates.
         """
         required = feature_recipe_keys(mode)
         missing = set(required).difference(self.features)
@@ -459,6 +615,8 @@ class WRFeatures:
         if mode in ("intensity", FEATURE_CUSTOM):
             return np.concatenate([self.features[name] for name in required], axis=-1)
 
+        if mode == "wrfeat3":
+            return _stack_wrfeat3(self.features, self.ndim)
         return _stack_wrfeat2(self.features, self.ndim, mode)
 
     def stacked_with_mask(self, mode: str) -> tuple[np.ndarray, np.ndarray]:
@@ -478,7 +636,7 @@ class WRFeatures:
             return empty, empty.astype(bool)
 
         have = set(self.features)
-        if mode in ("wrfeat2", "wrfeat2_no_intensity"):
+        if mode in ("wrfeat2", "wrfeat2_no_intensity", "wrfeat3"):
             work = dict(self.features)
             for name in (
                 FEATURE_DIAMETER,
@@ -490,10 +648,22 @@ class WRFeatures:
                     work[name] = np.zeros(
                         (n, _prop_width(name, self.ndim)), dtype=np.float32
                     )
-            stacked = _stack_wrfeat2(work, self.ndim, mode)
-            sources = _wrfeat2_column_sources(mode, self.ndim)
+            stacked = (
+                _stack_wrfeat3(work, self.ndim)
+                if mode == "wrfeat3"
+                else _stack_wrfeat2(work, self.ndim, mode)
+            )
+            channels = feature_channels(mode, self.ndim)
             mask = np.stack(
-                [np.full(n, all(p in have for p in srcs), dtype=bool) for srcs in sources],
+                [
+                    np.full(
+                        n,
+                        self.ndim in channel.available_ndims
+                        and all(prop in have for prop in channel.sources),
+                        dtype=bool,
+                    )
+                    for channel in channels
+                ],
                 axis=-1,
             )
             stacked = np.where(mask, stacked, 0.0).astype(np.float32, copy=False)
@@ -1037,6 +1207,7 @@ def get_features(
         "intensity",
         "wrfeat2",
         "wrfeat2_no_intensity",
+        "wrfeat3",
         "pretrained_feats",
         "pretrained_feats_aug",
     ] = "wrfeat2",
@@ -1125,7 +1296,7 @@ def build_windows(
     window_size: int,
     progbar_class=tqdm,
     as_torch: bool = False,
-    feature_mode: Literal["wrfeat2", "wrfeat2_no_intensity"] = "wrfeat2",
+    feature_mode: Literal["wrfeat2", "wrfeat2_no_intensity", "wrfeat3"] = "wrfeat2",
 ) -> list[dict]:
     if len(features) < 2:
         raise ValueError(f"Need at least 2 frames for tracking, got {len(features)}.")

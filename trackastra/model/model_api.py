@@ -25,6 +25,7 @@ from ..data.wrfeat import (
     FEATURE_CUSTOM,
     FEATURE_RECIPES,
     WRFeatures,
+    feature_schema_manifest,
     normalize_to_diameter,
     transform_feature_geometry,
 )
@@ -57,6 +58,7 @@ logger = logging.getLogger(__name__)
 # train_config.yaml provenance dump.
 INFERENCE_CONFIG_KEYS = (
     "features",
+    "feature_schema",
     "normalize_diameter",
     "pretrained_feats_model",
     "pretrained_feats_mode",
@@ -195,6 +197,23 @@ class Trackastra:
                 f"Unknown inference feature mode {feature_mode!r}; "
                 f"expected one of {valid_feature_modes}"
             )
+        expected_schema = feature_schema_manifest(feature_mode)
+        configured_schema = inference_config.get("feature_schema")
+        if expected_schema is not None:
+            if configured_schema is None:
+                inference_config = {**inference_config, "feature_schema": expected_schema}
+            elif configured_schema != expected_schema:
+                raise ValueError(
+                    f"Feature schema for {feature_mode!r} does not match the current "
+                    f"contract: got {configured_schema!r}, expected {expected_schema!r}"
+                )
+            expected_width = len(expected_schema["channels"])
+            actual_width = int(transformer.config.get("feat_dim", 0))
+            if actual_width != expected_width:
+                raise ValueError(
+                    f"Feature schema {feature_mode!r} has width {expected_width}, "
+                    f"but the transformer expects feat_dim={actual_width}"
+                )
         if device == "cuda":
             if torch.cuda.is_available():
                 self.device = "cuda"

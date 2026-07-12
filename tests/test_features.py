@@ -85,6 +85,22 @@ def _wrfeat2_3d_example():
     )
 
 
+def _features_from_covariance(covariance: np.ndarray, diameter: float = 2) -> WRFeatures:
+    ndim = covariance.shape[0]
+    inertia = np.trace(covariance) * np.eye(ndim) - covariance
+    return WRFeatures(
+        coords=np.zeros((1, ndim), dtype=np.float32),
+        labels=np.ones(1, dtype=np.int32),
+        timepoints=np.zeros(1, dtype=np.int32),
+        features={
+            "equivalent_diameter_area": np.array([[diameter]], dtype=np.float32),
+            "intensity": np.array([[0.25]], dtype=np.float32),
+            "inertia_tensor": inertia.reshape(1, -1).astype(np.float32),
+            "border_dist": np.array([[0.5]], dtype=np.float32),
+        },
+    )
+
+
 def test_wrfeat2_decomposes_inertia_and_bounds_orientation():
     features = _wrfeat2_example().features_stacked_for("wrfeat2")
 
@@ -96,6 +112,107 @@ def test_wrfeat2_decomposes_inertia_and_bounds_orientation():
     assert np.allclose(features[:, 3:5], [[0, 0], [0.5, 0], [0, 0.5]])
     assert np.allclose(features[:, 5], np.log1p([0, 0.5, 1]))
     assert np.all(np.linalg.norm(features[:, 3:5], axis=1) <= 1)
+
+
+def test_wrfeat3_has_one_explicit_fixed_width_schema():
+    expected_names = [
+        "log_equivalent_diameter",
+        "mean_normalized_intensity",
+        "log_normalized_second_moment",
+        "xy_anisotropy",
+        "xy_orientation",
+        "z_elongation",
+        "zy_coupling",
+        "zx_coupling",
+        "log_border_dist",
+    ]
+
+    assert [c.name for c in wrfeat.feature_channels("wrfeat3", 2)] == expected_names
+    assert [c.name for c in wrfeat.feature_channels("wrfeat3", 3)] == expected_names
+    assert wrfeat.feature_output_dim("wrfeat3", 2) == 9
+    assert wrfeat.feature_output_dim("wrfeat3", 3) == 9
+    assert wrfeat.feature_schema_manifest("wrfeat3") == {
+        "name": "wrfeat3",
+        "version": 1,
+        "channels": expected_names,
+    }
+
+
+def test_wrfeat3_isotropic_second_moment_matches_in_2d_and_3d():
+    radius = 2.0
+    covariance_2d = np.eye(2, dtype=np.float32) * radius**2 / 4
+    covariance_3d = np.eye(3, dtype=np.float32) * radius**2 / 5
+
+    features_2d = _features_from_covariance(
+        covariance_2d, diameter=2 * radius
+    ).features_stacked_for("wrfeat3")
+    features_3d = _features_from_covariance(
+        covariance_3d, diameter=2 * radius
+    ).features_stacked_for("wrfeat3")
+
+    assert features_2d.shape == features_3d.shape == (1, 9)
+    assert features_2d[0, 2] == pytest.approx(np.log(2), abs=1e-6)
+    assert features_3d[0, 2] == pytest.approx(np.log(2), abs=1e-6)
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_wrfeat3_regionprops_disk_and_ball_are_isotropic(ndim):
+    shape = (48,) * ndim
+    center = np.array(shape) // 2
+    coords = np.indices(shape)
+    squared_distance = sum(
+        np.square(coords[axis] - center[axis]) for axis in range(ndim)
+    )
+    mask = (squared_distance <= 12**2).astype(np.uint16)[None]
+    image = np.ones_like(mask, dtype=np.float32)
+
+    stacked = WRFeatures.from_mask_img(mask, image).features_stacked_for("wrfeat3")
+
+    assert stacked[0, 2] == pytest.approx(np.log(2), abs=0.02)
+    np.testing.assert_allclose(stacked[0, 3:5], 0, atol=1e-6)
+    if ndim == 3:
+        np.testing.assert_allclose(stacked[0, 5:8], 0, atol=1e-6)
+
+
+def test_wrfeat3_in_plane_shape_channels_match_2d_and_3d():
+    covariance_2d = np.diag([4.0, 1.0]).astype(np.float32)
+    covariance_3d = np.diag([1.0, 4.0, 1.0]).astype(np.float32)
+
+    features_2d = _features_from_covariance(covariance_2d).features_stacked_for(
+        "wrfeat3"
+    )
+    features_3d = _features_from_covariance(covariance_3d).features_stacked_for(
+        "wrfeat3"
+    )
+
+    np.testing.assert_allclose(features_2d[:, 3:5], features_3d[:, 3:5])
+    np.testing.assert_allclose(features_2d[0, 3:5], [0.6, 0])
+    assert features_3d[0, 5] == pytest.approx(-3 / 7)
+
+
+def test_wrfeat3_2d_masks_only_z_shape_channels():
+    raw = _features_from_covariance(np.diag([4.0, 1.0]).astype(np.float32))
+    stacked, mask = raw.stacked_with_mask("wrfeat3")
+
+    assert stacked.shape == mask.shape == (1, 9)
+    np.testing.assert_array_equal(
+        mask[0], [True, True, True, True, True, False, False, False, True]
+    )
+    np.testing.assert_array_equal(stacked[0, 5:8], 0)
+
+
+def test_wrfeat3_3d_exposes_all_shape_channels():
+    covariance = np.array(
+        [[2.0, 0.25, -0.1], [0.25, 4.0, 0.5], [-0.1, 0.5, 1.0]],
+        dtype=np.float32,
+    )
+    raw = _features_from_covariance(covariance)
+    stacked, mask = raw.stacked_with_mask("wrfeat3")
+
+    assert stacked.shape == mask.shape == (1, 9)
+    assert np.all(mask)
+    assert np.all(np.isfinite(stacked))
+    assert np.all(np.abs(stacked[:, 3:8]) <= 1)
 
 
 def test_wrfeat2_no_intensity_removes_only_intensity_channel():
@@ -461,6 +578,12 @@ def test_fast_regionprops_matches_skimage(ndim, properties, monkeypatch):
         a, b = ref.features[k], fast.features[k]
         atol = 1e-3 * max(1.0, np.abs(a).max())
         assert np.allclose(a, b, atol=atol), f"feature {k} differs"
+    if properties == "regionprops2":
+        assert np.allclose(
+            ref.features_stacked_for("wrfeat3"),
+            fast.features_stacked_for("wrfeat3"),
+            atol=1e-3,
+        )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from trackastra.data import example_data_fluo_3d, example_data_hela
+from trackastra.data.wrfeat import feature_schema_manifest
 from trackastra.model import Trackastra, TrackingTransformer
 from trackastra.tracking import (
     GreedyConfig,
@@ -46,6 +47,38 @@ def test_resolve_inference_spatial_cutoff_defaults_warns_and_allows_lower(caplog
     with caplog.at_level(logging.WARNING):
         assert _resolve_inference_spatial_cutoff(256, 400) == 400
     assert "exceeds" in caplog.text
+
+
+def test_wrfeat3_inference_contract_records_and_validates_schema():
+    transformer = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=9,
+        d_model=16,
+        nhead=2,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        window=2,
+    )
+    model = Trackastra(
+        transformer=transformer,
+        inference_config={"features": "wrfeat3"},
+        device="cpu",
+    )
+
+    assert model.inference_config["feature_schema"] == feature_schema_manifest(
+        "wrfeat3"
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        Trackastra(
+            transformer=transformer,
+            inference_config={
+                "features": "wrfeat3",
+                "feature_schema": {"name": "wrfeat3", "version": 999},
+            },
+            device="cpu",
+        )
 
 
 def test_track_points_reuses_prediction_and_tracking_path(monkeypatch):
