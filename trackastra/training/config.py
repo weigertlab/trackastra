@@ -2,13 +2,55 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import sys
+from pathlib import Path
 from typing import Any
 
 import configargparse
+import yaml
 
 from trackastra.utils import str2bool
+
+
+def _resolve_defaults(path: Path, stack: tuple[Path, ...] = ()) -> list[str]:
+    """Flatten the `defaults:` chain of a config into files ordered low to high priority.
+
+    Entries are resolved relative to the file declaring them, and may themselves
+    declare `defaults:`. Later entries override earlier ones, the declaring file
+    overrides all of them.
+    """
+    path = path.expanduser().resolve()
+    if path in stack:
+        chain = " -> ".join(str(p) for p in (*stack, path))
+        raise ValueError(f"Config inheritance cycle: {chain}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise TypeError(f"{path}: config root must be a mapping")
+
+    entries = raw.get("defaults") or []
+    if isinstance(entries, str):
+        entries = [entries]
+    if not isinstance(entries, list):
+        raise TypeError(f"{path}: defaults must be a path or a list of paths")
+
+    files = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, str) or not entry.strip():
+            raise TypeError(f"{path}: defaults[{i}] must be a non-empty path string")
+        base = Path(entry).expanduser()
+        if not base.is_absolute():
+            base = path.parent / base
+        # configargparse silently ignores missing default config files, so recursing
+        # here (which does check) is also what surfaces a mistyped path.
+        files.extend(_resolve_defaults(base, (*stack, path)))
+        files.append(str(base.resolve()))
+    return files
 
 
 def _restore_input_config_items(items: list[Any] | None) -> list[Any] | None:
@@ -71,6 +113,18 @@ def create_train_parser() -> configargparse.ArgumentParser:
         is_config_file=True,
         help="config file path",
         default="configs/vanvliet.yaml",
+    )
+    parser.add_argument(
+        "--defaults",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "config files providing defaults for this config, resolved relative to it."
+            " Later entries override earlier ones, this config overrides all of them,"
+            " and the command line overrides everything. Values are replaced per"
+            " top-level key, not deep-merged."
+        ),
     )
     parser.add_argument("-o", "--outdir", type=str, default="runs")
     parser.add_argument("--name", type=str, help="Name to append to timestamp")
@@ -416,6 +470,16 @@ def parse_train_args(
 ):
     """Parse Trackastra training CLI args from a parser users may extend."""
     parser = create_train_parser() if parser is None else parser
+
+    # resolve a `defaults:` chain in the selected config into configargparse's
+    # default config files, which rank below the selected config, which ranks
+    # below the command line.
+    bootstrap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    bootstrap.add_argument("-c", "--config", type=Path, default=None)
+    config = bootstrap.parse_known_args()[0].config
+    if config is not None:
+        parser._default_config_files = _resolve_defaults(config)
+
     args, unknown_args = parser.parse_known_args()
     args.input_train = _restore_input_config_items(args.input_train)
     args.input_val = _restore_input_config_items(args.input_val)

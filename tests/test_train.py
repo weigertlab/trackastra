@@ -252,6 +252,45 @@ def test_parse_tracking_dataset_defaults(monkeypatch, tmp_path):
     assert args.features == "wrfeat2"
 
 
+def test_parse_config_defaults_are_overridden_by_config_and_cli(monkeypatch, tmp_path):
+    (tmp_path / "root.yaml").write_text("d_model: 111\nepochs: 111\nnum_workers: 111\n")
+    (tmp_path / "mid.yaml").write_text(
+        "defaults: root.yaml\nd_model: 222\nepochs: 222\n"
+    )
+    (tmp_path / "other.yaml").write_text("epochs: 333\n")
+    config = tmp_path / "exp.yaml"
+    config.write_text("defaults:\n  - mid.yaml\n  - other.yaml\nwindow: 8\n")
+    monkeypatch.setattr(
+        "sys.argv", ["train.py", "-c", str(config), "--num_workers", "9"]
+    )
+
+    args = parse_train_args()
+
+    assert args.d_model == 222  # mid over root
+    assert args.epochs == 333  # other over mid
+    assert args.window == 8  # config over defaults
+    assert args.num_workers == 9  # cli over everything
+    assert args.batch_size == 8  # untouched parser default
+
+
+def test_parse_config_defaults_missing_file(monkeypatch, tmp_path):
+    config = tmp_path / "exp.yaml"
+    config.write_text("defaults: nope.yaml\n")
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(config)])
+
+    with pytest.raises(FileNotFoundError):
+        parse_train_args()
+
+
+def test_parse_config_defaults_cycle(monkeypatch, tmp_path):
+    (tmp_path / "a.yaml").write_text("defaults: b.yaml\n")
+    (tmp_path / "b.yaml").write_text("defaults: a.yaml\n")
+    monkeypatch.setattr("sys.argv", ["train.py", "-c", str(tmp_path / "a.yaml")])
+
+    with pytest.raises(ValueError, match="cycle"):
+        parse_train_args()
+
+
 def test_parse_training_config_accepts_extended_parser(monkeypatch, tmp_path):
     config = tmp_path / "empty.yaml"
     config.write_text("{}\n")
