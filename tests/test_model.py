@@ -380,7 +380,7 @@ def test_feature_mask_shape_is_validated():
 
 def test_masked_running_norm_advances_and_standardizes():
     torch.manual_seed(0)
-    norm = MaskedRunningNorm(3, momentum_per_sample=1e-2).train()
+    norm = MaskedRunningNorm(3, momentum_floor=1e-2).train()
     # channel c has mean ~ (c+1)*10 and differing scales
     scales = torch.tensor([1.0, 5.0, 20.0])
     means = torch.tensor([10.0, 20.0, 30.0])
@@ -402,7 +402,7 @@ def test_masked_running_norm_advances_and_standardizes():
 
 def test_masked_running_norm_ignores_masked_entries():
     torch.manual_seed(0)
-    norm = MaskedRunningNorm(2, momentum_per_sample=1e-1).train()
+    norm = MaskedRunningNorm(2, momentum_floor=1e-1).train()
     mask = torch.ones(32, 50, 2, dtype=torch.bool)
     mask[..., 1] = False  # channel 1 never valid
     for _ in range(50):
@@ -412,6 +412,39 @@ def test_masked_running_norm_ignores_masked_entries():
     assert norm.initialized.tolist() == [True, False]
     assert abs(norm.mean[0].item() - 7) < 1.0
     assert norm.mean[1].item() == 0.0  # untouched init
+
+
+def test_masked_running_norm_converges_across_heterogeneous_batches():
+    # Batches alternate between two very different populations, as when sampling
+    # movies with different object sizes. The running mean must settle on the
+    # pooled mean rather than tracking whichever batch came last.
+    torch.manual_seed(0)
+    norm = MaskedRunningNorm(1, momentum_floor=1e-3).train()
+    mask = torch.ones(32, 100, 1, dtype=torch.bool)
+    for i in range(400):
+        center = 1.5 if i % 2 else 2.5
+        norm(torch.randn(32, 100, 1) * 0.1 + center, mask)
+
+    assert abs(norm.mean.item() - 2.0) < 0.05
+    # last batch was centered at 2.5; a last-batch tracker would sit near it
+    assert abs(norm.mean.item() - 2.5) > 0.4
+
+
+def test_masked_running_norm_loads_checkpoint_without_count_seen():
+    torch.manual_seed(0)
+    norm = MaskedRunningNorm(2, momentum_floor=1e-3)
+    state = {
+        "mean": torch.tensor([5.0, -3.0]),
+        "sq_mean": torch.tensor([26.0, 10.0]),
+        "initialized": torch.ones(2, dtype=torch.bool),
+    }
+    norm.load_state_dict(state)  # strict: the shim must supply count_seen
+    assert torch.allclose(norm.mean, state["mean"])
+
+    # a single batch must not overwrite the restored stats (alpha is floored, not 1)
+    norm.train()
+    norm(torch.zeros(8, 10, 2) + 100.0, torch.ones(8, 10, 2, dtype=torch.bool))
+    assert torch.allclose(norm.mean, state["mean"], atol=0.5)
 
 
 def test_masked_feature_values_do_not_participate():
@@ -444,7 +477,9 @@ def test_feature_mask_without_features_raises():
     coords = torch.rand((1, 5, 3))
 
     with pytest.raises(ValueError, match="feature_mask requires features"):
-        model(coords, features=None, feature_mask=torch.ones((1, 5, 2), dtype=torch.bool))
+        model(
+            coords, features=None, feature_mask=torch.ones((1, 5, 2), dtype=torch.bool)
+        )
 
 
 def test_missing_mask_defaults_to_all_present():

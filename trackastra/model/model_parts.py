@@ -48,21 +48,43 @@ class FeedForward(nn.Module):
 class MaskedRunningNorm(nn.Module):
     """Per-channel standardization using mask-aware running statistics.
 
-    Normalizes each feature channel to zero mean / unit variance using EMA buffers
-    that are updated (in training) only over unmasked entries, with the EMA weight
-    scaled by how many valid samples a batch contributes. Normalization always uses
-    the running buffers (not per-batch stats), so the transform is identical in train
-    and eval. Masked entries are re-zeroed on output so they never participate.
+    Normalizes each feature channel to zero mean / unit variance from running buffers
+    that are updated (in training) only over unmasked entries. The estimator is the
+    count-weighted cumulative average over every detection seen so far, so it converges
+    to the dataset statistic rather than tracking the current batch. ``momentum_floor``
+    bounds the update weight from below, which caps the memory at ``1 / momentum_floor``
+    batches; without it the buffers would freeze and a fine-tune on data with different
+    object sizes could never re-adapt.
+
+    Weighting by ``count`` (not per batch) matters here because detections per window,
+    and hence valid samples per channel, vary widely across movies; equal-per-batch
+    weighting would bias the mean toward sparse sequences.
+
+    Normalization always uses the running buffers (not per-batch stats), so the
+    transform is identical in train and eval. Masked entries are re-zeroed on output so
+    they never participate.
     """
 
-    def __init__(self, dim: int, momentum_per_sample: float = 1e-3, eps: float = 1e-5):
+    _version = 2
+
+    def __init__(self, dim: int, momentum_floor: float = 1e-3, eps: float = 1e-5):
         super().__init__()
-        self.momentum_per_sample = momentum_per_sample
+        self.momentum_floor = momentum_floor
         self.eps = eps
         self.register_buffer("mean", torch.zeros(dim))
         self.register_buffer("sq_mean", torch.ones(dim))
+        # float64: float32 stops incrementing past its 24-bit mantissa (~1.7e7 samples).
+        self.register_buffer("count_seen", torch.zeros(dim, dtype=torch.float64))
         self.register_buffer("initialized", torch.zeros(dim, dtype=torch.bool))
         self._dbg_steps = 0  # debug: throttle running-stat logging
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key = prefix + "count_seen"
+        if key not in state_dict:
+            # Checkpoints predating count_seen resume as a floored EMA instead of
+            # snapping to a fresh cumulative average on the first batch.
+            state_dict[key] = torch.full_like(self.count_seen, 1e12)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @torch.no_grad()
     def update(self, x, mask):
@@ -87,7 +109,16 @@ class MaskedRunningNorm(nn.Module):
         batch_mean = sum_x / denom
         batch_sq_mean = sum_sq / denom
 
-        alpha = (1 - (1 - self.momentum_per_sample) ** count).to(self.mean.dtype)
+        self.count_seen += count.double()
+        # Count-weighted cumulative average, i.e. the exact sample mean over all
+        # detections seen. Clamped to [floor, 1]: the floor keeps the estimator from
+        # freezing, the upper bound guards the lerp against an extrapolating weight
+        # when count_seen was seeded by the legacy-checkpoint path above.
+        alpha = (
+            (count.double() / self.count_seen.clamp_min(1.0))
+            .clamp(self.momentum_floor, 1.0)
+            .to(self.mean.dtype)
+        )
 
         first = valid & ~self.initialized
         update = valid & self.initialized
@@ -167,7 +198,7 @@ class FeatureEmbedding(nn.Module):
             )
         # Standardizes present channels and re-zeros masked ones.
         features = self.norm(features, feature_mask)
-        
+
         x = torch.cat((features, feature_mask.to(features.dtype)), dim=-1)
         return self.fc2(self.act(self.fc1(x)))
 
