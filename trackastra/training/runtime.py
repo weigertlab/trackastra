@@ -91,12 +91,23 @@ def build_lightning_runtime(
             raise ValueError(
                 f'Logdir {logdir} exists, set "--resume t" if you want to resume'
             )
+        # Two callbacks, because one cannot do both jobs: a monitored checkpoint only
+        # writes on improvement, and its save_last copies whatever it last wrote. So
+        # save_last on the monitored callback yields a last.ckpt frozen at the best
+        # epoch rather than a resumable latest one.
         callbacks.append(
             pl.pytorch.callbacks.ModelCheckpoint(
                 dirpath=logdir / "checkpoints",
                 monitor="val_loss",
                 mode="min",
                 save_top_k=1,
+                save_last=False,
+            )
+        )
+        callbacks.append(
+            pl.pytorch.callbacks.ModelCheckpoint(
+                dirpath=logdir / "checkpoints",
+                save_top_k=0,
                 save_last=True,
             )
         )
