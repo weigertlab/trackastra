@@ -17,7 +17,11 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from trackastra import model as model_api
 from trackastra.data import wrfeat
-from trackastra.data.dataset import TrackingDataset, collate_sequence_padding
+from trackastra.data.dataset import (
+    TrackingDataset,
+    association_distances,
+    collate_sequence_padding,
+)
 from trackastra.data.distributed import (
     BalancedBatchSampler,
     BalancedDistributedSampler,
@@ -40,6 +44,8 @@ SourceFormat = Literal["ctc", "geff"]
 SourceSpec = dict[str, Any]
 SequenceLoader = Callable[..., TrackingSequence]
 logger = logging.getLogger(__name__)
+
+_CURRENT_MODEL_CONFIG_OVERRIDES = frozenset({"causal_norm"})
 
 SEQUENCE_LOADERS: dict[SourceFormat, SequenceLoader] = {
     "ctc": TrackingSequence.from_ctc,
@@ -605,6 +611,111 @@ def _candidate_link_audit(
     }
 
 
+def _feature_channel_stats(dataset: Any) -> dict[str, float]:
+    """Mean/std of every derived feature channel over all detections of a dataset.
+
+    Applies the dataset's own feature recipe and diameter scaling, so values are in the
+    units the model consumes, but without augmentation or detection dropping. Channels
+    the dataset cannot provide (missing source property, or 3D-only channels on 2D data)
+    are masked out and reported as NaN.
+    """
+    import numpy as np
+
+    mode = getattr(dataset, "features", "none")
+    channels = wrfeat.feature_channels(mode, dataset.ndim)
+    if not channels:
+        return {}
+
+    total = np.zeros(len(channels), dtype=np.float64)
+    total_sq = np.zeros(len(channels), dtype=np.float64)
+    count = np.zeros(len(channels), dtype=np.float64)
+    for segment in dataset.sequence.detections:
+        feature = wrfeat.WRFeatures(
+            coords=np.asarray(segment.coords, dtype=np.float32),
+            labels=np.asarray(segment.labels),
+            timepoints=np.asarray(segment.timepoints, dtype=np.int32),
+            features={k: np.asarray(v) for k, v in segment.features.items()},
+        )
+        feature = wrfeat.scale_feature_geometry(feature, dataset.scale_factor)
+        values, mask = feature.stacked_with_mask(mode)
+        valid = np.where(mask, values, 0.0).astype(np.float64)
+        total += valid.sum(axis=0)
+        total_sq += np.square(valid).sum(axis=0)
+        count += mask.sum(axis=0)
+
+    stats: dict[str, float] = {}
+    for index, channel in enumerate(channels):
+        n = count[index]
+        if not n:
+            stats[f"feat_{channel.name}_mean"] = float("nan")
+            stats[f"feat_{channel.name}_std"] = float("nan")
+            continue
+        mean = total[index] / n
+        variance = max(total_sq[index] / n - mean**2, 0.0)
+        stats[f"feat_{channel.name}_mean"] = float(mean)
+        stats[f"feat_{channel.name}_std"] = float(np.sqrt(variance))
+    return stats
+
+
+def _displacement_stats(dataset: Any, delta_cutoff: int) -> dict[str, float]:
+    """Displacement between consecutively linked objects, in model units.
+
+    Exact over every unique positive association within ``delta_cutoff`` frames,
+    unlike the sampled ``positive_distance_*`` percentiles of the candidate audit.
+    """
+    import numpy as np
+
+    distances = association_distances(dataset, delta_cutoff)
+    if not len(distances):
+        return {}
+    return {
+        "displacement_mean": float(distances.mean()),
+        "displacement_std": float(distances.std()),
+        "displacement_max": float(distances.max()),
+    }
+
+
+def _lineage_event_stats(gt: Any) -> dict[str, float]:
+    """Fraction of GT nodes that appear, disappear, or divide.
+
+    Nodes in the first (last) frame are excluded from the appearance (disappearance)
+    count, where the event is forced by the movie boundary rather than being a real
+    track birth or death. Nodes whose incoming/outgoing GT edge set is not fully known
+    are excluded from the corresponding count, as they already are for divisions.
+    """
+    import numpy as np
+
+    if gt is None or gt.node_in_degree is None or gt.node_out_degree is None:
+        return {}
+    timepoints = np.asarray(gt.timepoints)
+    if not len(timepoints):
+        return {}
+    in_degree = np.asarray(gt.node_in_degree)
+    out_degree = np.asarray(gt.node_out_degree)
+    predecessor_available = (
+        np.ones(len(in_degree), dtype=bool)
+        if gt.node_predecessor_set_available is None
+        else np.asarray(gt.node_predecessor_set_available, dtype=bool)
+    )
+    successor_available = (
+        np.ones(len(out_degree), dtype=bool)
+        if gt.node_successor_set_available is None
+        else np.asarray(gt.node_successor_set_available, dtype=bool)
+    )
+    appear_eligible = predecessor_available & (timepoints > timepoints.min())
+    disappear_eligible = successor_available & (timepoints < timepoints.max())
+
+    def _fraction(hits: np.ndarray, eligible: np.ndarray) -> float:
+        n = int(eligible.sum())
+        return float(hits[eligible].sum() / n) if n else float("nan")
+
+    return {
+        "appear_fraction": _fraction(in_degree == 0, appear_eligible),
+        "disappear_fraction": _fraction(out_degree == 0, disappear_eligible),
+        "division_fraction": _fraction(out_degree >= 2, successor_available),
+    }
+
+
 def _dataset_summary_rows(
     loader: DataLoader,
     *,
@@ -757,6 +868,9 @@ def _dataset_summary_rows(
                 "candidate_k": candidate_k,
                 "candidate_mode": candidate_mode,
                 "spatial_cutoff": spatial_cutoff,
+                **_lineage_event_stats(gt),
+                **_displacement_stats(dataset, delta_cutoff),
+                **_feature_channel_stats(dataset),
                 **audit,
             }
         )
@@ -904,11 +1018,16 @@ def load_model_from_path(
     """Load a TrackingTransformer from a model folder or checkpoint file."""
     folder, checkpoint_path = resolve_model_checkpoint_reference(path)
     if expected_config is not None:
-        _validate_model_config(folder, expected_config)
+        _warn_model_config_mismatches(folder, expected_config)
     kwargs = {"args": args, "map_location": map_location}
     if checkpoint_path is not None:
         kwargs["checkpoint_path"] = checkpoint_path
-    return model_cls.from_folder(folder, **kwargs)
+    model = model_cls.from_folder(folder, **kwargs)
+    if expected_config is not None:
+        for key in _CURRENT_MODEL_CONFIG_OVERRIDES:
+            if key in expected_config:
+                model.config[key] = expected_config[key]
+    return model
 
 
 def _config_values_match(left: Any, right: Any) -> bool:
@@ -918,23 +1037,31 @@ def _config_values_match(left: Any, right: Any) -> bool:
     return left == right
 
 
-def _validate_model_config(folder: Path, expected_config: Mapping[str, Any]) -> None:
+def _warn_model_config_mismatches(
+    folder: Path, expected_config: Mapping[str, Any]
+) -> None:
     import yaml
 
     with open(folder / "config.yaml") as f:
         loaded_config = yaml.safe_load(f) or {}
 
-    errors = []
-    for key, value in loaded_config.items():
+    mismatches = []
+    for key, value in sorted(loaded_config.items()):
         if key in expected_config and not _config_values_match(
             value, expected_config[key]
         ):
-            errors.append(
-                f"Loaded model config {key}={value}, but current config "
-                f"{key}={expected_config[key]}."
+            source = (
+                "current" if key in _CURRENT_MODEL_CONFIG_OVERRIDES else "loaded"
             )
-    if errors:
-        raise ValueError("\n".join(errors))
+            mismatches.append(
+                f"{key}: loaded={value!r}, current={expected_config[key]!r} "
+                f"(using {source})"
+            )
+    if mismatches:
+        logger.warning(
+            "Loaded model config differs from current config:\n%s",
+            "\n".join(f"  {mismatch}" for mismatch in mismatches),
+        )
 
 
 def _inference_config_from_args(args: Any) -> dict[str, Any]:
@@ -1084,7 +1211,7 @@ class TrackastraTrainer:
             train_loader,
             None
             if runtime.logdir is None
-            else Path(runtime.logdir) / "debug" / "sampling_probs.csv",
+            else Path(runtime.logdir) / "diagnostics" / "sampling_probs.csv",
         )
         model_config = getattr(model, "config", {}) or {}
         max_neighbors = model_config.get("max_neighbors", (16,))
@@ -1097,7 +1224,7 @@ class TrackastraTrainer:
             train_loader,
             None
             if runtime.logdir is None
-            else Path(runtime.logdir) / "debug" / "dataset_summary.csv",
+            else Path(runtime.logdir) / "diagnostics" / "dataset_summary.csv",
             candidate_k=candidate_k,
             candidate_mode=(
                 str(model_config.get("sparse_knn_mode", "global"))

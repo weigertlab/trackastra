@@ -293,7 +293,8 @@ def _wr_augmenter(config: AugmentationConfig):
             p=0.8,
             degrees=180,
             tilt_degrees=config.tilt,
-            scale=(2 / 3, 1.5),
+            #scale=(2 / 3, 1.5),
+            scale=(0.5, 2),
             shear=(0.1, 0.1),
         ),
     ]

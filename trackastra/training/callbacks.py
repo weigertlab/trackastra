@@ -74,6 +74,9 @@ class EpochMetricsCSV(pl.pytorch.callbacks.Checkpoint):
         for key, value in metrics.items():
             if key.endswith("_step") or key in epoch_metric_bases:
                 continue
+            is_current = getattr(pl_module, "metric_is_current_epoch", None)
+            if is_current is not None and not is_current(key):
+                continue
             scalar = _scalar_metric(value)
             if scalar is not None:
                 row[key] = scalar

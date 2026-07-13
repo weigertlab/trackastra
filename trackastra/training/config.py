@@ -201,7 +201,7 @@ def create_train_parser() -> configargparse.ArgumentParser:
         action="store_true",
         help=(
             "Enable loss/grad spike dumps and per-batch dataset provenance logging "
-            "under <logdir>/debug."
+            "under <logdir>/diagnostics."
         ),
     )
     parser.add_argument("--attn_positional_bias_n_spatial", type=int, default=16)

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import urllib.request
@@ -470,6 +471,38 @@ def test_summarize_lam_split_sweep_selects_lowest_mean_aogm():
     assert summary["val_AOGM_lam_split_0p25"] == pytest.approx(3.0)
 
 
+def test_tracking_metrics_csv_is_long_form_and_upserted(tmp_path):
+    legacy_path = tmp_path / "metrics" / "tracking_metrics_epoch0000.csv"
+    legacy_path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "epoch": [0],
+            "global_step": [1],
+            "movie": ["01"],
+            "lam_split": [0.0],
+            "TRA": [0.7],
+        }
+    ).to_csv(legacy_path, index=False)
+    module = SimpleNamespace(
+        tracking_metrics_path=tmp_path / "metrics" / "tracking_metrics.csv",
+        global_step=10,
+    )
+    metrics = pd.DataFrame(
+        {"movie": ["01", "01"], "lam_split": [0.0, 0.25], "TRA": [0.8, 0.9]}
+    )
+
+    TrackingLightningModule._write_tracking_metrics(module, metrics, epoch=4)
+    module.global_step = 20
+    metrics.loc[0, "TRA"] = 0.85
+    TrackingLightningModule._write_tracking_metrics(module, metrics, epoch=4)
+    TrackingLightningModule._write_tracking_metrics(module, metrics, epoch=9)
+
+    out = pd.read_csv(module.tracking_metrics_path)
+    assert len(out) == 5
+    assert out[out["epoch"] == 4].iloc[0]["TRA"] == pytest.approx(0.85)
+    assert set(out["epoch"]) == {0, 4, 9}
+
+
 def test_tracking_eval_reuses_and_clears_cached_gt(monkeypatch):
     class CachedGT:
         def __init__(self):
@@ -841,7 +874,7 @@ def test_dataset_metric_rows_and_csv_upsert(tmp_path):
     module = SimpleNamespace(
         current_epoch=2,
         global_step=17,
-        dataset_metrics_path=tmp_path / "debug" / "dataset_metrics.csv",
+        dataset_metrics_path=tmp_path / "metrics" / "dataset_metrics.csv",
         trainer=SimpleNamespace(is_global_zero=True),
         _dataset_root_map_for_stage=lambda stage: {
             3: f"data/{stage}/three",
@@ -849,8 +882,8 @@ def test_dataset_metric_rows_and_csv_upsert(tmp_path):
         },
     )
     counts = {
-        "train": {3: np.array([12, 100, 8, 1, 2, 3, 2, 1])},
-        "val": {4: np.array([4, 20, 2, 0, 0, 0, 0, 0])},
+        "train": {3: np.array([12, 100, 8, 1, 2, 3, 2, 1, 20, 9, 11, 4, 89, 5])},
+        "val": {4: np.array([4, 20, 2, 0, 0, 0, 0, 0, 2, 1.5, 2, 1, 18, 1])},
     }
     module._gather_dataset_assoc_counts = lambda: counts
     module._dataset_metric_rows = lambda values: (
@@ -867,6 +900,12 @@ def test_dataset_metric_rows_and_csv_upsert(tmp_path):
     assert train["sampled_windows"] == 12
     assert train["regular_f1"] == pytest.approx(16 / 19)
     assert train["division_jaccard"] == pytest.approx(3 / 6)
+    assert train["association_loss_sum"] == pytest.approx(20)
+    assert train["association_loss_fraction"] == pytest.approx(1)
+    assert train["association_loss_per_supervised_pair"] == pytest.approx(0.2)
+    assert train["positive_probability_mean"] == pytest.approx(9 / 11)
+    assert train["negative_probability_mean"] == pytest.approx(4 / 89)
+    assert train["brier"] == pytest.approx(0.05)
 
 
 class _SamplerDataset(Dataset):
@@ -1292,7 +1331,7 @@ def test_write_sampler_prob_debug_csv(tmp_path):
         weight_by_dataset=True,
     )
     loader = DataLoader(dataset, batch_sampler=sampler)
-    path = tmp_path / "debug" / "sampling_probs.csv"
+    path = tmp_path / "diagnostics" / "sampling_probs.csv"
 
     training_api._write_sampler_prob_debug(loader, path)
 
@@ -1353,7 +1392,7 @@ def test_write_dataset_summary_debug_csv(tmp_path):
     )
     sampler = BalancedBatchSampler(dataset, batch_size=1, num_samples=5)
     loader = DataLoader(dataset, batch_sampler=sampler)
-    path = tmp_path / "debug" / "dataset_summary.csv"
+    path = tmp_path / "diagnostics" / "dataset_summary.csv"
 
     training_api._write_dataset_summary_debug(
         loader,
@@ -1399,8 +1438,90 @@ def test_dataset_assoc_counts_group_by_dataset_and_link_type():
         dataset_index,
     )
 
-    np.testing.assert_array_equal(counts[3], np.array([1, 2, 1, 0, 0, 0, 1, 0]))
-    np.testing.assert_array_equal(counts[4], np.array([1, 2, 0, 0, 0, 1, 0, 1]))
+    np.testing.assert_array_equal(counts[3][:8], np.array([1, 2, 1, 0, 0, 0, 1, 0]))
+    np.testing.assert_array_equal(counts[4][:8], np.array([1, 2, 0, 0, 0, 1, 0, 1]))
+    assert counts[3][8] == 0
+    assert counts[3][10] == 1
+    assert counts[3][12] == 1
+
+
+def test_edge_error_rows_are_bounded_and_identifiable():
+    batch = {
+        "coords": torch.tensor([[[0.0, 0.0, 0.0], [1.0, 3.0, 4.0]]]),
+        "timepoints": torch.tensor([[0, 1]]),
+        "labels": torch.tensor([[7, 8]]),
+        "dataset_index": torch.tensor([2]),
+        "seg_index": torch.tensor([3]),
+        "window_index": torch.tensor([4]),
+        "window_start": torch.tensor([0]),
+    }
+    A = torch.zeros((1, 2, 2))
+    A[0, 0, 1] = 1
+    prob = torch.zeros_like(A)
+    prob[0, 0, 1] = 0.1
+    prob[0, 1, 0] = 0.9
+    loss = torch.zeros_like(A)
+    loss[0, 0, 1] = 2
+    loss[0, 1, 0] = 1
+    mask = torch.zeros_like(A)
+    mask[0, 0, 1] = 1
+    mask[0, 1, 0] = 1
+    gt_division = torch.zeros_like(A, dtype=torch.bool)
+
+    rows = TrackingLightningModule._edge_error_rows_for_batch(
+        batch, A, prob, loss, mask, gt_division
+    )
+
+    assert {row["error_type"] for row in rows} == {
+        "false_negative",
+        "false_positive",
+    }
+    false_negative = next(row for row in rows if row["error_type"] == "false_negative")
+    assert false_negative["dataset_index"] == 2
+    assert false_negative["source_label"] == 7
+    assert false_negative["target_label"] == 8
+    assert false_negative["distance"] == pytest.approx(5)
+    assert false_negative["dt"] == 1
+
+
+def test_representation_hooks_capture_each_transformer_layer(tmp_path):
+    model = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=8,
+        nhead=1,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        pos_embed_per_dim=2,
+        spatial_cutoff=10,
+    )
+    module = TrackingLightningModule(model)
+    module.eval()
+    module._trainer = SimpleNamespace(
+        is_global_zero=True,
+        sanity_checking=False,
+        current_epoch=2,
+        global_step=7,
+    )
+    module.representation_stats_path = tmp_path / "representation_stats.csv"
+    batch = {
+        "coords": torch.tensor([[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]),
+        "padding_mask": torch.tensor([[False, False]]),
+    }
+
+    handles = module._representation_hooks(batch)
+    try:
+        model(batch["coords"], padding_mask=batch["padding_mask"])
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert {row["module"] for row in module._representation_rows} == {
+        "encoder.0",
+        "decoder.0",
+    }
+    assert all(row["n_tokens"] == 2 for row in module._representation_rows)
+    assert all(row["nonfinite_fraction"] == 0 for row in module._representation_rows)
 
 
 def test_balanced_batch_sampler_iter_len_match_variable_batch():
@@ -1856,6 +1977,44 @@ def test_load_model_from_path_delegates_folder_and_checkpoint(tmp_path):
     ]
 
 
+def test_load_model_from_path_warns_and_applies_current_config_overrides(
+    tmp_path, caplog
+):
+    original = TrackingTransformer(
+        coord_dim=2,
+        feat_dim=0,
+        d_model=8,
+        nhead=1,
+        num_encoder_layers=6,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        causal_norm="none",
+    )
+    original.save(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_model_from_path(
+            tmp_path,
+            expected_config={
+                "num_encoder_layers": 12,
+                "causal_norm": "quiet_softmax",
+            },
+        )
+
+    assert loaded.config["num_encoder_layers"] == 6
+    assert loaded.config["causal_norm"] == "quiet_softmax"
+    assert len(caplog.records) == 1
+    assert "num_encoder_layers: loaded=6, current=12 (using loaded)" in caplog.text
+    assert (
+        "causal_norm: loaded='none', current='quiet_softmax' (using current)"
+        in caplog.text
+    )
+    fine_tuned = tmp_path / "fine_tuned"
+    loaded.save(fine_tuned)
+    with open(fine_tuned / "config.yaml") as f:
+        assert yaml.safe_load(f)["causal_norm"] == "quiet_softmax"
+
+
 def test_trackastra_model_checkpoint_writes_configs_and_saves_best(tmp_path):
     saved_paths = []
 
@@ -2123,18 +2282,25 @@ def test_epoch_metrics_csv_writes_one_upserted_row_per_epoch(tmp_path):
             "train_loss_epoch": torch.tensor(0.5),
             "val_loss": torch.tensor(0.4),
             "not_scalar": torch.ones(2),
+            "grad_norm": torch.tensor(2.0),
+            "val_TRA": torch.tensor(0.9),
         },
         optimizers=[optimizer],
     )
     callback = EpochMetricsCSV(tmp_path)
+    module = SimpleNamespace(
+        metric_is_current_epoch=lambda name: (
+            name not in {"grad_norm", "val_TRA"} or trainer.current_epoch == 0
+        )
+    )
 
-    callback.on_train_epoch_end(trainer, None)
+    callback.on_train_epoch_end(trainer, module)
     trainer.global_step = 5
     trainer.callback_metrics["val_loss"] = torch.tensor(0.3)
-    callback.on_train_epoch_end(trainer, None)
+    callback.on_train_epoch_end(trainer, module)
     trainer.current_epoch = 1
     trainer.global_step = 9
-    callback.on_train_epoch_end(trainer, None)
+    callback.on_train_epoch_end(trainer, module)
 
     metrics = pd.read_csv(tmp_path / "metrics" / "metrics.csv")
     assert list(metrics["epoch"]) == [0, 1]
@@ -2142,6 +2308,10 @@ def test_epoch_metrics_csv_writes_one_upserted_row_per_epoch(tmp_path):
     assert list(metrics["val_loss"]) == pytest.approx([0.3, 0.3])
     assert list(metrics["train_loss_epoch"]) == pytest.approx([0.5, 0.5])
     assert list(metrics["lr-AdamW"]) == pytest.approx([0.01, 0.01])
+    assert metrics.loc[0, "grad_norm"] == pytest.approx(2.0)
+    assert metrics.loc[0, "val_TRA"] == pytest.approx(0.9)
+    assert pd.isna(metrics.loc[1, "grad_norm"])
+    assert pd.isna(metrics.loc[1, "val_TRA"])
     assert "train_loss" not in metrics
     assert "train_loss_step" not in metrics
     assert "not_scalar" not in metrics
@@ -2156,11 +2326,15 @@ def test_configure_lightning_module_runtime_paths(tmp_path):
         debug=True,
     )
 
-    assert module.loss_spike_debug_dir == tmp_path / "debug" / "debug_loss_spikes"
-    assert module.batch_provenance_path == tmp_path / "debug"
-    assert module.viz_debug_dir == tmp_path / "debug" / "viz"
-    assert module.dataset_metrics_path == tmp_path / "debug" / "dataset_metrics.csv"
-    assert module.tracking_metrics_path == tmp_path / "metrics"
+    assert module.loss_spike_debug_dir == tmp_path / "diagnostics" / "failures"
+    assert module.batch_provenance_path == tmp_path / "diagnostics" / "provenance"
+    assert module.viz_debug_dir == tmp_path / "diagnostics" / "viz"
+    assert module.dataset_metrics_path == tmp_path / "metrics" / "dataset_metrics.csv"
+    assert module.tracking_metrics_path == tmp_path / "metrics" / "tracking_metrics.csv"
+    assert module.edge_errors_path == tmp_path / "diagnostics" / "edge_errors.csv"
+    assert module.representation_stats_path == (
+        tmp_path / "diagnostics" / "representation_stats.csv"
+    )
 
     configure_lightning_module_runtime_paths(
         module,
@@ -2173,6 +2347,8 @@ def test_configure_lightning_module_runtime_paths(tmp_path):
     assert module.viz_debug_dir is None
     assert module.dataset_metrics_path is None
     assert module.tracking_metrics_path is None
+    assert module.edge_errors_path is None
+    assert module.representation_stats_path is None
 
 
 def test_build_or_resume_lightning_module_uses_last_checkpoint(tmp_path):

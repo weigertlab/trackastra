@@ -211,19 +211,31 @@ def configure_lightning_module_runtime_paths(
     logdir: Path | None,
     debug: bool,
 ) -> None:
-    """Set optional debug and metrics output paths on a Lightning module."""
+    """Set diagnostics and metrics output paths on a Lightning module."""
     if debug:
-        debug_root = (Path(logdir) if logdir is not None else Path(".")) / "debug"
-        module.loss_spike_debug_dir = debug_root / "debug_loss_spikes"
-        module.batch_provenance_path = debug_root
-        module.viz_debug_dir = debug_root / "viz"
+        diagnostics_root = (
+            Path(logdir) if logdir is not None else Path(".")
+        ) / "diagnostics"
+        module.loss_spike_debug_dir = diagnostics_root / "failures"
+        module.batch_provenance_path = diagnostics_root / "provenance"
+        module.viz_debug_dir = diagnostics_root / "viz"
     else:
         module.loss_spike_debug_dir = None
         module.batch_provenance_path = None
         module.viz_debug_dir = None
     module.dataset_metrics_path = (
-        Path(logdir) / "debug" / "dataset_metrics.csv" if logdir is not None else None
+        Path(logdir) / "metrics" / "dataset_metrics.csv" if logdir is not None else None
     )
     module.tracking_metrics_path = (
-        Path(logdir) / "metrics" if logdir is not None else None
+        Path(logdir) / "metrics" / "tracking_metrics.csv"
+        if logdir is not None
+        else None
+    )
+    module.edge_errors_path = (
+        Path(logdir) / "diagnostics" / "edge_errors.csv" if logdir is not None else None
+    )
+    module.representation_stats_path = (
+        Path(logdir) / "diagnostics" / "representation_stats.csv"
+        if logdir is not None
+        else None
     )

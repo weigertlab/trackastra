@@ -83,6 +83,24 @@ class TrackingLightningModule(LightningModule):
         sorted({0.5, *[float(x) for x in np.linspace(0.2, 0.8, 10)]})
     )
     _ASSOC_TIME_BINS = 20
+    _EDGE_ERROR_TOPK = 50
+    _STEP_ONLY_METRICS = frozenset(
+        {
+            "detections_per_batch",
+            "detections_per_frame",
+            "padding_fraction",
+            "supervised_per_batch",
+            "supervised_per_frame",
+        }
+    )
+    _TRACKING_METRIC_PREFIXES = (
+        "val_AOGM",
+        "val_DET",
+        "val_LNK_ERR",
+        "val_TRA",
+        "val_best_",
+        "val_track_",
+    )
 
     def __init__(
         self,
@@ -202,7 +220,7 @@ class TrackingLightningModule(LightningModule):
         self._loss_spike_debug_total = 0
         self._last_train_debug_context = None
         # Per-epoch feature-space viz of a few sampled windows (set by the trainer
-        # to a directory under <logdir>/debug when --debug is on).
+        # to a directory under <logdir>/diagnostics when --debug is on).
         self.viz_debug_dir: Path | None = None
         self._viz_n_per_epoch = 4
         self._viz_epoch_count = 0
@@ -212,10 +230,28 @@ class TrackingLightningModule(LightningModule):
         self.batch_provenance_path: Path | None = None
         self.dataset_metrics_path: Path | None = None
         self.tracking_metrics_path: Path | None = None
+        self.edge_errors_path: Path | None = None
+        self.representation_stats_path: Path | None = None
         self._batch_provenance_map: dict[int, str] = {}
         self._batch_provenance_map_written = False
         self._batch_provenance_epochs_started: set[int] = set()
         self._assoc_time_dataset_maps: dict[str, dict[int, str]] = {}
+        self._edge_error_rows: list[dict[str, Any]] = []
+        self._representation_rows: list[dict[str, Any]] = []
+        self._layer_grad_rms: dict[str, float] = {}
+        self._layer_grad_epoch = -1
+        self._grad_metrics_epoch = -1
+        self._tracking_metrics_epoch = -1
+
+    def metric_is_current_epoch(self, name: str) -> bool:
+        """Return whether an epoch CSV metric was measured in the current epoch."""
+        if name in self._STEP_ONLY_METRICS:
+            return False
+        if name in {"grad_norm", "grad_norm_max"}:
+            return self._grad_metrics_epoch == int(self.current_epoch)
+        if name.startswith(self._TRACKING_METRIC_PREFIXES):
+            return self._tracking_metrics_epoch == int(self.current_epoch)
+        return True
 
     def _build_tracking_cache(self):
         """Build the per-movie validation-tracking cache once (rank 0).
@@ -383,15 +419,281 @@ class TrackingLightningModule(LightningModule):
         return pd.DataFrame(rows)
 
     def _write_tracking_metrics(self, metrics: pd.DataFrame, epoch: int) -> None:
-        """Write per-movie tracking metrics for one validation epoch."""
+        """Upsert per-movie tracking metrics into one long-form CSV."""
         if self.tracking_metrics_path is None:
             return
-        path = self.tracking_metrics_path / f"tracking_metrics_epoch{epoch:04d}.csv"
+        path = self.tracking_metrics_path
         path.parent.mkdir(parents=True, exist_ok=True)
         out = metrics.copy()
         out.insert(0, "epoch", int(epoch))
         out.insert(1, "global_step", int(self.global_step))
+        if path.exists():
+            out = pd.concat((pd.read_csv(path), out), ignore_index=True)
+        else:
+            legacy = sorted(path.parent.glob("tracking_metrics_epoch*.csv"))
+            if legacy:
+                out = pd.concat(
+                    ([pd.read_csv(item) for item in legacy] + [out]),
+                    ignore_index=True,
+                )
+        out = out.drop_duplicates(
+            subset=("epoch", "movie", "lam_split"), keep="last"
+        )
+        out = out.sort_values(["epoch", "movie", "lam_split"])
         out.to_csv(path, index=False)
+
+    @classmethod
+    def _edge_error_rows_for_batch(
+        cls,
+        batch: dict[str, Any],
+        A: torch.Tensor,
+        prob: torch.Tensor,
+        loss: torch.Tensor,
+        mask: torch.Tensor,
+        gt_division: torch.Tensor,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded set of the highest-loss FN and FP edges."""
+        supervised = mask.bool()
+        selectors = {
+            "false_negative": (A > 0.5) & (prob < 0.5) & supervised,
+            "false_positive": (A <= 0.5) & (prob >= 0.5) & supervised,
+        }
+        rows = []
+        for error_type, selector in selectors.items():
+            n_selected = int(selector.sum())
+            if n_selected == 0:
+                continue
+            edge_indices = torch.nonzero(selector, as_tuple=False)
+            _values, top = torch.topk(
+                loss[selector], k=min(cls._EDGE_ERROR_TOPK, n_selected)
+            )
+            b, source, target = edge_indices[top].unbind(dim=-1)
+            source_coord = batch["coords"][b, source, 1:].float()
+            target_coord = batch["coords"][b, target, 1:].float()
+            edge_values = {
+                "source_time": batch["timepoints"][b, source],
+                "source_label": batch["labels"][b, source],
+                "target_time": batch["timepoints"][b, target],
+                "target_label": batch["labels"][b, target],
+                "gt_division": gt_division[b, source, target],
+                "target": A[b, source, target],
+                "probability": prob[b, source, target],
+                "loss": loss[b, source, target],
+                "distance": torch.linalg.vector_norm(
+                    target_coord - source_coord, dim=-1
+                ),
+            }
+            edge_values = {
+                key: value.detach().cpu().tolist()
+                for key, value in edge_values.items()
+            }
+            sample_values = {
+                key: (
+                    [-1] * len(b)
+                    if batch.get(key) is None
+                    else batch[key][b].detach().cpu().tolist()
+                )
+                for key in (
+                    "dataset_index",
+                    "seg_index",
+                    "window_index",
+                    "window_start",
+                )
+            }
+            for index in range(len(b)):
+                is_positive = edge_values["target"][index] > 0.5
+                rows.append(
+                    {
+                        "error_type": error_type,
+                        "dataset_index": int(sample_values["dataset_index"][index]),
+                        "seg_index": int(sample_values["seg_index"][index]),
+                        "window_index": int(sample_values["window_index"][index]),
+                        "window_start": int(sample_values["window_start"][index]),
+                        "source_time": int(edge_values["source_time"][index]),
+                        "source_label": int(edge_values["source_label"][index]),
+                        "target_time": int(edge_values["target_time"][index]),
+                        "target_label": int(edge_values["target_label"][index]),
+                        "gt_edge_type": (
+                            "division"
+                            if edge_values["gt_division"][index]
+                            else "regular"
+                            if is_positive
+                            else "none"
+                        ),
+                        "target": float(edge_values["target"][index]),
+                        "probability": float(edge_values["probability"][index]),
+                        "loss": float(edge_values["loss"][index]),
+                        "distance": float(edge_values["distance"][index]),
+                        "dt": (
+                            int(edge_values["target_time"][index])
+                            - int(edge_values["source_time"][index])
+                        ),
+                    }
+                )
+        return rows
+
+    @classmethod
+    def _top_edge_error_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Deduplicate overlapping windows and keep a bounded top-K per error type."""
+        identity = (
+            "error_type",
+            "dataset_index",
+            "seg_index",
+            "source_time",
+            "source_label",
+            "target_time",
+            "target_label",
+        )
+        unique = {}
+        for row in rows:
+            key = tuple(row[name] for name in identity)
+            if key not in unique or row["loss"] > unique[key]["loss"]:
+                unique[key] = row
+        kept = []
+        for error_type in ("false_negative", "false_positive"):
+            group = [row for row in unique.values() if row["error_type"] == error_type]
+            kept.extend(
+                sorted(group, key=lambda row: row["loss"], reverse=True)[
+                    : cls._EDGE_ERROR_TOPK
+                ]
+            )
+        return kept
+
+    def _write_edge_errors(self) -> None:
+        """Upsert bounded validation edge errors into a long-form CSV."""
+        if self.edge_errors_path is None:
+            return
+        rows = self._edge_error_rows
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            gathered = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(gathered, rows)
+            rows = [row for part in gathered for row in part]
+        if not self.trainer.is_global_zero or not rows:
+            return
+        rows = self._top_edge_error_rows(rows)
+        roots = self._dataset_root_map_for_stage("val")
+        current = pd.DataFrame(
+            [
+                {
+                    "epoch": int(self.current_epoch),
+                    "global_step": int(self.global_step),
+                    "split": "val",
+                    "dataset_root": roots.get(row["dataset_index"], ""),
+                    **row,
+                }
+                for row in rows
+            ]
+        )
+        path = self.edge_errors_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            previous = pd.read_csv(path)
+            previous = previous[previous["epoch"] != int(self.current_epoch)]
+            current = pd.concat((previous, current), ignore_index=True)
+        current = current.sort_values(
+            ["epoch", "error_type", "loss"], ascending=[True, True, False]
+        )
+        current.to_csv(path, index=False)
+
+    def _named_transformer_layers(self):
+        """Yield stable names for encoder and decoder layers."""
+        for kind in ("encoder", "decoder"):
+            for index, layer in enumerate(getattr(self.model, kind, ())):
+                yield f"{kind}.{index}", layer
+
+    @staticmethod
+    def _module_rms(module: torch.nn.Module, *, gradients: bool = False) -> float:
+        """Return RMS over all module parameters or their current gradients."""
+        sum_squares = 0.0
+        count = 0
+        for parameter in module.parameters():
+            value = parameter.grad if gradients else parameter
+            if value is None:
+                continue
+            value = value.detach().float()
+            sum_squares += float(value.square().sum())
+            count += value.numel()
+        return (sum_squares / count) ** 0.5 if count else float("nan")
+
+    def _representation_hooks(self, batch: dict[str, Any]):
+        """Capture activation health for one fixed validation batch."""
+        if (
+            self.representation_stats_path is None
+            or not self.trainer.is_global_zero
+            or self.trainer.sanity_checking
+        ):
+            return []
+        valid_tokens = ~batch["padding_mask"].bool()
+        handles = []
+
+        def hook(name: str, module: torch.nn.Module):
+            def capture(_module, inputs, output):
+                before = inputs[0].detach().float()[valid_tokens]
+                after = output.detach().float()[valid_tokens]
+                finite = torch.isfinite(after)
+                finite_values = after[finite]
+                before_rms = (
+                    float(before.square().mean().sqrt()) if before.numel() else 0.0
+                )
+                delta = after - before
+                self._representation_rows.append(
+                    {
+                        "epoch": int(self.current_epoch),
+                        "global_step": int(self.global_step),
+                        "module": name,
+                        "n_tokens": int(valid_tokens.sum()),
+                        "activation_rms": (
+                            float(finite_values.square().mean().sqrt())
+                            if finite_values.numel()
+                            else float("nan")
+                        ),
+                        "activation_std": (
+                            float(finite_values.std(unbiased=False))
+                            if finite_values.numel()
+                            else float("nan")
+                        ),
+                        "residual_update_ratio": (
+                            float(delta.square().mean().sqrt()) / max(before_rms, 1e-12)
+                            if delta.numel()
+                            else float("nan")
+                        ),
+                        "nonfinite_fraction": (
+                            1.0 - float(finite.float().mean())
+                            if finite.numel()
+                            else float("nan")
+                        ),
+                        "parameter_rms": self._module_rms(module),
+                        "gradient_rms_snapshot": (
+                            self._layer_grad_rms.get(name, float("nan"))
+                            if self._layer_grad_epoch == int(self.current_epoch)
+                            else float("nan")
+                        ),
+                    }
+                )
+
+            return capture
+
+        for name, layer in self._named_transformer_layers():
+            handles.append(layer.register_forward_hook(hook(name, layer)))
+        return handles
+
+    def _write_representation_stats(self) -> None:
+        """Upsert fixed-batch encoder and decoder health statistics."""
+        if (
+            self.representation_stats_path is None
+            or not self.trainer.is_global_zero
+            or not self._representation_rows
+        ):
+            return
+        current = pd.DataFrame(self._representation_rows)
+        path = self.representation_stats_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            previous = pd.read_csv(path)
+            previous = previous[previous["epoch"] != int(self.current_epoch)]
+            current = pd.concat((previous, current), ignore_index=True)
+        current = current.sort_values(["epoch", "module"])
+        current.to_csv(path, index=False)
 
     _EDGE_KEYS = ("fn", "fp", "fn_div", "fp_div")
 
@@ -629,19 +931,18 @@ class TrackingLightningModule(LightningModule):
                     "data_dim_embed=True requires source_ndim in every training batch"
                 )
             dim_kw["source_ndim"] = batch["source_ndim"]
+        forward_model = self._forward_model if self.training else self.model
         if self.node_loss > 0:
-            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = (
-                self._forward_model(
-                    coords,
-                    feats,
-                    padding_mask=padding_mask,
-                    return_node_logits=True,
-                    **mask_kw,
-                    **dim_kw,
-                )
+            A_pred, neighbor_mask, out_degree_logits, in_degree_logits = forward_model(
+                coords,
+                feats,
+                padding_mask=padding_mask,
+                return_node_logits=True,
+                **mask_kw,
+                **dim_kw,
             )
         else:
-            A_pred, neighbor_mask = self._forward_model(
+            A_pred, neighbor_mask = forward_model(
                 coords, feats, padding_mask=padding_mask, **mask_kw, **dim_kw
             )
         # A_pred = output["assoc_matrix"]
@@ -772,6 +1073,7 @@ class TrackingLightningModule(LightningModule):
         edge_counts = None
         assoc_time_counts = None
         dataset_assoc_counts = None
+        edge_error_rows = []
         if self.log_edge_rates:
             with torch.no_grad():
                 if self.causal_norm != "none":
@@ -806,9 +1108,19 @@ class TrackingLightningModule(LightningModule):
                     mask,
                     division_tracks,
                     batch.get("dataset_index"),
+                    loss_before_reduce,
                 )
                 if node_div_counts is not None:
                     edge_counts.update(node_div_counts)
+                if not self.training and self.edge_errors_path is not None:
+                    edge_error_rows = self._edge_error_rows_for_batch(
+                        batch,
+                        A,
+                        prob,
+                        loss_before_reduce,
+                        mask,
+                        division_tracks,
+                    )
 
         return dict(
             loss=loss,
@@ -821,6 +1133,7 @@ class TrackingLightningModule(LightningModule):
             edge_counts=edge_counts,
             assoc_time_counts=assoc_time_counts,
             dataset_assoc_counts=dataset_assoc_counts,
+            edge_error_rows=edge_error_rows,
             node_loss_out=node_loss_out,
             node_loss_in=node_loss_in,
             consistency_loss=consistency_loss,
@@ -894,9 +1207,10 @@ class TrackingLightningModule(LightningModule):
         mask: torch.Tensor,
         gt_division: torch.Tensor,
         dataset_index: torch.Tensor | None,
+        loss_before_reduce: torch.Tensor | None = None,
         threshold: float = 0.5,
     ) -> dict[int, np.ndarray]:
-        """Return regular and division TP/FP/FN counts grouped by dataset."""
+        """Return association counts, loss, and calibration grouped by dataset."""
         if dataset_index is None:
             return {}
         supervised = mask.bool()
@@ -910,6 +1224,9 @@ class TrackingLightningModule(LightningModule):
         pred_division = pred * (row + col) > 2
         pred_regular = pred_pos & ~pred_division
         false_pos = pred_pos & ~gt_pos
+        brier = (prob - A.float()).square()
+        if loss_before_reduce is None:
+            loss_before_reduce = torch.zeros_like(prob)
 
         dataset_ids = dataset_index.detach().to("cpu").numpy()
         out = {}
@@ -917,17 +1234,26 @@ class TrackingLightningModule(LightningModule):
             selected = torch.as_tensor(
                 dataset_ids == current, device=A.device, dtype=torch.bool
             )[:, None, None]
+            selected_supervised = supervised & selected
+            positives = gt_pos & selected
+            negatives = ~gt_pos & selected_supervised
             values = (
                 int(np.sum(dataset_ids == current)),
-                int((supervised & selected).sum()),
+                int(selected_supervised.sum()),
                 int((gt_regular & pred_pos & selected).sum()),
                 int((false_pos & pred_regular & selected).sum()),
                 int((gt_regular & ~pred_pos & selected).sum()),
                 int((gt_div & pred_pos & selected).sum()),
                 int((false_pos & pred_division & selected).sum()),
                 int((gt_div & ~pred_pos & selected).sum()),
+                float((loss_before_reduce * selected).sum()),
+                float(prob[positives].sum()),
+                int(positives.sum()),
+                float(prob[negatives].sum()),
+                int(negatives.sum()),
+                float(brier[selected_supervised].sum()),
             )
-            out[int(current)] = np.asarray(values, dtype=np.int64)
+            out[int(current)] = np.asarray(values, dtype=np.float64)
         return out
 
     def _accumulate_dataset_assoc_counts(
@@ -950,7 +1276,7 @@ class TrackingLightningModule(LightningModule):
             for stage, counts in item.items():
                 acc = merged.setdefault(stage, {})
                 for dataset_index, value in counts.items():
-                    array = np.asarray(value, dtype=np.int64)
+                    array = np.asarray(value, dtype=np.float64)
                     acc[dataset_index] = (
                         acc[dataset_index] + array
                         if dataset_index in acc
@@ -977,9 +1303,15 @@ class TrackingLightningModule(LightningModule):
         rows = []
         for stage in ("train", "val"):
             roots = self._dataset_root_map_for_stage(stage)
+            stage_loss = sum(
+                float(value[8]) for value in counts.get(stage, {}).values()
+            )
             for dataset_index, value in sorted(counts.get(stage, {}).items()):
                 samples, supervised, reg_tp, reg_fp, reg_fn, div_tp, div_fp, div_fn = (
-                    int(x) for x in value
+                    int(x) for x in value[:8]
+                )
+                loss_sum, pos_prob_sum, n_pos, neg_prob_sum, n_neg, brier_sum = (
+                    float(x) for x in value[8:]
                 )
                 regular = metrics_from_counts(reg_tp, reg_fp, reg_fn)
                 division = metrics_from_counts(div_tp, div_fp, div_fn)
@@ -992,6 +1324,22 @@ class TrackingLightningModule(LightningModule):
                         "dataset_root": roots.get(dataset_index, ""),
                         "sampled_windows": samples,
                         "supervised_pairs": supervised,
+                        "association_loss_sum": loss_sum,
+                        "association_loss_fraction": (
+                            loss_sum / stage_loss if stage_loss > 0 else float("nan")
+                        ),
+                        "association_loss_per_supervised_pair": (
+                            loss_sum / supervised if supervised else float("nan")
+                        ),
+                        "positive_probability_mean": (
+                            pos_prob_sum / n_pos if n_pos else float("nan")
+                        ),
+                        "negative_probability_mean": (
+                            neg_prob_sum / n_neg if n_neg else float("nan")
+                        ),
+                        "brier": (
+                            brier_sum / supervised if supervised else float("nan")
+                        ),
                         "regular_gt_edges": reg_tp + reg_fn,
                         "regular_pred_edges": reg_tp + reg_fp,
                         "regular_tp": reg_tp,
@@ -1021,8 +1369,11 @@ class TrackingLightningModule(LightningModule):
         path = self.dataset_metrics_path
         path.parent.mkdir(parents=True, exist_ok=True)
         current = pd.DataFrame(rows)
-        if path.exists():
-            previous = pd.read_csv(path)
+        previous_path = path
+        if not previous_path.exists():
+            previous_path = path.parent.parent / "debug" / path.name
+        if previous_path.exists():
+            previous = pd.read_csv(previous_path)
             current = pd.concat((previous, current), ignore_index=True)
             current = current.drop_duplicates(
                 subset=("epoch", "split", "dataset_index"), keep="last"
@@ -1522,7 +1873,7 @@ class TrackingLightningModule(LightningModule):
         if self.loss_spike_debug_dir is not None:
             return Path(self.loss_spike_debug_dir)
         root = getattr(self.trainer, "default_root_dir", None) or "."
-        return Path(root) / "debug_loss_spikes"
+        return Path(root) / "diagnostics" / "failures"
 
     @staticmethod
     def _loss_tag(value: float) -> str:
@@ -1673,6 +2024,8 @@ class TrackingLightningModule(LightningModule):
         self._edge_counts["val"] = {}
         self._assoc_time_counts["val"] = {}
         self._dataset_assoc_counts["val"] = {}
+        self._edge_error_rows = []
+        self._representation_rows = []
 
     def checkpoint_path(self, logdir):
         path = Path(logdir) / "checkpoints" / "last.ckpt"
@@ -1696,7 +2049,19 @@ class TrackingLightningModule(LightningModule):
         if (
             self.grad_log_every_n_epochs > 0
             and self.current_epoch % self.grad_log_every_n_epochs == 0
+            and self._layer_grad_epoch != int(self.current_epoch)
+            and self.trainer.is_global_zero
         ):
+            self._layer_grad_rms = {
+                name: self._module_rms(layer, gradients=True)
+                for name, layer in self._named_transformer_layers()
+            }
+            self._layer_grad_epoch = int(self.current_epoch)
+        if (
+            self.grad_log_every_n_epochs > 0
+            and self.current_epoch % self.grad_log_every_n_epochs == 0
+        ):
+            self._grad_metrics_epoch = int(self.current_epoch)
             # Reduce per-epoch instead of logging every step: the raw per-step
             # (pre-clip) norm is very jagged. "grad_norm" is the epoch mean
             # (typical magnitude / trend), "grad_norm_max" the epoch max (spike
@@ -1899,7 +2264,12 @@ class TrackingLightningModule(LightningModule):
         )
 
     def validation_step(self, batch, batch_idx):
-        out = self._common_step(batch)
+        handles = self._representation_hooks(batch) if batch_idx == 0 else []
+        try:
+            out = self._common_step(batch)
+        finally:
+            for handle in handles:
+                handle.remove()
         loss = out["loss"]
         self._maybe_save_loss_spike_debug("val", batch, batch_idx, out)
         if torch.isnan(loss):
@@ -1924,6 +2294,9 @@ class TrackingLightningModule(LightningModule):
         self._accumulate_edge_counts("val", out["edge_counts"])
         self._accumulate_assoc_time_counts("val", out["assoc_time_counts"])
         self._accumulate_dataset_assoc_counts("val", out["dataset_assoc_counts"])
+        self._edge_error_rows = self._top_edge_error_rows(
+            self._edge_error_rows + out["edge_error_rows"]
+        )
 
         if batch_idx == self.batch_val_tb_idx:
             self.batch_val_tb = dict(batch=batch, out=out)
@@ -1940,6 +2313,8 @@ class TrackingLightningModule(LightningModule):
         self._log_assoc_time_plot()
         self._log_node_error_plot()
         self._write_dataset_metrics()
+        self._write_edge_errors()
+        self._write_representation_stats()
 
         # Hack to make lightning progress bars with loss values persistent
         print(" ")
@@ -1987,6 +2362,7 @@ class TrackingLightningModule(LightningModule):
                     rank_zero_only=True,
                     batch_size=1,
                 )
+                self._tracking_metrics_epoch = int(self.current_epoch)
             except Exception:
                 logger.exception("Error logging tracking metrics")
 
