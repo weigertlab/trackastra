@@ -13,8 +13,9 @@ Example:
 
 import argparse
 import logging
+import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
 from time import perf_counter
@@ -76,6 +77,16 @@ class FrameFeatures:
 
 
 @dataclass(frozen=True)
+class MovieExtraction:
+    """Unprojected object features and extraction metadata for one variant."""
+
+    frames: tuple[FrameFeatures, ...]
+    effective_batch_size: int
+    median_dino_diameter: float
+    time_per_frame_ms: float
+
+
+@dataclass(frozen=True)
 class PreparedFrame:
     """Scaled frame data and supervision needed for DINO extraction."""
 
@@ -84,6 +95,39 @@ class PreparedFrame:
     image: np.ndarray
     mask: np.ndarray
     detection_indices: np.ndarray
+    labels: np.ndarray
+    centroids: np.ndarray
+    lineages: np.ndarray
+    pooling_plans: dict[tuple[Any, ...], "MaskPoolingPlan"] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class MaskPoolingPlan:
+    """Sparse linear map from a spatial token grid to mask-object means."""
+
+    labels: np.ndarray
+    centroids: np.ndarray
+    weights: torch.Tensor
+    object_weights: np.ndarray
+
+
+@dataclass(frozen=True)
+class LoadedMovie:
+    """CTC images, masks, and supervision shared by all model variants."""
+
+    root: Path
+    frame_numbers: tuple[int, ...]
+    images: Sequence[np.ndarray]
+    masks: Sequence[np.ndarray]
+    detections: Any
+    supervision: Any
+    lineage_parents: np.ndarray
+    object_diameters: tuple[np.ndarray, ...]
+    prepared_frames: dict[float, tuple[PreparedFrame, ...]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True)
@@ -279,58 +323,118 @@ def _spatial_tokens(
     return patch_tokens
 
 
-def _accumulate_mask_features(
-    pooled: torch.Tensor,
-    feature_grid: torch.Tensor,
+def _interpolation_axis_weights(
+    output_size: int, input_size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return source indices and weights for align_corners=False interpolation."""
+    coordinates = (
+        (np.arange(output_size, dtype=np.float32) + 0.5)
+        * np.float32(input_size / output_size)
+        - 0.5
+    )
+    lower_unclipped = np.floor(coordinates).astype(np.int64)
+    upper_unclipped = lower_unclipped + 1
+    upper_weights = coordinates - lower_unclipped
+    lower_weights = 1.0 - upper_weights
+    lower = np.clip(lower_unclipped, 0, input_size - 1)
+    upper = np.clip(upper_unclipped, 0, input_size - 1)
+    return (
+        lower,
+        upper,
+        lower_weights.astype(np.float32),
+        upper_weights.astype(np.float32),
+    )
+
+
+def _build_mask_pooling_plan(
     mask: np.ndarray,
     labels: np.ndarray,
-    upsample_size: tuple[int, int],
+    centroids: np.ndarray,
+    grid_shape: tuple[int, int],
     pixel_weights: np.ndarray | None = None,
-    channel_chunk_size: int = 64,
-) -> torch.Tensor:
-    """Add one dense feature grid to object sums and return object weights."""
-    device = pooled.device
-    flat_mask = torch.from_numpy(mask.astype(np.int64, copy=False)).to(device).view(-1)
-    foreground = flat_mask != 0
-    object_weights = torch.zeros(len(labels), dtype=torch.float32, device=device)
-    if not foreground.any():
-        return object_weights
-
-    label_tensor = torch.from_numpy(labels.astype(np.int64, copy=False)).to(device)
-    object_indices = torch.searchsorted(label_tensor, flat_mask[foreground])
-    if pixel_weights is None:
-        foreground_weights = torch.ones(
-            len(object_indices), dtype=torch.float32, device=device
+    normalize: bool = True,
+    upsample_shape: tuple[int, int] | None = None,
+) -> MaskPoolingPlan:
+    """Build an exact sparse equivalent of upsample-then-average pooling."""
+    grid_height, grid_width = grid_shape
+    if upsample_shape is None:
+        upsample_shape = mask.shape
+    if mask.shape[0] > upsample_shape[0] or mask.shape[1] > upsample_shape[1]:
+        raise ValueError(
+            f"Mask shape {mask.shape} exceeds upsample shape {upsample_shape}"
         )
-    else:
-        if pixel_weights.shape != mask.shape:
-            raise ValueError(
-                f"Pixel weights shape {pixel_weights.shape} differs from mask "
-                f"shape {mask.shape}"
+    if pixel_weights is not None and pixel_weights.shape != mask.shape:
+        raise ValueError(
+            f"Pixel weights shape {pixel_weights.shape} differs from mask shape "
+            f"{mask.shape}"
+        )
+    foreground_y, foreground_x = np.nonzero(mask)
+    if len(foreground_y) == 0:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="Sparse invariant checks are implicitly disabled"
             )
-        flat_weights = torch.from_numpy(
-            pixel_weights.astype(np.float32, copy=False)
-        ).to(device).view(-1)
-        foreground_weights = flat_weights[foreground]
-    object_weights.index_add_(0, object_indices, foreground_weights)
-
-    for start in range(0, pooled.shape[1], channel_chunk_size):
-        stop = min(start + channel_chunk_size, pooled.shape[1])
-        dense_chunk = F.interpolate(
-            feature_grid[:, start:stop],
-            size=upsample_size,
-            mode="bilinear",
-            align_corners=False,
-        )[0, :, : mask.shape[0], : mask.shape[1]]
-        foreground_features = dense_chunk.permute(1, 2, 0).reshape(
-            -1, stop - start
-        )[foreground]
-        pooled[:, start:stop].index_add_(
-            0,
-            object_indices,
-            foreground_features.float() * foreground_weights[:, None],
+            weights = torch.sparse_coo_tensor(
+                torch.empty((2, 0), dtype=torch.int64),
+                torch.empty(0, dtype=torch.float32),
+                (0, grid_height * grid_width),
+                check_invariants=False,
+                is_coalesced=True,
+            ).coalesce()
+        return MaskPoolingPlan(
+            labels, centroids, weights, np.zeros(len(labels), dtype=np.float32)
         )
-    return object_weights
+
+    object_indices = np.searchsorted(labels, mask[foreground_y, foreground_x])
+    foreground_weights = (
+        np.ones(len(object_indices), dtype=np.float32)
+        if pixel_weights is None
+        else pixel_weights[foreground_y, foreground_x].astype(np.float32, copy=False)
+    )
+    object_weights = np.bincount(
+        object_indices,
+        weights=foreground_weights,
+        minlength=len(labels),
+    ).astype(np.float32)
+    y0, y1, wy0, wy1 = _interpolation_axis_weights(
+        upsample_shape[0], grid_height
+    )
+    x0, x1, wx0, wx1 = _interpolation_axis_weights(
+        upsample_shape[1], grid_width
+    )
+
+    rows = np.concatenate([object_indices] * 4)
+    columns = np.concatenate(
+        [
+            y0[foreground_y] * grid_width + x0[foreground_x],
+            y0[foreground_y] * grid_width + x1[foreground_x],
+            y1[foreground_y] * grid_width + x0[foreground_x],
+            y1[foreground_y] * grid_width + x1[foreground_x],
+        ]
+    )
+    values = np.concatenate(
+        [
+            wy0[foreground_y] * wx0[foreground_x],
+            wy0[foreground_y] * wx1[foreground_x],
+            wy1[foreground_y] * wx0[foreground_x],
+            wy1[foreground_y] * wx1[foreground_x],
+        ]
+    )
+    values *= np.tile(foreground_weights, 4)
+    if normalize:
+        values /= object_weights[rows]
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Sparse invariant checks are implicitly disabled"
+        )
+        weights = torch.sparse_coo_tensor(
+            torch.from_numpy(np.stack((rows, columns))).long(),
+            torch.from_numpy(values).float(),
+            (len(labels), grid_height * grid_width),
+            check_invariants=False,
+            is_coalesced=False,
+        ).coalesce()
+    return MaskPoolingPlan(labels, centroids, weights, object_weights)
 
 
 def _pool_mask_features(
@@ -339,37 +443,41 @@ def _pool_mask_features(
     processed_size: tuple[int, int],
     model,
     device: torch.device,
+    pooling_plans: dict[tuple[Any, ...], MaskPoolingPlan] | None = None,
+    labels: np.ndarray | None = None,
+    centroids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pool one frame's spatial DINO tokens over its instance masks.
 
-    Spatial tokens are bilinearly upsampled into the unchanged mask coordinate
-    system and averaged per instance with a device-side indexed reduction.
+    A cached sparse linear map exactly combines bilinear upsampling and
+    per-instance averaging without materializing a dense full-resolution map.
     """
-    labels = np.unique(mask)
-    labels = labels[labels != 0]
+    if labels is None:
+        labels = np.unique(mask)
+        labels = labels[labels != 0]
     if len(labels) == 0:
         return labels, np.empty((0, 2), np.float32), np.empty((0, 0), np.float32)
+    if centroids is None:
+        centroids = _centroids(mask, labels)
 
     patch_size = int(model.config.patch_size)
     grid_height = processed_size[0] // patch_size
     grid_width = processed_size[1] // patch_size
     patch_tokens = _spatial_tokens(hidden, grid_height, grid_width)
 
-    # (P, D) -> (1, D, grid_height, grid_width). Upsample channel chunks below
-    # to bound the temporary dense feature-map memory.
-    feature_grid = patch_tokens.T.reshape(1, -1, grid_height, grid_width)
-    pooled = torch.zeros(
-        (len(labels), patch_tokens.shape[1]), dtype=torch.float32, device=device
-    )
-    object_weights = _accumulate_mask_features(
-        pooled, feature_grid, mask, labels, mask.shape
-    )
-    if torch.any(object_weights == 0):
-        raise ValueError("At least one nonzero mask label has no pixels")
-    pooled /= object_weights[:, None]
+    grid_shape = (grid_height, grid_width)
+    if pooling_plans is not None and grid_shape in pooling_plans:
+        plan = pooling_plans[grid_shape]
+    else:
+        plan = _build_mask_pooling_plan(mask, labels, centroids, grid_shape)
+        if pooling_plans is not None:
+            pooling_plans[grid_shape] = plan
+
+    pooling_weights = plan.weights.to(device)
+    pooled = torch.sparse.mm(pooling_weights, patch_tokens.float())
 
     features = F.normalize(pooled, dim=1).cpu().float().numpy()
-    return labels, _centroids(mask, labels), features
+    return plan.labels, plan.centroids, features
 
 
 def extract_mask_features(
@@ -380,6 +488,9 @@ def extract_mask_features(
     device: torch.device,
     image_size: int,
     resize: bool = True,
+    pooling_plans: dict[tuple[Any, ...], MaskPoolingPlan] | None = None,
+    labels: np.ndarray | None = None,
+    centroids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Extract one mask-pooled feature per object from one frame."""
     return extract_mask_features_batch(
@@ -390,6 +501,9 @@ def extract_mask_features(
         device,
         image_size,
         resize=resize,
+        pooling_plan_caches=[pooling_plans],
+        mask_labels=[labels],
+        mask_centroids=[centroids],
     )[0]
 
 
@@ -401,12 +515,30 @@ def extract_mask_features_batch(
     device: torch.device,
     image_size: int,
     resize: bool = True,
+    pooling_plan_caches: Sequence[
+        dict[tuple[Any, ...], MaskPoolingPlan] | None
+    ]
+    | None = None,
+    mask_labels: Sequence[np.ndarray | None] | None = None,
+    mask_centroids: Sequence[np.ndarray | None] | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Extract mask-pooled features from a batch of optionally resized frames."""
     if len(images) != len(masks):
         raise ValueError(f"Got {len(images)} images and {len(masks)} masks")
     if not images:
         return []
+    if pooling_plan_caches is None:
+        pooling_plan_caches = [None] * len(images)
+    if mask_labels is None:
+        mask_labels = [None] * len(images)
+    if mask_centroids is None:
+        mask_centroids = [None] * len(images)
+    if len(pooling_plan_caches) != len(images):
+        raise ValueError(
+            f"Got {len(pooling_plan_caches)} pooling caches for {len(images)} images"
+        )
+    if len(mask_labels) != len(images) or len(mask_centroids) != len(images):
+        raise ValueError("Mask metadata count must match the image count")
     for image, mask in zip(images, masks):
         if image.shape != mask.shape:
             raise ValueError(
@@ -435,8 +567,17 @@ def extract_mask_features_batch(
             processed_size,
             model,
             device,
+            pooling_plans,
+            labels,
+            centroids,
         )
-        for mask, hidden in zip(masks, hidden_states)
+        for mask, hidden, pooling_plans, labels, centroids in zip(
+            masks,
+            hidden_states,
+            pooling_plan_caches,
+            mask_labels,
+            mask_centroids,
+        )
     ]
 
 
@@ -506,6 +647,9 @@ def extract_mask_features_tiled(
     device: torch.device,
     tile_size: int,
     batch_size: int = 8,
+    pooling_plans: dict[tuple[Any, ...], MaskPoolingPlan] | None = None,
+    labels: np.ndarray | None = None,
+    centroids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Extract mask features from overlapping tiles without resizing the image.
 
@@ -522,10 +666,13 @@ def extract_mask_features_tiled(
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
 
-    labels = np.unique(mask)
-    labels = labels[labels != 0]
+    if labels is None:
+        labels = np.unique(mask)
+        labels = labels[labels != 0]
     if len(labels) == 0:
         return labels, np.empty((0, 2), np.float32), np.empty((0, 0), np.float32)
+    if centroids is None:
+        centroids = _centroids(mask, labels)
 
     height, width = image.shape
     overlap = tile_size // 4
@@ -579,31 +726,43 @@ def extract_mask_features_tiled(
 
         for (y, x, valid_height, valid_width), hidden in zip(tile_batch, hidden_states):
             patch_tokens = _spatial_tokens(hidden, grid_size, grid_size)
-            feature_grid = patch_tokens.T.reshape(1, -1, grid_size, grid_size)
-
             local_mask = mask[y : y + valid_height, x : x + valid_width]
-            local_labels = np.unique(local_mask)
-            local_labels = local_labels[local_labels != 0]
-            if len(local_labels) == 0:
+            if not np.any(local_mask):
                 continue
             normalized_weight = (
                 blend[:valid_height, :valid_width]
                 / coverage[y : y + valid_height, x : x + valid_width]
             )
-            object_weights += _accumulate_mask_features(
-                pooled,
-                feature_grid,
-                local_mask,
-                labels,
-                (tile_size, tile_size),
-                normalized_weight,
+            plan_key = (
+                "tile",
+                grid_size,
+                y,
+                x,
+                valid_height,
+                valid_width,
             )
+            if pooling_plans is not None and plan_key in pooling_plans:
+                plan = pooling_plans[plan_key]
+            else:
+                plan = _build_mask_pooling_plan(
+                    local_mask,
+                    labels,
+                    centroids,
+                    (grid_size, grid_size),
+                    pixel_weights=normalized_weight,
+                    normalize=False,
+                    upsample_shape=(tile_size, tile_size),
+                )
+                if pooling_plans is not None:
+                    pooling_plans[plan_key] = plan
+            pooled += torch.sparse.mm(plan.weights.to(device), patch_tokens.float())
+            object_weights += torch.from_numpy(plan.object_weights).to(device)
 
     if torch.any(object_weights == 0):
         raise ValueError("At least one mask label received no tiled feature samples")
     pooled /= object_weights[:, None]
     features = F.normalize(pooled, dim=1).cpu().numpy()
-    return labels, _centroids(mask, labels), features
+    return labels, centroids, features
 
 
 def _evaluate_pair(
@@ -844,16 +1003,8 @@ def _results_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows).loc[:, RESULT_COLUMNS].round(4)
 
 
-def _evaluate_movie(
-    root: Path,
-    args: argparse.Namespace,
-    processor: Any,
-    model: Any,
-    device: torch.device,
-    feature_extractor: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]] | None,
-    random_projection: np.ndarray | None,
-) -> dict[str, Any]:
-    """Extract features and return one flat metrics row for a CTC movie."""
+def _load_movie(root: Path, args: argparse.Namespace) -> LoadedMovie:
+    """Load one selected CTC frame range for reuse by all model variants."""
     image_folder = _ctc_image_folder(root)
     image_paths = sorted((*image_folder.glob("*.tif"), *image_folder.glob("*.tiff")))
     if not image_paths:
@@ -862,7 +1013,7 @@ def _evaluate_movie(
     start_frame, stop_frame = _frame_bounds(
         n_available_frames, args.start_frame, args.max_frames
     )
-    frame_numbers = list(range(start_frame, stop_frame))
+    frame_numbers = tuple(range(start_frame, stop_frame))
     if len(frame_numbers) < 2:
         raise ValueError(
             f"Need at least two selected CTC frames, found {len(frame_numbers)}"
@@ -873,7 +1024,7 @@ def _evaluate_movie(
     )
 
     logger.info(
-        "Loading CTC frames %d:%d through TrackingSequence.from_ctc: %s",
+        "Loading and caching CTC frames %d:%d through TrackingSequence.from_ctc: %s",
         start_frame,
         stop_frame,
         root,
@@ -900,6 +1051,78 @@ def _evaluate_movie(
         raise ValueError(
             f"Requested {len(frame_numbers)} CTC frames, loader returned {len(images)}"
         )
+    object_diameters = []
+    for mask in masks:
+        labels, counts = np.unique(mask, return_counts=True)
+        object_diameters.append(2.0 * np.sqrt(counts[labels != 0] / np.pi))
+    return LoadedMovie(
+        root=root,
+        frame_numbers=frame_numbers,
+        images=images,
+        masks=masks,
+        detections=detections,
+        supervision=supervision,
+        lineage_parents=sequence.gt.lineage_parents,
+        object_diameters=tuple(object_diameters),
+    )
+
+
+def _prepare_movie_frames(
+    movie: LoadedMovie, scale: float
+) -> tuple[PreparedFrame, ...]:
+    """Scale and annotate frames once per input movie and scale."""
+    if scale in movie.prepared_frames:
+        return movie.prepared_frames[scale]
+
+    prepared_frames = []
+    for local_index, frame in enumerate(movie.frame_numbers):
+        detection_indices = np.flatnonzero(
+            movie.detections.timepoints == local_index
+        )
+        image, mask = _scale_image_mask(
+            movie.images[local_index], movie.masks[local_index], scale
+        )
+        labels = np.unique(mask)
+        labels = labels[labels != 0]
+        centroids = _centroids(mask, labels)
+        lineage_by_label = {
+            int(movie.detections.labels[i]): int(movie.supervision.lineage_index[i])
+            for i in detection_indices
+        }
+        lineages = np.asarray(
+            [lineage_by_label.get(int(label), -1) for label in labels],
+            dtype=np.int64,
+        )
+        prepared_frames.append(
+            PreparedFrame(
+                local_index=local_index,
+                frame=frame,
+                image=image,
+                mask=mask,
+                detection_indices=detection_indices,
+                labels=labels,
+                centroids=centroids,
+                lineages=lineages,
+            )
+        )
+    result = tuple(prepared_frames)
+    movie.prepared_frames[scale] = result
+    return result
+
+
+def _extract_movie(
+    movie: LoadedMovie,
+    args: argparse.Namespace,
+    processor: Any,
+    model: Any,
+    device: torch.device,
+    feature_extractor: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]] | None,
+) -> MovieExtraction:
+    """Extract unprojected object features once for one model variant."""
+    frame_numbers = movie.frame_numbers
+    images = movie.images
+    masks = movie.masks
+    prepared_frames = _prepare_movie_frames(movie, args.scale)
 
     effective_batch_size = args.batch_size
     if args.full_resolution:
@@ -929,9 +1152,7 @@ def _evaluate_movie(
 
     diameters: list[float] = []
     dino_diameters: list[float] = []
-    for mask in masks:
-        labels, counts = np.unique(mask, return_counts=True)
-        frame_diameters = 2.0 * np.sqrt(counts[labels != 0] / np.pi)
+    for mask, frame_diameters in zip(masks, movie.object_diameters):
         diameters.extend(frame_diameters)
         if args.coordinate_baseline:
             dino_scale = 1.0
@@ -964,35 +1185,24 @@ def _evaluate_movie(
         torch.cuda.synchronize(device)
     extraction_start = perf_counter()
 
-    def prepare_frame(local_index: int, frame: int) -> PreparedFrame:
-        detection_indices = np.flatnonzero(detections.timepoints == local_index)
-        image, mask = _scale_image_mask(
-            images[local_index], masks[local_index], args.scale
-        )
-        return PreparedFrame(
-            local_index,
-            frame,
-            image,
-            mask,
-            detection_indices,
-        )
-
     def record_frame(
         prepared: PreparedFrame,
         result: tuple[np.ndarray, np.ndarray, np.ndarray],
     ) -> None:
         labels, centroids, features = result
-        if random_projection is not None:
-            features = _project_features(features, random_projection)
-        lineage_by_label = {
-            int(detections.labels[i]): int(supervision.lineage_index[i])
-            for i in prepared.detection_indices
-        }
-        lineages = np.asarray(
-            [lineage_by_label.get(int(label), -1) for label in labels], dtype=np.int64
-        )
+        if not np.array_equal(labels, prepared.labels):
+            raise ValueError(
+                f"Extracted labels differ from cached mask labels in frame "
+                f"{prepared.frame}"
+            )
         frames.append(
-            FrameFeatures(prepared.frame, labels, lineages, centroids, features)
+            FrameFeatures(
+                prepared.frame,
+                labels,
+                prepared.lineages,
+                centroids,
+                features,
+            )
         )
         logger.info(
             "Frame %d (%d/%d): %d objects, feature shape %s",
@@ -1005,16 +1215,16 @@ def _evaluate_movie(
 
     if args.coordinate_baseline:
         for local_index, frame in enumerate(frame_numbers):
-            prepared = prepare_frame(local_index, frame)
-            labels = np.unique(prepared.mask)
-            labels = labels[labels != 0]
-            centroids = _centroids(prepared.mask, labels)
-            record_frame(prepared, (labels, centroids, centroids))
+            prepared = prepared_frames[local_index]
+            record_frame(
+                prepared,
+                (prepared.labels, prepared.centroids, prepared.centroids),
+            )
     elif args.explicit_tiling:
         if feature_extractor is None:
             raise ValueError("Explicit tiling requires a feature extractor")
         for local_index, frame in enumerate(frame_numbers):
-            prepared = prepare_frame(local_index, frame)
+            prepared = prepared_frames[local_index]
             logger.info(
                 "Frame %d image size before tiling: %d x %d",
                 frame,
@@ -1029,6 +1239,9 @@ def _evaluate_movie(
                 device,
                 args.image_size,
                 batch_size=args.batch_size,
+                pooling_plans=prepared.pooling_plans,
+                labels=prepared.labels,
+                centroids=prepared.centroids,
             )
             record_frame(prepared, result)
     else:
@@ -1037,7 +1250,7 @@ def _evaluate_movie(
         for batch_start in range(0, len(frame_numbers), effective_batch_size):
             batch_stop = min(batch_start + effective_batch_size, len(frame_numbers))
             prepared_batch = [
-                prepare_frame(local_index, frame_numbers[local_index])
+                prepared_frames[local_index]
                 for local_index in range(batch_start, batch_stop)
             ]
             results = extract_mask_features_batch(
@@ -1048,6 +1261,11 @@ def _evaluate_movie(
                 device,
                 args.image_size,
                 resize=not args.full_resolution,
+                pooling_plan_caches=[
+                    prepared.pooling_plans for prepared in prepared_batch
+                ],
+                mask_labels=[prepared.labels for prepared in prepared_batch],
+                mask_centroids=[prepared.centroids for prepared in prepared_batch],
             )
             for prepared, result in zip(prepared_batch, results):
                 record_frame(prepared, result)
@@ -1058,8 +1276,37 @@ def _evaluate_movie(
     )
     logger.info("Mean feature extraction time: %.2f ms/frame", time_per_frame_ms)
 
+    return MovieExtraction(
+        frames=tuple(frames),
+        effective_batch_size=effective_batch_size,
+        median_dino_diameter=median_dino_diameter,
+        time_per_frame_ms=time_per_frame_ms,
+    )
+
+
+def _evaluate_movie(
+    movie: LoadedMovie,
+    args: argparse.Namespace,
+    extraction: MovieExtraction,
+    random_projection: np.ndarray | None,
+) -> dict[str, Any]:
+    """Evaluate one optional projection of cached object features."""
+    if random_projection is None:
+        frames = extraction.frames
+    else:
+        frames = tuple(
+            FrameFeatures(
+                frame=frame.frame,
+                labels=frame.labels,
+                lineages=frame.lineages,
+                centroids=frame.centroids,
+                features=_project_features(frame.features, random_projection),
+            )
+            for frame in extraction.frames
+        )
+
     metrics = evaluate_sequence(
-        frames, sequence.gt.lineage_parents, args.coordinate_baseline
+        frames, movie.lineage_parents, args.coordinate_baseline
     )
     correct_similarity = _ratio(metrics["correct_similarity"], metrics["correct_n"])
     incorrect_similarity = _ratio(
@@ -1122,10 +1369,10 @@ def _evaluate_movie(
         )
 
     return {
-        "dataset": _dataset_name(root),
-        "batch_size": effective_batch_size,
-        "diameter_dino_px": median_dino_diameter,
-        "time_per_frame_ms": time_per_frame_ms,
+        "dataset": _dataset_name(movie.root),
+        "batch_size": extraction.effective_batch_size,
+        "diameter_dino_px": extraction.median_dino_diameter,
+        "time_per_frame_ms": extraction.time_per_frame_ms,
         "correct_sim": correct_similarity,
         "incorrect_sim": incorrect_similarity,
         "margin_sim": similarity_margin,
@@ -1284,6 +1531,7 @@ if __name__ == "__main__":
     model_cache: dict[str, tuple[Any, Any, int]] = {}
     for movie_index, root in enumerate(inputs, start=1):
         logger.info("Movie %d/%d: %s", movie_index, len(inputs), root)
+        movie = _load_movie(root, args)
         for model_index, model_spec in enumerate(args.model, start=1):
             model_name = _resolve_model_name(model_spec)
             coordinate_baseline = model_name == "coordinates"
@@ -1386,6 +1634,7 @@ if __name__ == "__main__":
                         )
                         feature_extractor = extract_mask_features
 
+                    extraction: MovieExtraction | None = None
                     for randpro in projection_dims:
                         run_args = argparse.Namespace(**vars(args))
                         run_args.scale = scale
@@ -1416,13 +1665,25 @@ if __name__ == "__main__":
                                 random_projection.shape[1],
                             )
 
+                        if extraction is None:
+                            extraction = _extract_movie(
+                                movie,
+                                run_args,
+                                processor,
+                                model,
+                                device,
+                                feature_extractor,
+                            )
+                        else:
+                            logger.info(
+                                "Reusing cached unprojected object features for "
+                                "randpro=%d",
+                                randpro,
+                            )
                         row = _evaluate_movie(
-                            root,
+                            movie,
                             run_args,
-                            processor,
-                            model,
-                            device,
-                            feature_extractor,
+                            extraction,
                             random_projection,
                         )
                         row.update(
