@@ -621,6 +621,14 @@ class TrackingLightningModule(LightningModule):
         # stubs and mask-free legacy batches keep working (the model treats an absent
         # mask as all-present anyway).
         mask_kw = {} if feat_mask is None else {"feature_mask": feat_mask}
+        dim_kw = {}
+        model_config = getattr(self.model, "config", {})
+        if bool(model_config.get("data_dim_embed", False)):
+            if "source_ndim" not in batch:
+                raise KeyError(
+                    "data_dim_embed=True requires source_ndim in every training batch"
+                )
+            dim_kw["source_ndim"] = batch["source_ndim"]
         if self.node_loss > 0:
             A_pred, neighbor_mask, out_degree_logits, in_degree_logits = (
                 self._forward_model(
@@ -629,11 +637,12 @@ class TrackingLightningModule(LightningModule):
                     padding_mask=padding_mask,
                     return_node_logits=True,
                     **mask_kw,
+                    **dim_kw,
                 )
             )
         else:
             A_pred, neighbor_mask = self._forward_model(
-                coords, feats, padding_mask=padding_mask, **mask_kw
+                coords, feats, padding_mask=padding_mask, **mask_kw, **dim_kw
             )
         # A_pred = output["assoc_matrix"]
         # remove inf values that might happen due to float16 numerics
@@ -1842,8 +1851,26 @@ class TrackingLightningModule(LightningModule):
 
         return loss
 
+    def _log_data_dim_embed_cosine(self) -> None:
+        """Log separation of the learned 2D and 3D embeddings each epoch."""
+        embedding = getattr(self.model, "data_dim_embed", None)
+        if embedding is None:
+            return
+        weight = embedding.weight.detach().float()
+        if not bool((weight.norm(dim=1) > 0).all()):
+            return
+        cosine = torch.nn.functional.cosine_similarity(weight[0], weight[1], dim=0)
+        self.log(
+            "data_dim_embed_cosine",
+            cosine,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+
     def on_train_epoch_end(self):
         self._log_edge_error_rates("train")
+        self._log_data_dim_embed_cosine()
 
         # flush the accumulated (B, N) pairs as a single wandb scatter plot
         bn = self._bn_log

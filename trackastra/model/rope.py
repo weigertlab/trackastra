@@ -60,14 +60,14 @@ class RotaryPositionalEncoding(nn.Module):
         assert D == len(self.freqs)
         co = torch.cat(
             tuple(
-                torch.cos(0.5 * math.pi * x.unsqueeze(-1) * freq) / math.sqrt(len(freq))
+                torch.cos(0.5 * math.pi * x.unsqueeze(-1) * freq)
                 for x, freq in zip(coords.moveaxis(-1, 0), self.freqs)
             ),
             axis=-1,
         )
         si = torch.cat(
             tuple(
-                torch.sin(0.5 * math.pi * x.unsqueeze(-1) * freq) / math.sqrt(len(freq))
+                torch.sin(0.5 * math.pi * x.unsqueeze(-1) * freq)
                 for x, freq in zip(coords.moveaxis(-1, 0), self.freqs)
             ),
             axis=-1,

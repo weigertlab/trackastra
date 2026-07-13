@@ -1,3 +1,6 @@
+import math
+import warnings
+
 import pytest
 import torch
 import yaml
@@ -8,6 +11,7 @@ from trackastra.model.model_parts import (
     MaskedRunningNorm,
     PositionalEncoding,
 )
+from trackastra.model.rope import RotaryPositionalEncoding
 from trackastra.model.sparse_attn import build_knn_index
 
 # Mark all tests in this module as core/inference tests
@@ -24,6 +28,137 @@ def test_model_config_resolves_saved_constructor_values():
 
     assert kwargs["num_decoder_layers"] == 0
     assert kwargs["max_neighbors"] == (8, 8)
+    assert kwargs["data_dim_embed"] is False
+
+
+def test_data_dimension_embedding_changes_tokens_and_gets_gradients():
+    torch.manual_seed(0)
+    model = TrackingTransformer(
+        coord_dim=3,
+        feat_dim=0,
+        d_model=128,
+        nhead=4,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=4,
+        dropout=0,
+        data_dim_embed=True,
+    )
+    coords = torch.rand((2, 5, 4))
+    coords[1] = coords[0]
+    assert torch.count_nonzero(model.data_dim_embed.weight) == 0
+    with torch.no_grad():
+        model.data_dim_embed.weight[0, 0] = -0.1
+        model.data_dim_embed.weight[1, 0] = 0.1
+    captured = []
+    handle = model.norm.register_forward_hook(
+        lambda _m, _args, output: captured.append(output)
+    )
+
+    association, _ = model(coords, source_ndim=torch.tensor([2, 3]))
+    handle.remove()
+    association.sum().backward()
+
+    assert not torch.allclose(captured[0][0], captured[0][1])
+    grad = model.data_dim_embed.weight.grad
+    assert grad is not None
+    assert torch.isfinite(grad).all()
+    assert torch.all(grad.abs().sum(dim=1) > 0)
+
+
+def test_data_dimension_embedding_validates_input_and_warns_once():
+    model = TrackingTransformer(
+        coord_dim=3,
+        d_model=16,
+        nhead=4,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        data_dim_embed=True,
+    )
+    coords = torch.rand((2, 3, 4))
+
+    with pytest.raises(ValueError, match="shape"):
+        model(coords, source_ndim=torch.tensor([2]))
+    with pytest.raises(ValueError, match="values must be 2 or 3"):
+        model(coords, source_ndim=torch.tensor([2, 4]))
+    with pytest.warns(UserWarning, match="source_ndim was omitted"):
+        model(coords)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model(coords)
+    assert caught == []
+
+
+def test_disabled_data_dimension_embedding_preserves_state_and_forward():
+    torch.manual_seed(0)
+    default = TrackingTransformer(
+        coord_dim=2,
+        d_model=16,
+        nhead=4,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+    ).eval()
+    torch.manual_seed(0)
+    disabled = TrackingTransformer(
+        coord_dim=2,
+        d_model=16,
+        nhead=4,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        data_dim_embed=False,
+    ).eval()
+    coords = torch.rand((2, 3, 3))
+
+    assert default.state_dict().keys() == disabled.state_dict().keys()
+    assert all(
+        torch.equal(default.state_dict()[key], disabled.state_dict()[key])
+        for key in default.state_dict()
+    )
+    expected, _ = default(coords)
+    actual, _ = disabled(coords, source_ndim=torch.tensor([2, 3]))
+    assert torch.equal(actual, expected)
+
+
+def test_fourier_and_rope_cleanup_preserves_outputs():
+    coords = torch.rand((2, 5, 2))
+    pos = PositionalEncoding(cutoffs=(4, 8), n_pos=(4, 6))
+    expected_pos = torch.cat(
+        tuple(
+            torch.cat(
+                (
+                    torch.sin(0.5 * math.pi * x.unsqueeze(-1) * freq),
+                    torch.cos(0.5 * math.pi * x.unsqueeze(-1) * freq),
+                ),
+                dim=-1,
+            )
+            / math.sqrt(len(freq))
+            for x, freq in zip(coords.moveaxis(-1, 0), pos.freqs)
+        ),
+        dim=-1,
+    )
+    assert torch.equal(pos(coords), expected_pos)
+
+    rope = RotaryPositionalEncoding(cutoffs=(4, 8), n_pos=(4, 6))
+    expected_co = torch.cat(
+        tuple(
+            torch.cos(0.5 * math.pi * x.unsqueeze(-1) * freq) / math.sqrt(len(freq))
+            for x, freq in zip(coords.moveaxis(-1, 0), rope.freqs)
+        ),
+        dim=-1,
+    )
+    expected_si = torch.cat(
+        tuple(
+            torch.sin(0.5 * math.pi * x.unsqueeze(-1) * freq) / math.sqrt(len(freq))
+            for x, freq in zip(coords.moveaxis(-1, 0), rope.freqs)
+        ),
+        dim=-1,
+    )
+    co, si = rope.get_co_si(coords)
+    assert torch.equal(co, expected_co)
+    assert torch.equal(si, expected_si)
 
 
 class _ZeroModule(torch.nn.Module):
@@ -662,6 +797,24 @@ def test_unversioned_config_infers_architecture_version(tmp_path, legacy):
 
     assert restored.architecture_version == version
     assert restored.config["architecture_version"] == version
+
+
+def test_data_dimension_embedding_saves_and_reloads(tmp_path):
+    model = TrackingTransformer(
+        coord_dim=3,
+        d_model=16,
+        nhead=4,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        data_dim_embed=True,
+    )
+    model.save(tmp_path)
+
+    restored = TrackingTransformer.from_folder(tmp_path)
+
+    assert restored.config["data_dim_embed"] is True
+    assert torch.equal(restored.data_dim_embed.weight, model.data_dim_embed.weight)
 
 
 def test_dropout_is_applied_to_attention_and_mlp():

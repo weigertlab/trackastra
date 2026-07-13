@@ -235,7 +235,6 @@ class PositionalEncoding(nn.Module):
                     ),
                     axis=-1,
                 )
-                / math.sqrt(len(freq))
                 for x, freq in zip(coords.moveaxis(-1, 0), self.freqs)
             ),
             axis=-1,

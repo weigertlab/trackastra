@@ -228,6 +228,24 @@ def test_parse_architecture_version(monkeypatch, version):
     assert args.architecture_version == version
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_parse_data_dim_embed(monkeypatch, enabled):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py",
+            "-c",
+            str(ROOT_DIR / "scripts/configs/vanvliet.yaml"),
+            "--data_dim_embed",
+            str(enabled),
+        ],
+    )
+
+    args = parse_train_args()
+
+    assert args.data_dim_embed is enabled
+
+
 def test_parse_max_neighbors_defaults_to_16(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -543,13 +561,24 @@ def test_tracking_eval_reuses_and_clears_cached_gt(monkeypatch):
     assert all(not run_checks for _path, run_checks in pred_loads)
 
 
-def test_tracking_cache_keeps_2d_features_and_lifts_model_windows(monkeypatch):
+@pytest.mark.parametrize("source_ndim", [2, 3])
+def test_tracking_cache_preserves_source_dimension(monkeypatch, source_ndim):
     calls = []
+    spatial_shape = (8, 8) if source_ndim == 2 else (3, 8, 8)
     images = np.stack(
-        [np.arange(64, dtype=np.float32).reshape(8, 8) + t for t in range(2)]
+        [
+            np.arange(np.prod(spatial_shape), dtype=np.float32).reshape(spatial_shape)
+            + t
+            for t in range(2)
+        ]
     )
-    masks = np.zeros((2, 8, 8), dtype=np.int32)
-    masks[:, 2:6, 2:6] = 1
+    masks = np.zeros((2, *spatial_shape), dtype=np.int32)
+    if source_ndim == 2:
+        masks[:, 2:6, 2:6] = 1
+        spacing = [0.4, 0.4]
+    else:
+        masks[:, 1:, 2:6, 2:6] = 1
+        spacing = [1.0, 0.4, 0.4]
 
     def load_ctc_images_masks(root, detection_folder, ndim):
         calls.append((Path(root), detection_folder, ndim))
@@ -569,6 +598,7 @@ def test_tracking_cache_keeps_2d_features_and_lifts_model_windows(monkeypatch):
         num_encoder_layers=1,
         num_decoder_layers=1,
         window=2,
+        data_dim_embed=True,
     )
     inference_config = {
         "features": "wrfeat3",
@@ -581,7 +611,11 @@ def test_tracking_cache_keeps_2d_features_and_lifts_model_windows(monkeypatch):
     module = TrackingLightningModule(
         model,
         tracking_inputs=[
-            {"root": Path("movie_2d"), "source_ndim": 2, "spacing": [0.4, 0.4]}
+            {
+                "root": Path(f"movie_{source_ndim}d"),
+                "source_ndim": source_ndim,
+                "spacing": spacing,
+            }
         ],
         tracking_detection_folder="TRA",
         inference_config=inference_config,
@@ -589,13 +623,33 @@ def test_tracking_cache_keeps_2d_features_and_lifts_model_windows(monkeypatch):
 
     module._build_tracking_cache()
 
-    assert calls == [(Path("movie_2d"), "TRA", 2)]
+    assert calls == [(Path(f"movie_{source_ndim}d"), "TRA", source_ndim)]
     movie = module._tracking_cache[0]
-    assert movie["spatial_dim"] == 2
-    assert movie["features"][0].coords.shape[1] == 2
+    assert movie["spatial_dim"] == source_ndim
+    assert movie["features"][0].coords.shape[1] == source_ndim
     assert movie["windows"][0]["coords"].shape[1] == 3
-    assert torch.all(movie["windows"][0]["coords"][:, 0] == 0)
-    assert not bool(movie["windows"][0]["feature_mask"][:, 5:8].any())
+    if source_ndim == 2:
+        assert torch.all(movie["windows"][0]["coords"][:, 0] == 0)
+        assert not bool(movie["windows"][0]["feature_mask"][:, 5:8].any())
+    else:
+        assert bool(movie["windows"][0]["feature_mask"].all())
+
+    seen_source_ndim = []
+
+    def capture_source_ndim(_module, _args, kwargs):
+        seen_source_ndim.append(kwargs["source_ndim"].detach().cpu())
+
+    handle = model.register_forward_pre_hook(capture_source_ndim, with_kwargs=True)
+    module._tracking_model._predict_from_windows(
+        movie["features"],
+        movie["windows"],
+        spatial_dim=movie["spatial_dim"],
+        progbar_class=lambda iterable, **_kwargs: iterable,
+    )
+    handle.remove()
+
+    assert len(seen_source_ndim) == 1
+    assert seen_source_ndim[0].tolist() == [source_ndim]
 
 
 def test_tracking_lam_split_sweep_reuses_candidate_graph(monkeypatch):
@@ -1723,6 +1777,35 @@ def test_build_model_validates_dataset_feature_dim(monkeypatch):
     assert model["d_model"] == 32
     with pytest.raises(ValueError, match="does not match"):
         build_model(ModelConfig(feat_dim=5), dataset)
+
+
+def test_data_dim_embedding_cosine_logs_each_epoch(monkeypatch):
+    model = TrackingTransformer(
+        coord_dim=3,
+        d_model=4,
+        nhead=1,
+        num_encoder_layers=0,
+        num_decoder_layers=0,
+        pos_embed_per_dim=2,
+        data_dim_embed=True,
+    )
+    module = TrackingLightningModule(model)
+    logged = []
+    monkeypatch.setattr(module, "log", lambda name, value, **kwargs: logged.append((name, value, kwargs)))
+
+    module._log_data_dim_embed_cosine()
+    assert logged == []
+
+    with torch.no_grad():
+        model.data_dim_embed.weight[0] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        model.data_dim_embed.weight[1] = torch.tensor([1.0, 1.0, 0.0, 0.0])
+    module._log_data_dim_embed_cosine()
+
+    assert len(logged) == 1
+    name, cosine, kwargs = logged[0]
+    assert name == "data_dim_embed_cosine"
+    assert cosine.item() == pytest.approx(2**-0.5)
+    assert kwargs == {"on_step": False, "on_epoch": True, "sync_dist": True}
 
 
 def test_resolve_model_checkpoint_reference_handles_absolute_checkpoint(tmp_path):

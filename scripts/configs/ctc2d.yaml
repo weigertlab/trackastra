@@ -25,44 +25,95 @@ weight_by_dataset: true
 oversample_divs: 0.0
 detection_folders:
 - TRA
+# pixel sizes (microns) from celltrackingchallenge.net; ctc_2024_train_ds2 is
+# downsampled in time only, so it shares the spacing of its native counterpart.
 input_train:
-- data/ctc_2026/2d/BF-C2DL-HSC/01
-- data/ctc_2026/2d/BF-C2DL-HSC/02
-- data/ctc_2026/2d/BF-C2DL-MuSC/01
-- data/ctc_2026/2d/BF-C2DL-MuSC/02
-- data/ctc_2026/2d/DIC-C2DH-HeLa/01
-# - data/ctc_2026/2d/DIC-C2DH-HeLa/02
-- data/ctc_2026/2d/Fluo-C2DL-Huh7/01
-- data/ctc_2026/2d/Fluo-C2DL-Huh7/02
-- data/ctc_2026/2d/Fluo-C2DL-MSC/01
-- data/ctc_2026/2d/Fluo-C2DL-MSC/02
-- data/ctc_2026/2d/Fluo-N2DH-GOWT1/01
-- data/ctc_2026/2d/Fluo-N2DH-GOWT1/02
-- data/ctc_2026/2d/Fluo-N2DH-SIM+/01
-- data/ctc_2026/2d/Fluo-N2DH-SIM+/02
-- data/ctc_2026/2d/Fluo-N2DL-HeLa/01
-# - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
-- data/ctc_2026/2d/PhC-C2DH-U373/01
-- data/ctc_2026/2d/PhC-C2DH-U373/02
-- data/ctc_2026/2d/PhC-C2DL-PSC/01
-# - data/ctc_2026/2d/PhC-C2DL-PSC/02
+- format: ctc
+  spacing: [.645, .645]
+  paths:
+  - data/ctc_2026/2d/BF-C2DL-HSC/01
+  - data/ctc_2026/2d/BF-C2DL-HSC/02
+  - data/ctc_2026/2d/BF-C2DL-MuSC/01
+  - data/ctc_2026/2d/BF-C2DL-MuSC/02
+  - data/ctc_2026/2d/Fluo-N2DL-HeLa/01
+  # - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
 
-- data/ctc_2024_train_ds2/DIC-C2DH-HeLa/01
-- data/ctc_2024_train_ds2/DIC-C2DH-HeLa/02
-- data/ctc_2024_train_ds2/Fluo-C2DL-MSC/01
-- data/ctc_2024_train_ds2/Fluo-C2DL-MSC/02
-- data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/01
-- data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/02
-- data/ctc_2024_train_ds2/PhC-C2DH-U373/01
-- data/ctc_2024_train_ds2/PhC-C2DH-U373/02
-- data/ctc_2024_train_ds2/PhC-C2DL-PSC/01
-- data/ctc_2024_train_ds2/PhC-C2DL-PSC/02
+- format: ctc
+  spacing: [.19, .19]
+  paths:
+  - data/ctc_2026/2d/DIC-C2DH-HeLa/01
+  # - data/ctc_2026/2d/DIC-C2DH-HeLa/02
+  - data/ctc_2024_train_ds2/DIC-C2DH-HeLa/01
+  - data/ctc_2024_train_ds2/DIC-C2DH-HeLa/02
+
+- format: ctc
+  spacing: [.65, .65]
+  paths:
+  - data/ctc_2026/2d/Fluo-C2DL-Huh7/01
+  - data/ctc_2026/2d/Fluo-C2DL-Huh7/02
+  - data/ctc_2026/2d/PhC-C2DH-U373/01
+  - data/ctc_2026/2d/PhC-C2DH-U373/02
+  - data/ctc_2024_train_ds2/PhC-C2DH-U373/01
+  - data/ctc_2024_train_ds2/PhC-C2DH-U373/02
+
+# Fluo-C2DL-MSC: 01 imaged with the 10x objective, 02 with the 20x
+- format: ctc
+  spacing: [.3, .3]
+  paths:
+  - data/ctc_2026/2d/Fluo-C2DL-MSC/01
+  - data/ctc_2024_train_ds2/Fluo-C2DL-MSC/01
+
+- format: ctc
+  spacing: [.3977, .3977]
+  paths:
+  - data/ctc_2026/2d/Fluo-C2DL-MSC/02
+  - data/ctc_2024_train_ds2/Fluo-C2DL-MSC/02
+
+- format: ctc
+  spacing: [.24, .24]
+  paths:
+  - data/ctc_2026/2d/Fluo-N2DH-GOWT1/01
+  - data/ctc_2026/2d/Fluo-N2DH-GOWT1/02
+  - data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/01
+  - data/ctc_2024_train_ds2/Fluo-N2DH-GOWT1/02
+
+- format: ctc
+  spacing: [.125, .125]
+  paths:
+  - data/ctc_2026/2d/Fluo-N2DH-SIM+/01
+  - data/ctc_2026/2d/Fluo-N2DH-SIM+/02
+
+- format: ctc
+  spacing: [1.6, 1.6]
+  paths:
+  - data/ctc_2026/2d/PhC-C2DL-PSC/01
+  # - data/ctc_2026/2d/PhC-C2DL-PSC/02
+  - data/ctc_2024_train_ds2/PhC-C2DL-PSC/01
+  - data/ctc_2024_train_ds2/PhC-C2DL-PSC/02
 
 input_val:
-- data/ctc_2026/2d/DIC-C2DH-HeLa/02
-- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
-- data/ctc_2026/2d/PhC-C2DL-PSC/02
+- format: ctc
+  spacing: [.19, .19]
+  paths:
+  - data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- format: ctc
+  spacing: [.645, .645]
+  paths:
+  - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- format: ctc
+  spacing: [1.6, 1.6]
+  paths:
+  - data/ctc_2026/2d/PhC-C2DL-PSC/02
 input_test:
-- data/ctc_2026/2d/DIC-C2DH-HeLa/02
-- data/ctc_2026/2d/Fluo-N2DL-HeLa/02
-- data/ctc_2026/2d/PhC-C2DL-PSC/02
+- format: ctc
+  spacing: [.19, .19]
+  paths:
+  - data/ctc_2026/2d/DIC-C2DH-HeLa/02
+- format: ctc
+  spacing: [.645, .645]
+  paths:
+  - data/ctc_2026/2d/Fluo-N2DL-HeLa/02
+- format: ctc
+  spacing: [1.6, 1.6]
+  paths:
+  - data/ctc_2026/2d/PhC-C2DL-PSC/02

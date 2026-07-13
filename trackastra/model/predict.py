@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 
 def predict(
-    batch: list[dict], model: TrackingTransformer
+    batch: list[dict], model: TrackingTransformer, source_ndim: int | None = None
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
     """Predict association scores between objects in a batch of windows.
 
@@ -23,6 +23,7 @@ def predict(
             - coords: Object coordinates array
             - timepoints: Time points array
         model: TrackingTransformer model to use for prediction.
+        source_ndim: Genuine spatial dimensionality shared by the input windows.
 
     Returns:
         ``(A, p_out, p_in)``: the ``(B, N, N)`` association scores, and - when the
@@ -69,6 +70,11 @@ def predict(
     # Concat timepoints to coordinates
     coords = torch.cat((timepoints.unsqueeze(2).float(), coords), dim=2)
     want_node = bool(getattr(model, "node_head", False))
+    dim_kw = {}
+    if bool(model.config.get("data_dim_embed", False)) and source_ndim is not None:
+        dim_kw["source_ndim"] = torch.full(
+            (coords.shape[0],), source_ndim, dtype=torch.long, device=device
+        )
     p_out = p_in = None
     with torch.no_grad():
         if want_node:
@@ -80,6 +86,7 @@ def predict(
                 feature_mask=feature_mask,
                 padding_mask=padding_mask,
                 return_node_logits=True,
+                **dim_kw,
             )
             p_out = torch.softmax(out_logits.float(), dim=-1).detach().cpu().numpy()
             p_in = torch.softmax(in_logits.float(), dim=-1).detach().cpu().numpy()
@@ -89,6 +96,7 @@ def predict(
                 features=feats,
                 feature_mask=feature_mask,
                 padding_mask=padding_mask,
+                **dim_kw,
             )
         else:
             A, _ = model(
@@ -203,7 +211,9 @@ def predict_windows(
             logger.warning(f"No detections in window {t} - {t + batch_size}, skipping")
             continue
 
-        A_batch, p_out_batch, p_in_batch = predict(batch, model)
+        A_batch, p_out_batch, p_in_batch = predict(
+            batch, model, source_ndim=spatial_dim
+        )
 
         for i, A in enumerate(A_batch):
             timepoints = batch[i]["timepoints"].numpy()

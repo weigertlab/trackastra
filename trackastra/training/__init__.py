@@ -1193,6 +1193,7 @@ def _training_config_from_args(
         head_mode=args.head_mode,
         causal_norm=args.causal_norm,
         architecture_version=args.architecture_version,
+        data_dim_embed=args.data_dim_embed,
         disable_abs_pos=args.disable_abs_pos,
         disable_input_norm=args.disable_input_norm,
         encoder_only=args.encoder_only,

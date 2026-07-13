@@ -240,6 +240,12 @@ def create_train_parser() -> configargparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--data_dim_embed",
+        type=str2bool,
+        default=False,
+        help="add a learned 2D/3D source-dimension embedding to every token",
+    )
+    parser.add_argument(
         "--disable_abs_pos",
         action="store_true",
         help="omit input coordinate Fourier embeddings; attention RoPE is unchanged",

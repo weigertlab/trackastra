@@ -1,6 +1,7 @@
 """Transformer class."""
 
 import logging
+import warnings
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ class ModelConfig:
     edge_mlp_dim: int | None = None
     causal_norm: Literal["none", "linear", "softmax", "quiet_softmax"] = "quiet_softmax"
     architecture_version: Literal[1, 2] = 2
+    data_dim_embed: bool = False
     disable_abs_pos: bool = False
     disable_input_norm: bool = False
     node_head: bool = False
@@ -105,6 +107,7 @@ class ModelConfig:
             "edge_mlp_dim": self.edge_mlp_dim,
             "causal_norm": self.causal_norm,
             "architecture_version": self.architecture_version,
+            "data_dim_embed": self.data_dim_embed,
             "disable_abs_pos": self.disable_abs_pos,
             "disable_input_norm": self.disable_input_norm,
             "node_head": self.node_head,
@@ -450,6 +453,7 @@ class TrackingTransformer(torch.nn.Module):
         edge_star_n_blocks: int = 1,
         edge_mlp_dim: int | None = None,
         architecture_version: Literal[1, 2] = 2,
+        data_dim_embed: bool = False,
         disable_abs_pos: bool = False,
         disable_input_norm: bool = False,
         node_head: bool = False,
@@ -549,6 +553,7 @@ class TrackingTransformer(torch.nn.Module):
             edge_star_n_blocks=edge_star_n_blocks,
             edge_mlp_dim=edge_mlp_dim,
             architecture_version=architecture_version,
+            data_dim_embed=data_dim_embed,
             disable_abs_pos=disable_abs_pos,
             disable_input_norm=disable_input_norm,
             node_head=node_head,
@@ -558,6 +563,7 @@ class TrackingTransformer(torch.nn.Module):
         )
         self.encoder_only = encoder_only
         self.architecture_version = architecture_version
+        self._missing_source_ndim_warned = False
         self.attn_mode = attn_mode
         self.max_neighbors = max_neighbors
         self.sparse_knn_mode = sparse_knn_mode
@@ -587,6 +593,9 @@ class TrackingTransformer(torch.nn.Module):
         self.feat_embed = (
             FeatureEmbedding(feat_dim, d_model//2, d_model) if feat_dim > 0 else None
         )
+        self.data_dim_embed = nn.Embedding(2, d_model) if data_dim_embed else None
+        if self.data_dim_embed is not None:
+            nn.init.zeros_(self.data_dim_embed.weight)
         self.norm = nn.Identity() if disable_input_norm else nn.LayerNorm(d_model)
 
         self.encoder = nn.ModuleList([
@@ -682,6 +691,7 @@ class TrackingTransformer(torch.nn.Module):
         coords,
         features=None,
         feature_mask=None,
+        source_ndim=None,
         padding_mask=None,
         return_node_logits=False,
     ):
@@ -732,6 +742,30 @@ class TrackingTransformer(torch.nn.Module):
                 features = coords.new_zeros((_B, _N, self.feat_dim))
                 feature_mask = torch.zeros_like(features, dtype=torch.bool)
             token = token + self.feat_embed(features, feature_mask)
+        if self.data_dim_embed is not None:
+            if source_ndim is None:
+                if not self._missing_source_ndim_warned:
+                    warnings.warn(
+                        "data_dim_embed=True but source_ndim was omitted; skipping "
+                        "the data-dimension embedding",
+                        stacklevel=2,
+                    )
+                    self._missing_source_ndim_warned = True
+            else:
+                source_ndim = torch.as_tensor(source_ndim, device=coords.device)
+                if tuple(source_ndim.shape) != (_B,):
+                    raise ValueError(
+                        f"source_ndim must have shape ({_B},), got "
+                        f"{tuple(source_ndim.shape)}"
+                    )
+                valid_source_ndim = (source_ndim == 2) | (source_ndim == 3)
+                if not bool(valid_source_ndim.all()):
+                    raise ValueError(
+                        "source_ndim values must be 2 or 3, got "
+                        f"{source_ndim.detach().cpu().tolist()}"
+                    )
+                dim_token = self.data_dim_embed(source_ndim.to(torch.long) - 2)
+                token = token + dim_token[:, None, :]
         features = self.norm(token)
 
         x = features

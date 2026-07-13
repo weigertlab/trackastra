@@ -660,6 +660,7 @@ class TrackingDataset(Dataset):
             np.concatenate((feature.timepoints[:, None], coords_spatial), axis=1)
         ).float()
         result = {
+            "source_ndim": torch.tensor(self.ndim, dtype=torch.long),
             "features": torch.from_numpy(feature_values).float(),
             "feature_mask": torch.from_numpy(feature_mask),
             "coords0": coords0,
@@ -890,7 +891,13 @@ def collate_sequence_padding(batch):
         )
         for k, v in set_keys.items()
     }
-    scalar_keys = ("window_index", "seg_index", "window_start", "dataset_index")
+    scalar_keys = (
+        "source_ndim",
+        "window_index",
+        "seg_index",
+        "window_start",
+        "dataset_index",
+    )
     for k in scalar_keys:
         if k in batch[0]:
             batch_new[k] = torch.stack([x[k] for x in batch], dim=0)

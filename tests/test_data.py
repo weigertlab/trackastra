@@ -244,6 +244,7 @@ def test_wrfeat3_dataset_keeps_fixed_width_and_2d_z_mask():
 
     sample = TrackingDataset(sequence, window_size=2, features="wrfeat3")[0]
 
+    assert sample["source_ndim"].item() == 2
     assert tuple(sample["features"].shape) == (2, 9)
     expected = torch.tensor([True, True, True, True, True, False, False, False, True])
     assert torch.equal(sample["feature_mask"][0], expected)
@@ -291,6 +292,7 @@ def test_mixed_2d_3d_wrfeat3_batch_runs_through_3d_model():
     batch = collate_sequence_padding([sample_2d, sample_3d])
 
     assert batch["coords"].shape == (2, 2, 4)
+    assert batch["source_ndim"].tolist() == [2, 3]
     assert torch.all(batch["coords"][0, :, 1] == 0)
     assert not bool(batch["feature_mask"][0, :, 5:8].any())
     assert bool(batch["feature_mask"][1].all())
@@ -304,16 +306,28 @@ def test_mixed_2d_3d_wrfeat3_batch_runs_through_3d_model():
         nhead=4,
         num_encoder_layers=1,
         num_decoder_layers=1,
+        data_dim_embed=True,
     ).eval()
     with torch.no_grad():
         association, _ = model(
             batch["coords"].float(),
             features=batch["features"].float(),
             feature_mask=batch["feature_mask"],
+            source_ndim=batch["source_ndim"],
             padding_mask=batch["padding_mask"],
         )
     assert association.shape == (2, 2, 2)
     assert torch.isfinite(association).all()
+
+    from trackastra.training.lightning import TrackingLightningModule
+
+    module = TrackingLightningModule(model.train(), causal_norm="none")
+    loss = module._common_step(batch)["loss"]
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert model.data_dim_embed.weight.grad is not None
+    assert torch.isfinite(model.data_dim_embed.weight.grad).all()
+    assert torch.all(model.data_dim_embed.weight.grad.abs().sum(dim=1) > 0)
 
 
 def test_2d_position_noise_precedes_coordinate_lifting():
