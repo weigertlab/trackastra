@@ -2,17 +2,9 @@ import logging
 import time
 from types import SimpleNamespace
 
+import motile
 import networkx as nx
 import yaml
-
-try:
-    import motile
-except ModuleNotFoundError:
-    raise ModuleNotFoundError(
-        "For tracking with an ILP, please install the optional `motile`"
-        ' dependency with `pip install "trackastra[ilp]"`.'
-    )
-
 
 logger = logging.getLogger(__name__)
 

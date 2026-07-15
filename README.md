@@ -47,12 +47,6 @@ Trackastra can then be installed from PyPI using `pip`:
 pip install trackastra
 ```
 
-### With ILP support
-For tracking with an integer linear program (ILP, which is optional)
-```bash
-pip install "trackastra[ilp]"
-```
-
 ### 🆕😎 With pretrained features
 
 For our [new model variant](https://github.com/C-Achard/Trackastra-et-Ultra) that uses SAM2 features for improved tracking performance on certain data, for example for tracking bacteria:
@@ -78,7 +72,7 @@ pip install -e "./trackastra[all]"
 <details>
 <summary>📄 <h4></b>Notes/Troubleshooting</h4></summary>
   
-- For the optional ILP linking, `pip install "trackastra[ilp]"` will install [`motile`](https://funkelab.github.io/motile/index.html) with two discrete optimizers: the free [SCIP Optimizer](https://www.scipopt.org/) and the [Gurobi Optimizer](https://www.gurobi.com/). If a valid Gurobi license is found, it will be used automatically; otherwise motile falls back to SCIP. Free academic Gurobi licenses are available [here](https://www.gurobi.com/academia/academic-program-and-licenses/).
+- For ILP-based linking (`mode="ilp"`), Trackastra uses [`motile`](https://funkelab.github.io/motile/index.html), which is installed automatically with two discrete optimizers: the free [SCIP Optimizer](https://www.scipopt.org/) and the [Gurobi Optimizer](https://www.gurobi.com/). If a valid Gurobi license is found, it will be used automatically; otherwise motile falls back to SCIP. Free academic Gurobi licenses are available [here](https://www.gurobi.com/academia/academic-program-and-licenses/).
 - 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
   
 </details>
@@ -111,7 +105,7 @@ The predicted associations can then be used for linking with several modes:
 
 - `greedy_nodiv` (greedy linking with no division) - fast, no additional dependencies
 - `greedy` (greedy linking with division) - fast, no additional dependencies
-- `ilp` (ILP based linking) - slower but more accurate, needs [`motile`](https://github.com/funkelab/motile)
+- `ilp` (ILP based linking) - slower but more accurate, uses [`motile`](https://github.com/funkelab/motile)
 
 Apart from that, no hyperparameters to choose :)
 
