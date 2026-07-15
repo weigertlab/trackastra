@@ -109,29 +109,33 @@ def solve_full_ilp(
 
     # NODES
     solver.add_cost(
-        motile.costs.NodeSelection(weight=p.nodeW, constant=p.nodeC, attribute="weight")
+        motile.costs.NodeSelectedCost(
+            weight=p.nodeW, constant=p.nodeC, attribute="weight"
+        )
     )
     used_costs.nodeW = p.nodeW
     used_costs.nodeC = p.nodeC
 
     # EDGES
     solver.add_cost(
-        motile.costs.EdgeSelection(weight=p.edgeW, constant=p.edgeC, attribute="weight")
+        motile.costs.EdgeSelectedCost(
+            weight=p.edgeW, constant=p.edgeC, attribute="weight"
+        )
     )
     used_costs.edgeW = p.edgeW
     used_costs.edgeC = p.edgeC
 
     # APPEAR
-    solver.add_cost(motile.costs.Appear(constant=p.appearC))
+    solver.add_cost(motile.costs.NodeAppearCost(constant=p.appearC))
     used_costs.appearC = p.appearC
 
     # DISAPPEAR
-    solver.add_cost(motile.costs.Disappear(constant=p.disappearC))
+    solver.add_cost(motile.costs.NodeDisappearCost(constant=p.disappearC))
     used_costs.disappearC = p.disappearC
 
     # DIVISION
     if allow_divisions:
-        solver.add_cost(motile.costs.Split(constant=p.splitC))
+        solver.add_cost(motile.costs.NodeSplitCost(constant=p.splitC))
         used_costs.splitC = p.splitC
 
     # Add constraints
