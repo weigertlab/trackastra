@@ -63,10 +63,7 @@ def cli():
         "--mode",
         choices=["greedy_nodiv", "greedy", "ilp"],
         default="greedy",
-        help=(
-            "Mode for candidate graph pruning. For installing the ilp tracker, see"
-            " https://github.com/weigertlab/trackastra#installation."
-        ),
+        help="Mode for candidate graph pruning.",
     )
     p_track.add_argument(
         "--max-distance",
