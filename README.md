@@ -72,7 +72,7 @@ pip install -e "./trackastra[all]"
 <details>
 <summary>📄 <h4></b>Notes/Troubleshooting</h4></summary>
   
-- For ILP-based linking (`mode="ilp"`), Trackastra uses [`motile`](https://funkelab.github.io/motile/index.html), which is installed automatically with two discrete optimizers: the free [SCIP Optimizer](https://www.scipopt.org/) and the [Gurobi Optimizer](https://www.gurobi.com/). If a valid Gurobi license is found, it will be used automatically; otherwise motile falls back to SCIP. Free academic Gurobi licenses are available [here](https://www.gurobi.com/academia/academic-program-and-licenses/).
+- For ILP-based linking (`mode="ilp"`), Trackastra uses [`motile`](https://funkelab.github.io/motile/index.html), which is installed automatically with the free [SCIP Optimizer](https://www.scipopt.org/). To optionally use the [Gurobi Optimizer](https://www.gurobi.com/) instead, install with `pip install motile[gurobi]`. If a valid Gurobi license is found, it will be used automatically. Free academic Gurobi licenses are available [here](https://www.gurobi.com/academia/academic-program-and-licenses/).
 - 2024-06-07: On Apple M3 chips, you might have to use the nightly build of `torch` and `torchvision`, or worst case build them yourself.
   
 </details>
