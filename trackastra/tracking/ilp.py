@@ -9,8 +9,8 @@ try:
     import motile
 except ModuleNotFoundError:
     raise ModuleNotFoundError(
-        "For tracking with an ILP, please conda install the optional `motile`"
-        " dependency following https://funkelab.github.io/motile/install.html."
+        "For tracking with an ILP, please install the optional `motile`"
+        ' dependency with `pip install "trackastra[ilp]"`.'
     )
 
 
