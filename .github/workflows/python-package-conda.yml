@@ -65,10 +65,6 @@ jobs:
           channels: conda-forge
           channel-priority: true
 
-      - name: Install ilp dependencies
-        if: matrix.ilp == 'true'
-        run: mamba install -c gurobi -c funkelab ilpy
-
       - name: Install package with core dependencies
         run: python -m pip install -e .[test]
 
