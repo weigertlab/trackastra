@@ -1,5 +1,3 @@
-# ruff: noqa: F401
-
 # Core data utilities (no training dependencies required)
 from .data import (
     CTCData,

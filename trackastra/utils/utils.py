@@ -112,7 +112,7 @@ def render_label(
             im_img = img[..., :4]
             if img.shape[-1] < 4:
                 im_img = np.concatenate(
-                    [img, np.ones(img.shape[:2] + (4 - img.shape[-1],))], axis=-1
+                    [img, np.ones((*img.shape[:2], 4 - img.shape[-1]))], axis=-1
                 )
         else:
             raise ValueError("img should be 2 or 3 dimensional")
@@ -378,15 +378,13 @@ def preallocate_memory(dataset, model_lightning, batch_size, max_tokens, device)
         batch = dict(
             features=batched(
                 torch.zeros(
-                    (max_len,) + x["features"].shape[1:], dtype=x["features"].dtype
+                    (max_len, *x["features"].shape[1:]), dtype=x["features"].dtype
                 ),
                 batch_size,
                 device,
             ),
             coords=batched(
-                torch.zeros(
-                    (max_len,) + x["coords"].shape[1:], dtype=x["coords"].dtype
-                ),
+                torch.zeros((max_len, *x["coords"].shape[1:]), dtype=x["coords"].dtype),
                 batch_size,
                 device,
             ),

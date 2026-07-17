@@ -403,6 +403,7 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         "intensity_max",
         "intensity_min",
         "border_dist",
+        "pretrained_feats",
     ):
         pass
     else:

@@ -36,6 +36,7 @@ from trackastra.data import (
 )
 from trackastra.data.distributed import BalancedDataModule
 from trackastra.model import TrackingTransformer
+from trackastra.model.pretrained import _MODELS, download_pretrained
 from trackastra.utils import (
     blockwise_causal_norm,
     blockwise_sum,
@@ -175,6 +176,7 @@ class WrappedLightningModule(pl.LightningModule):
         warmup_epochs: int = 10,
         max_epochs: int = 100,
         learning_rate: float = 1e-5,
+        weight_decay: float = 1e-5,
         causal_norm: str = "none",
         delta_cutoff: int = 2,
         tracking_frequency: int = -1,  # log TRA metrics every that epochs
@@ -194,6 +196,7 @@ class WrappedLightningModule(pl.LightningModule):
         self.batch_val_tb = None
 
         self.lr = learning_rate
+        self.weight_decay = weight_decay
         self.tracking_frequency = tracking_frequency
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
@@ -207,7 +210,22 @@ class WrappedLightningModule(pl.LightningModule):
         padding_mask = batch["padding_mask"]
         padding_mask = padding_mask.bool()
 
-        A_pred = self.model(coords, feats, padding_mask=padding_mask)
+        pretrained_feats = batch.get("pretrained_feats", None)
+        if pretrained_feats is not None and pretrained_feats.numel() > 0:
+            pretrained_feats = pretrained_feats.to(coords.device)
+        else:
+            pretrained_feats = None
+
+        if pretrained_feats is not None:
+            A_pred = self.model(
+                coords,
+                feats,
+                pretrained_features=pretrained_feats,
+                padding_mask=padding_mask,
+            )
+        else:
+            A_pred = self.model(coords, feats, padding_mask=padding_mask)
+
         # remove inf values that might happen due to float16 numerics
         A_pred.clamp_(torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
 
@@ -307,7 +325,9 @@ class WrappedLightningModule(pl.LightningModule):
             return None
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-5)
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
         return dict(
             optimizer=optimizer,
             lr_scheduler=WarmupCosineLRScheduler(
@@ -631,7 +651,8 @@ class MyModelCheckpoint(pl.pytorch.callbacks.Callback):
 
 def create_run_name(args):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # name = f"{timestamp}_{args.name}_feats_{args.features}_pos_{args.attn_positional_bias}_causal_norm_{args.causal_norm}"
+    # name = f"{timestamp}_{args.name}_feats_{args.features}_pos_" + \
+    #     f"{args.attn_positional_bias}_causal_norm_{args.causal_norm}"
     if args.timestamp:
         name = f"{timestamp}_{args.name}"
     else:
@@ -681,6 +702,25 @@ def train(args):
         "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
     )
     args.seed = seed(args.seed)
+    if (
+        args.features in ("pretrained_feats", "pretrained_feats_aug")
+        and args.model is None
+        and args.pretrained_model_path is None
+    ):
+        raise ValueError(
+            "Training a pretrained_feats model from scratch is not supported."
+            " Provide --model or --pretrained_model_path with a compatible pretrained model."
+        )
+
+    if (
+        args.features in ("pretrained_feats", "pretrained_feats_aug")
+        and args.pretrained_feats_model is None
+    ):
+        raise ValueError(
+            "pretrained_feats modes require --pretrained_feats_model"
+            " (e.g. facebook/sam2.1-hiera-base-plus)"
+        )
+
     if args.model is None:
         logger.warning("Training from scratch, this is slow!\n")
 
@@ -753,6 +793,11 @@ def train(args):
             sanity_dist=args.sanity_dist,
             crop_size=args.crop_size,
             compress=args.compress,
+            pretrained_feats_model=args.pretrained_feats_model,
+            pretrained_feats_mode=args.pretrained_feats_mode,
+            pretrained_feats_additional_props=args.pretrained_feats_additional_props,
+            pretrained_n_augs=args.pretrained_n_augs,
+            rotate_features=args.rotate_features,
         )
         dummy_model = TrackingTransformer(
             coord_dim=dummy_data.ndim,
@@ -776,6 +821,7 @@ def train(args):
             warmup_epochs=args.warmup_epochs,
             max_epochs=args.epochs,
             learning_rate=args.lr,
+            weight_decay=args.weight_decay,
             delta_cutoff=args.delta_cutoff,
             causal_norm=args.causal_norm,
             tracking_frequency=args.tracking_frequency,
@@ -816,6 +862,11 @@ def train(args):
         sanity_dist=args.sanity_dist,
         crop_size=args.crop_size,
         compress=args.compress,
+        pretrained_feats_model=args.pretrained_feats_model,
+        pretrained_feats_mode=args.pretrained_feats_mode,
+        pretrained_feats_additional_props=args.pretrained_feats_additional_props,
+        pretrained_n_augs=args.pretrained_n_augs,
+        rotate_features=args.rotate_features,
     )
     sampler_kwargs = dict(
         batch_size=args.batch_size,
@@ -871,8 +922,16 @@ def train(args):
         callbacks.append(ExampleImages())
 
     # load the model if it was given
-    if args.model is not None:
-        fpath = Path(args.model)
+    model_path = (
+        args.pretrained_model_path
+        if args.pretrained_model_path is not None
+        else args.model
+    )
+    if model_path is not None and model_path in _MODELS:
+        logger.info(f"Downloading pretrained model '{model_path}'")
+        model_path = str(download_pretrained(model_path))
+    if model_path is not None:
+        fpath = Path(model_path)
 
         # allow for checkpoints to be loaded too
         if fpath.is_file():
@@ -910,6 +969,7 @@ def train(args):
         warmup_epochs=args.warmup_epochs,
         max_epochs=args.epochs,
         learning_rate=args.lr,
+        weight_decay=args.weight_decay,
         delta_cutoff=args.delta_cutoff,
         causal_norm=args.causal_norm,
         tracking_frequency=args.tracking_frequency,
@@ -919,7 +979,8 @@ def train(args):
     # Compiling does not work!
     # model_lightning = torch.compile(model_lightning)
 
-    # if logdir already exists and --resume option is set, load the last checkpoint (eg when continuing training after crash)
+    # if logdir already exists and --resume option is set,
+    # load the last checkpoint (eg when continuing training after crash)
     if logdir is not None and logdir.exists() and args.resume:
         logging.info("logdir exists, loading last state of model")
         fpath = model_lightning.checkpoint_path(logdir)
@@ -930,6 +991,7 @@ def train(args):
                 warmup_epochs=args.warmup_epochs,
                 max_epochs=args.epochs,
                 learning_rate=args.lr,
+                weight_decay=args.weight_decay,
                 delta_cutoff=args.delta_cutoff,
                 causal_norm=args.causal_norm,
                 tracking_frequency=args.tracking_frequency,
@@ -1064,8 +1126,70 @@ def parse_train_args():
             "patch",
             "patch_regionprops",
             "wrfeat",
+            "pretrained_feats",
+            "pretrained_feats_aug",
         ],
         default="wrfeat",
+    )
+    parser.add_argument(
+        "--pretrained_feats_model",
+        type=str,
+        default=None,
+        help="Model name for pretrained feature extraction (e.g. facebook/sam2.1-hiera-base-plus)",
+    )
+    parser.add_argument(
+        "--pretrained_feats_mode",
+        type=str,
+        default="mean_patches_exact",
+        help="Pooling mode for aggregating patch embeddings per detection (recommended: mean_patches_exact)",
+    )
+    parser.add_argument(
+        "--pretrained_feats_additional_props",
+        type=none_or_str,
+        default=None,
+        help="Additional region properties to concatenate with pretrained features (e.g. regionprops_small)",
+    )
+    parser.add_argument(
+        "--pretrained_n_augs",
+        type=int,
+        default=3,
+        help="Number of augmented dataset copies for pretrained_feats_aug; increase for larger datasets (e.g. 25)",
+    )
+    parser.add_argument(
+        "--reduced_pretrained_feat_dim",
+        type=int,
+        default=None,
+        help="Dimension of pretrained features after the FC layer fed to the encoder (concatenated with additional region props if set); recommended: 128",
+    )
+    parser.add_argument(
+        "--rotate_features",
+        type=str2bool,
+        default=True,
+        help="Apply feature disambiguation to pretrained features based on coordinates to mitigate overfitting and avoid proximity-induced ambiguity in pretrained features",
+    )
+    parser.add_argument(
+        "--disable_all_coords",
+        type=str2bool,
+        default=False,
+        help="Disable all coordinate inputs to the model (use features only)",
+    )
+    parser.add_argument(
+        "--disable_xy_coords",
+        type=str2bool,
+        default=False,
+        help="Disable XY coordinate inputs to the model (keep only Z/T coords)",
+    )
+    parser.add_argument(
+        "--pretrained_model_path",
+        type=none_or_str,
+        default=None,
+        help="Path to a local pretrained model folder (overrides --model for loading weights)",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-5,
+        help="AdamW weight decay",
     )
     parser.add_argument(
         "--causal_norm",
