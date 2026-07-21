@@ -46,6 +46,10 @@ Trackastra can then be installed from PyPI using `pip`:
 ```bash
 pip install trackastra
 ```
+or from [conda-forge](https://anaconda.org/conda-forge/trackastra):
+```bash
+conda install -c conda-forge trackastra
+```
 
 ### 🆕😎 With pretrained features
 
@@ -58,6 +62,10 @@ and select the `general_2d_w_SAM2_features` pre-trained model for predictions, p
 ### Installation with training support
 ```bash
 pip install "trackastra[train]"
+```
+The conda-forge package [ships the core/inference dependencies only](https://github.com/conda-forge/trackastra-feedstock/pull/9), so with conda install the training dependencies alongside it:
+```bash
+conda install -c conda-forge trackastra lightning wandb tensorboard configargparse matplotlib kornia gitpython
 ```
 
 <details>
