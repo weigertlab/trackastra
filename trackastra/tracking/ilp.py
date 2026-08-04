@@ -3,6 +3,9 @@ import time
 from types import SimpleNamespace
 
 import motile
+import motile.constraints
+import motile.costs
+import motile.variables
 import networkx as nx
 import yaml
 
