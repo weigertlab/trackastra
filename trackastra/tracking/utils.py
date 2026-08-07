@@ -8,6 +8,7 @@ import pandas as pd
 import tifffile
 import zarr
 from geff import write
+from geff_spec import DisplayHint, GeffMetadata
 from skimage.measure import regionprops
 from tqdm import tqdm
 
@@ -478,17 +479,48 @@ def write_to_geff(
     if masks.ndim == 3:
         axis_names = ["time", "y", "x"]
         axis_types = ["time", "space", "space"]
+        axis_units = ["frame", "pixel", "pixel"]
+        display_hints = DisplayHint(
+            display_horizontal="x",
+            display_vertical="y",
+            display_time="time",
+        )
     elif masks.ndim == 4:
         axis_names = ["time", "z", "y", "x"]
         axis_types = ["time", "space", "space", "space"]
+        axis_units = ["frame", "pixel", "pixel", "pixel"]
+        display_hints = DisplayHint(
+            display_horizontal="x",
+            display_vertical="y",
+            display_depth="z",
+            display_time="time",
+        )
     else:
         raise ValueError(f"Unsupported number of dimensions: {masks.ndim}")
 
+    # Work on a copy to avoid mutating the caller's graph.
+    graph = graph.copy()
+
+    # Split the coordinate list into individual x, y, (z) scalar properties
+    # and remove the original list attribute to avoid redundancy in the output.
     graph = split_coords_attr(graph, position_attr=position_attr)
+    for node_id in graph.nodes:
+        graph.nodes[node_id].pop(position_attr, None)
+
+    # node/edge props metadata are populated by the geff write backend;
+    # the empty dicts here are required by the GeffMetadata constructor.
+    metadata = GeffMetadata(
+        directed=True,
+        node_props_metadata={},
+        edge_props_metadata={},
+        display_hints=display_hints,
+    )
 
     write(
         graph=graph,
         store=Path(outdir) / tracking_graph_name,
+        metadata=metadata,
         axis_types=axis_types,
         axis_names=axis_names,
+        axis_units=axis_units,
     )
