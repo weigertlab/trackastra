@@ -52,15 +52,17 @@ def track_greedy(
         key=lambda edge: edge[2][edge_attr],
         reverse=True,
     )
+    n_eligible = next(
+        (i for i, edge in enumerate(edges) if edge[2][edge_attr] < threshold),
+        len(edges),
+    )
+    edges = edges[:n_eligible]
 
     for edge in tqdm(edges, desc="Greedily matched edges"):
         node_in, node_out, features = edge
         assert features[edge_attr] <= 1.0, (
             "Edge weights are assumed to be normalized to [0,1]"
         )
-        # assumes sorted edges
-        if features[edge_attr] < threshold:
-            break
         # Check whether this edge is a feasible edge to add
         # i.e. no fusing
         if node_out in solution_graph.nodes and solution_graph.in_degree(node_out) > 0:

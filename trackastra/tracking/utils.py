@@ -2,6 +2,7 @@ import logging
 from collections import deque
 from pathlib import Path
 
+import dask.array as da
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -10,10 +11,51 @@ import zarr
 from geff import write
 from geff_spec import DisplayHint, GeffMetadata
 from skimage.measure import regionprops
+from skimage.util import map_array
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _relabel_masks(
+    masks: np.ndarray | da.Array,
+    label_maps: list[dict[int, int]],
+) -> np.ndarray | da.Array:
+    """Relabel masks once per frame, preserving lazy Dask execution."""
+    mappings = tuple(
+        (
+            np.asarray(tuple(mapping), dtype=masks.dtype),
+            np.asarray(tuple(mapping.values()), dtype=masks.dtype),
+        )
+        for mapping in label_maps
+    )
+
+    def relabel_block(block, block_info=None):
+        result = np.zeros_like(block)
+        if block_info is None:
+            return result
+
+        t_start = block_info[None]["array-location"][0][0]
+        for local_t, frame in enumerate(block):
+            input_vals, output_vals = mappings[t_start + local_t]
+            if len(input_vals) > 0:
+                map_array(frame, input_vals, output_vals, out=result[local_t])
+        return result
+
+    if isinstance(masks, da.Array):
+        return masks.map_blocks(
+            relabel_block,
+            dtype=masks.dtype,
+            meta=np.array((), dtype=masks.dtype),
+        )
+
+    result = np.zeros_like(masks)
+    for t, frame in enumerate(masks):
+        input_vals, output_vals = mappings[t]
+        if len(input_vals) > 0:
+            map_array(frame, input_vals, output_vals, out=result[t])
+    return result
 
 
 class FoundTracks(Exception):
@@ -200,17 +242,20 @@ def graph_to_napari_tracks(
     return tracks, tracks_graph, tracks_props
 
 
-def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray):
+def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray | da.Array) -> bool:
     """Sanity check of all labels in a CTC dataframe are present in the masks."""
     # Check for empty df
     if len(df) == 0 and np.all(masks == 0):
         return True
 
-    for t in range(df.t1.min(), df.t1.max()):
+    for t in range(df.t1.min(), df.t2.max() + 1):
         sub = df[(df.t1 <= t) & (df.t2 >= t)]
         sub_lab = set(sub.label)
+        mask_t = masks[t]
+        if isinstance(mask_t, da.Array):
+            mask_t = mask_t.compute()
         # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
-        masks_lab = set(np.where(np.bincount(masks[t].ravel()))[0]) - {0}
+        masks_lab = set(np.where(np.bincount(mask_t.ravel()))[0]) - {0}
         if not sub_lab.issubset(masks_lab):
             print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
             return False
@@ -280,11 +325,11 @@ def graph_to_edge_table(
 
 def graph_to_ctc(
     graph: nx.DiGraph,
-    masks_original: np.ndarray,
+    masks_original: np.ndarray | da.Array,
     check: bool = True,
     frame_attribute: str = "time",
     outdir: Path | None = None,
-) -> tuple[pd.DataFrame, np.ndarray]:
+) -> tuple[pd.DataFrame, np.ndarray | da.Array]:
     """Convert graph to ctc track Dataframe and relabeled masks.
 
     Args:
@@ -301,13 +346,8 @@ def graph_to_ctc(
     # each tracklet is a linear chain in the graph
     tracklets = ctc_tracklets(graph, frame_attribute=frame_attribute)
 
-    regions = tuple(
-        dict((reg.label, reg.slice) for reg in regionprops(m))
-        for t, m in enumerate(masks_original)
-    )
-
-    masks = np.stack([np.zeros_like(m) for m in masks_original])
     rows = []
+    label_maps = [dict() for _ in range(len(masks_original))]
     # To map parent references to tracklet ids. -1 means no parent, which is mapped to 0 in CTC format.
     node_to_tracklets = dict({-1: 0})
 
@@ -334,22 +374,17 @@ def graph_to_ctc(
             node = graph.nodes[_n]
             t = node[frame_attribute]
             lab = node["label"]
-            ss = regions[t][lab]
-            m = masks_original[t][ss] == lab
-            if masks[t][ss][m].max() > 0:
+            previous = label_maps[t].setdefault(lab, label)
+            if previous != label:
                 raise RuntimeError(f"Overlapping masks at t={t}, label={lab}")
-            if np.count_nonzero(m) == 0:
-                raise RuntimeError(f"Empty mask at t={t}, label={lab}")
-            masks[t][ss][m] = label
 
         rows.append([label, t1, t2, node_to_tracklets[_parent]])
 
     df = pd.DataFrame(rows, columns=["label", "t1", "t2", "parent"], dtype=int)
+    masks = _relabel_masks(masks_original, label_maps)
 
-    masks = np.stack(masks)
-
-    if check:
-        _check_ctc_df(df, masks)
+    if check and not _check_ctc_df(df, masks):
+        raise RuntimeError("CTC track labels are missing from the output masks")
 
     if outdir is not None:
         outdir = Path(outdir)
@@ -401,36 +436,26 @@ def ctc_to_graph(df: pd.DataFrame, frame_attribute: str = "time"):
 
 def apply_solution_graph_to_masks(
     solution_graph,
-    masks_original,
+    masks_original: np.ndarray | da.Array,
     frame_attribute="time",
-):
+) -> np.ndarray | da.Array:
     """Apply a solution track graph to masks, i.e. keep only the masks contained in the graph.
 
     Args:
         solution_graph: A solution track graph with node attributes `label` and `time`.
-        masks: Array of masks with shape (time, (z), y, x).
+        masks_original: Array of masks with shape (time, (z), y, x).
 
     Returns:
-        np.ndarray: The masks corresponding to the solution graph.
+        The masks corresponding to the solution graph.
     """
-    regions = tuple(
-        dict((reg.label, reg.slice) for reg in regionprops(m))
-        for t, m in enumerate(masks_original)
-    )
-    masks = np.zeros_like(masks_original)
+    label_maps = [dict() for _ in range(len(masks_original))]
     for _n in solution_graph.nodes:
         node = solution_graph.nodes[_n]
         t = node[frame_attribute]
         lab = node["label"]
-        ss = regions[t][lab]
-        m = masks_original[t][ss] == lab
-        if masks[t][ss][m].max() > 0:
-            raise RuntimeError(f"Overlapping masks at t={t}, label={lab}")
-        if np.count_nonzero(m) == 0:
-            raise RuntimeError(f"Empty mask at t={t}, label={lab}")
-        masks[t][ss][m] = lab
+        label_maps[t][lab] = lab
 
-    return masks
+    return _relabel_masks(masks_original, label_maps)
 
 
 def split_coords_attr(graph: nx.DiGraph, position_attr: str = "coords"):

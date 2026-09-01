@@ -334,6 +334,7 @@ class Trackastra:
         )
 
         track_graph = self._track_from_predictions(predictions, mode=mode, **kwargs)
+        logger.info("Applying solution graph to masks")
         masks_tracked = apply_solution_graph_to_masks(track_graph, masks)
         return track_graph, masks_tracked
 
