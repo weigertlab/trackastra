@@ -141,16 +141,14 @@ def test_graph_to_ctc_materializes_dask_frames_once_before_saving(
         frame[t + 1 : t + 3, 2:4] = 7
         return frame
 
-    masks = da.stack(
-        [
-            da.from_delayed(
-                delayed(load_frame)(t),
-                shape=(8, 8),
-                dtype=np.int32,
-            )
-            for t in range(3)
-        ]
-    )
+    masks = da.stack([
+        da.from_delayed(
+            delayed(load_frame)(t),
+            shape=(8, 8),
+            dtype=np.int32,
+        )
+        for t in range(3)
+    ])
 
     graph = nx.DiGraph()
     for t in range(3):
@@ -186,16 +184,14 @@ def test_write_to_geff_materializes_dask_frames_once(tmp_path):
         frame[1:3, t + 1 : t + 3] = 1
         return frame
 
-    masks = da.stack(
-        [
-            da.from_delayed(
-                delayed(load_frame)(t),
-                shape=(8, 8),
-                dtype=np.int32,
-            )
-            for t in range(2)
-        ]
-    )
+    masks = da.stack([
+        da.from_delayed(
+            delayed(load_frame)(t),
+            shape=(8, 8),
+            dtype=np.int32,
+        )
+        for t in range(2)
+    ])
     graph = nx.DiGraph()
     for t in range(2):
         graph.add_node(t, time=t, label=1, coords=(float(t + 1), 1.0))
