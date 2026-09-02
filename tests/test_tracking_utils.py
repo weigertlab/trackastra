@@ -2,7 +2,9 @@ import dask.array as da
 import networkx as nx
 import numpy as np
 import pytest
+import tifffile
 import trackastra.tracking.tracking as tracking_module
+import trackastra.tracking.utils as tracking_utils
 from dask import config, delayed
 from trackastra.tracking import (
     apply_solution_graph_to_masks,
@@ -108,7 +110,8 @@ def test_graph_to_ctc_accepts_tracked_dask_masks():
     np.testing.assert_array_equal(ctc_masks.compute(), expected)
 
 
-def test_graph_to_ctc_rejects_missing_label_in_last_frame():
+@pytest.mark.parametrize("save", [False, True])
+def test_graph_to_ctc_rejects_missing_label_in_last_frame(tmp_path, save):
     masks = np.zeros((2, 8, 8), dtype=np.int32)
     masks[0, 1:3, 1:3] = 7
     masks = da.from_array(masks, chunks=(1, 8, 8))
@@ -122,4 +125,51 @@ def test_graph_to_ctc_rejects_missing_label_in_last_frame():
         RuntimeError,
         match="CTC track labels are missing from the output masks",
     ):
-        graph_to_ctc(graph, masks)
+        graph_to_ctc(graph, masks, outdir=tmp_path if save else None)
+
+
+def test_graph_to_ctc_materializes_dask_frames_once_before_saving(
+    tmp_path, monkeypatch
+):
+    loads = [0, 0, 0]
+
+    def load_frame(t):
+        loads[t] += 1
+        frame = np.zeros((8, 8), dtype=np.int32)
+        frame[t + 1 : t + 3, 2:4] = 7
+        return frame
+
+    masks = da.stack(
+        [
+            da.from_delayed(
+                delayed(load_frame)(t),
+                shape=(8, 8),
+                dtype=np.int32,
+            )
+            for t in range(3)
+        ]
+    )
+
+    graph = nx.DiGraph()
+    for t in range(3):
+        graph.add_node(t, time=t, label=7)
+    graph.add_edges_from([(0, 1), (1, 2)])
+
+    original_imwrite = tifffile.imwrite
+    saved_arrays = []
+
+    def record_imwrite(file, data, **kwargs):
+        saved_arrays.append(isinstance(data, np.ndarray))
+        return original_imwrite(file, data, **kwargs)
+
+    monkeypatch.setattr(tracking_utils.tifffile, "imwrite", record_imwrite)
+    graph_to_ctc(graph, masks, outdir=tmp_path)
+
+    assert loads == [1, 1, 1]
+    assert saved_arrays == [True, True, True]
+    for t in range(3):
+        expected = np.zeros((8, 8), dtype=np.int32)
+        expected[t + 1 : t + 3, 2:4] = 1
+        np.testing.assert_array_equal(
+            tifffile.imread(tmp_path / f"man_track{t:04d}.tif"), expected
+        )

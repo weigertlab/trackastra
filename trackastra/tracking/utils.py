@@ -249,16 +249,23 @@ def _check_ctc_df(df: pd.DataFrame, masks: np.ndarray | da.Array) -> bool:
         return True
 
     for t in range(df.t1.min(), df.t2.max() + 1):
-        sub = df[(df.t1 <= t) & (df.t2 >= t)]
-        sub_lab = set(sub.label)
         mask_t = masks[t]
         if isinstance(mask_t, da.Array):
             mask_t = mask_t.compute()
-        # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
-        masks_lab = set(np.where(np.bincount(mask_t.ravel()))[0]) - {0}
-        if not sub_lab.issubset(masks_lab):
-            print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
+        if not _check_ctc_frame(df, mask_t, t):
             return False
+    return True
+
+
+def _check_ctc_frame(df: pd.DataFrame, mask: np.ndarray, t: int) -> bool:
+    """Sanity check that all CTC labels at one time point occur in its mask."""
+    sub = df[(df.t1 <= t) & (df.t2 >= t)]
+    sub_lab = set(sub.label)
+    # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
+    masks_lab = set(np.where(np.bincount(mask.ravel()))[0]) - {0}
+    if not sub_lab.issubset(masks_lab):
+        print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
+        return False
     return True
 
 
@@ -383,7 +390,7 @@ def graph_to_ctc(
     df = pd.DataFrame(rows, columns=["label", "t1", "t2", "parent"], dtype=int)
     masks = _relabel_masks(masks_original, label_maps)
 
-    if check and not _check_ctc_df(df, masks):
+    if check and outdir is None and not _check_ctc_df(df, masks):
         raise RuntimeError("CTC track labels are missing from the output masks")
 
     if outdir is not None:
@@ -395,6 +402,10 @@ def graph_to_ctc(
         )
         df.to_csv(outdir / "man_track.txt", index=False, header=False, sep=" ")
         for i, m in tqdm(enumerate(masks), total=len(masks), desc="Saving masks"):
+            if isinstance(m, da.Array):
+                m = m.compute()
+            if check and not _check_ctc_frame(df, m, i):
+                raise RuntimeError("CTC track labels are missing from the output masks")
             tifffile.imwrite(
                 outdir / f"man_track{i:04d}.tif",
                 m,
