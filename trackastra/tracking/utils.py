@@ -35,7 +35,9 @@ def _relabel_masks(
     def relabel_frame(frame, input_vals, output_vals):
         if len(input_vals) == 0:
             return np.zeros_like(frame)
-        if np.array_equal(input_vals, np.arange(1, len(input_vals) + 1, dtype=masks.dtype)):
+        if np.array_equal(
+            input_vals, np.arange(1, len(input_vals) + 1, dtype=masks.dtype)
+        ):
             mapping = {0: 0}
             mapping.update(zip(input_vals.tolist(), output_vals.tolist()))
             try:
@@ -144,9 +146,9 @@ def ctc_tracklets(G: nx.DiGraph, frame_attribute: str = "time") -> list[CtcTrack
 
     # Queue of tuples(parent id, start node id)
     starts = deque()
-    starts.extend([
-        (p, d) for p in G.nodes for d in G.successors(p) if G.out_degree[p] == 2
-    ])
+    starts.extend(
+        [(p, d) for p in G.nodes for d in G.successors(p) if G.out_degree[p] == 2]
+    )
     # set parent = -1 since there is no parent
     starts.extend([(-1, n) for n in G.nodes if G.in_degree[n] == 0])
     while starts:
