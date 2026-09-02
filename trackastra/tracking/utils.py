@@ -524,7 +524,11 @@ def write_to_geff(
     """
     root = zarr.open_group(outdir, mode="w")
     segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
-    segmentation[:] = masks
+    if isinstance(masks, da.Array):
+        for t, mask in enumerate(masks):
+            segmentation[t] = mask.compute()
+    else:
+        segmentation[:] = masks
 
     if masks.ndim == 3:
         axis_names = ["time", "y", "x"]

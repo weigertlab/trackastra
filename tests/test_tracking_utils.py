@@ -5,11 +5,13 @@ import pytest
 import tifffile
 import trackastra.tracking.tracking as tracking_module
 import trackastra.tracking.utils as tracking_utils
+import zarr
 from dask import config, delayed
 from trackastra.tracking import (
     apply_solution_graph_to_masks,
     graph_to_ctc,
     track_greedy,
+    write_to_geff,
 )
 
 
@@ -173,3 +175,36 @@ def test_graph_to_ctc_materializes_dask_frames_once_before_saving(
         np.testing.assert_array_equal(
             tifffile.imread(tmp_path / f"man_track{t:04d}.tif"), expected
         )
+
+
+def test_write_to_geff_materializes_dask_frames_once(tmp_path):
+    loads = [0, 0]
+
+    def load_frame(t):
+        loads[t] += 1
+        frame = np.zeros((8, 8), dtype=np.int32)
+        frame[1:3, t + 1 : t + 3] = 1
+        return frame
+
+    masks = da.stack(
+        [
+            da.from_delayed(
+                delayed(load_frame)(t),
+                shape=(8, 8),
+                dtype=np.int32,
+            )
+            for t in range(2)
+        ]
+    )
+    graph = nx.DiGraph()
+    for t in range(2):
+        graph.add_node(t, time=t, label=1, coords=(float(t + 1), 1.0))
+    graph.add_edge(0, 1)
+
+    outdir = tmp_path / "tracked.zarr"
+    write_to_geff(graph, masks, outdir)
+
+    assert loads == [1, 1]
+    np.testing.assert_array_equal(
+        zarr.open(outdir, mode="r")["segmentation"][:], masks.compute()
+    )
