@@ -523,7 +523,16 @@ def write_to_geff(
         position_attr: Name of the node attribute that contains the position.
     """
     root = zarr.open_group(outdir, mode="w")
-    segmentation = root.create("segmentation", shape=masks.shape, dtype=masks.dtype)
+    if masks.ndim == 3:
+        chunks = (1, 512, 512)
+    elif masks.ndim == 4:
+        chunks = (1, 32, 256, 256)
+    else:
+        raise ValueError(f"Expected 2D or 3D masks, got shape {masks.shape}")
+    chunks = tuple(min(c, s) for c, s in zip(chunks, masks.shape))
+    segmentation = root.create(
+        "segmentation", shape=masks.shape, dtype=masks.dtype, chunks=chunks
+    )
     if isinstance(masks, da.Array):
         for t, mask in enumerate(masks):
             segmentation[t] = mask.compute()
