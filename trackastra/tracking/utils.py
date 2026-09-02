@@ -3,6 +3,7 @@ from collections import deque
 from pathlib import Path
 
 import dask.array as da
+import fastremap
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -31,6 +32,21 @@ def _relabel_masks(
         for mapping in label_maps
     )
 
+    def relabel_frame(frame, input_vals, output_vals):
+        if len(input_vals) == 0:
+            return np.zeros_like(frame)
+        if np.array_equal(input_vals, np.arange(1, len(input_vals) + 1, dtype=masks.dtype)):
+            mapping = {0: 0}
+            mapping.update(zip(input_vals.tolist(), output_vals.tolist()))
+            try:
+                return fastremap.remap(frame, mapping)
+            except KeyError:
+                # The frame contains labels not selected by this mapping.
+                pass
+        result = np.zeros_like(frame)
+        map_array(frame, input_vals, output_vals, out=result)
+        return result
+
     def relabel_block(block, block_info=None):
         result = np.zeros_like(block)
         if block_info is None:
@@ -39,8 +55,7 @@ def _relabel_masks(
         t_start = block_info[None]["array-location"][0][0]
         for local_t, frame in enumerate(block):
             input_vals, output_vals = mappings[t_start + local_t]
-            if len(input_vals) > 0:
-                map_array(frame, input_vals, output_vals, out=result[local_t])
+            result[local_t] = relabel_frame(frame, input_vals, output_vals)
         return result
 
     if isinstance(masks, da.Array):
@@ -53,8 +68,7 @@ def _relabel_masks(
     result = np.zeros_like(masks)
     for t, frame in enumerate(masks):
         input_vals, output_vals = mappings[t]
-        if len(input_vals) > 0:
-            map_array(frame, input_vals, output_vals, out=result[t])
+        result[t] = relabel_frame(frame, input_vals, output_vals)
     return result
 
 
@@ -262,7 +276,7 @@ def _check_ctc_frame(df: pd.DataFrame, mask: np.ndarray, t: int) -> bool:
     sub = df[(df.t1 <= t) & (df.t2 >= t)]
     sub_lab = set(sub.label)
     # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
-    masks_lab = set(np.where(np.bincount(mask.ravel()))[0]) - {0}
+    masks_lab = set(fastremap.unique(mask).tolist()) - {0}
     if not sub_lab.issubset(masks_lab):
         print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
         return False
