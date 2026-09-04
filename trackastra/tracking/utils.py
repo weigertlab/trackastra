@@ -277,7 +277,7 @@ def _check_ctc_frame(df: pd.DataFrame, mask: np.ndarray, t: int) -> bool:
     """Sanity check that all CTC labels at one time point occur in its mask."""
     sub = df[(df.t1 <= t) & (df.t2 >= t)]
     sub_lab = set(sub.label)
-    # Since we have non-negative integer labels, we can np.bincount instead of np.unique for speedup
+    # Find present labels without allocating an array up to the maximum label value.
     masks_lab = set(fastremap.unique(mask).tolist()) - {0}
     if not sub_lab.issubset(masks_lab):
         print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
