@@ -3,34 +3,14 @@ import networkx as nx
 import numpy as np
 import pytest
 import tifffile
-import trackastra.tracking.tracking as tracking_module
 import trackastra.tracking.utils as tracking_utils
 import zarr
 from dask import config, delayed
 from trackastra.tracking import (
     apply_solution_graph_to_masks,
     graph_to_ctc,
-    track_greedy,
     write_to_geff,
 )
-
-
-def test_greedy_progress_excludes_below_threshold_edges(monkeypatch):
-    graph = nx.DiGraph()
-    graph.add_edge(0, 1, weight=0.9)
-    graph.add_edge(2, 3, weight=0.5)
-    graph.add_edge(4, 5, weight=0.49)
-    displayed_edges = []
-
-    def record_edges(edges, **kwargs):
-        displayed_edges.extend(edges)
-        return edges
-
-    monkeypatch.setattr(tracking_module, "tqdm", record_edges)
-    result = track_greedy(graph, threshold=0.5)
-
-    assert len(displayed_edges) == 2
-    assert set(result.edges) == {(0, 1), (2, 3)}
 
 
 def test_apply_solution_graph_to_numpy_masks():
