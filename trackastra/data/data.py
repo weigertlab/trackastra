@@ -1,4 +1,6 @@
 import logging
+import math
+from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 from timeit import default_timer
@@ -93,6 +95,10 @@ class _CompressedArray:
         self._dtype = data.dtype.type
         self._shape = data.shape
 
+    @property
+    def shape(self):
+        return self._shape
+
     def decompress(self):
         s = lz4.frame.decompress(self._data)
         data = np.frombuffer(s, dtype=self._dtype).reshape(self._shape)
@@ -180,8 +186,22 @@ class CTCData(Dataset):
         self.detection_folders = detection_folders
         self.ndim = ndim
         self.features = features
+        self.pretrained_feats_model = kwargs.get("pretrained_feats_model", None)
+        self.pretrained_feats_mode = kwargs.get(
+            "pretrained_feats_mode", "mean_patches_exact"
+        )
+        self.pretrained_feats_additional_props = kwargs.get(
+            "pretrained_feats_additional_props", None
+        )
+        self.pretrained_n_augs = kwargs.get("pretrained_n_augs", 3)
+        self.rotate_features = kwargs.get("rotate_features", False)
+        self.rotate_feature_axes = kwargs.get("rotate_feature_axes", "y")
 
-        if features not in ("none", "wrfeat") and features not in _PROPERTIES[ndim]:
+        if (
+            features
+            not in ("none", "wrfeat", "pretrained_feats", "pretrained_feats_aug")
+            and features not in _PROPERTIES[ndim]
+        ):
             raise ValueError(
                 f"'{features}' not one of the supported {ndim}D features"
                 f" {tuple(_PROPERTIES[ndim].keys())}"
@@ -225,7 +245,7 @@ class CTCData(Dataset):
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features in ("wrfeat", "pretrained_feats", "pretrained_feats_aug"):
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -295,7 +315,7 @@ class CTCData(Dataset):
 
         start = default_timer()
 
-        if self.features == "wrfeat":
+        if self.features in ("wrfeat", "pretrained_feats", "pretrained_feats_aug"):
             self.windows = self._load_wrfeat()
         else:
             self.windows = self._load()
@@ -343,7 +363,7 @@ class CTCData(Dataset):
             default_augmenter,
         )
 
-        if self.features == "wrfeat":
+        if self.features in ("wrfeat", "pretrained_feats", "pretrained_feats_aug"):
             return self._setup_features_augs_wrfeat(ndim, features, augment, crop_size)
 
         cropper = (
@@ -774,7 +794,8 @@ class CTCData(Dataset):
                         f" {det_folder}:{t1}"
                     )
 
-                # build matrix from incomplete labels, but full lineage graph. If a label is missing, I should skip over it.
+                # build matrix from incomplete labels, but full lineage graph.
+                # If a label is missing, I should skip over it.
                 A = _ctc_assoc_matrix(
                     _labels,
                     _ts,
@@ -808,7 +829,7 @@ class CTCData(Dataset):
 
     def __getitem__(self, n: int, return_dense=None):
         # if not set, use default
-        if self.features == "wrfeat":
+        if self.features in ("wrfeat", "pretrained_feats", "pretrained_feats_aug"):
             return self._getitem_wrfeat(n, return_dense)
 
         if return_dense is None:
@@ -993,7 +1014,8 @@ class CTCData(Dataset):
     def _setup_features_augs_wrfeat(
         self, ndim: int, features: str, augment: int, crop_size: tuple[int]
     ):
-        # FIXME: hardcoded
+        # FIXME: hardcoded. For pretrained_feats this is overwritten in _load_wrfeat, where
+        # the actual dim of the additional region props is known.
         feat_dim = 7 if ndim == 2 else 12
         if augment == 1:
             augmenter = wrfeat.WRAugmentationPipeline([
@@ -1042,6 +1064,7 @@ class CTCData(Dataset):
         self.gt_masks = self._check_dimensions(self.gt_masks)
 
         # Load images
+        raw_imgs = None
         if self.img_folder is None:
             if self.gt_masks is not None:
                 self.imgs = np.zeros_like(self.gt_masks)
@@ -1050,10 +1073,12 @@ class CTCData(Dataset):
         else:
             logger.info("Loading images")
             imgs = self._load_tiffs(self.img_folder, dtype=np.float32)
+            raw_imgs = np.stack(list(imgs))  # keep raw for pretrained feature extractor
             self.imgs = np.stack([
-                normalize(_x) for _x in tqdm(imgs, desc="Normalizing", leave=False)
+                normalize(_x) for _x in tqdm(raw_imgs, desc="Normalizing", leave=False)
             ])
             self.imgs = self._check_dimensions(self.imgs)
+            raw_imgs = self._check_dimensions(raw_imgs)
             if self.compress:
                 # prepare images to be compressed later (e.g. removing non masked parts for regionprops features)
                 self.imgs = np.stack([
@@ -1067,6 +1092,43 @@ class CTCData(Dataset):
         windows = []
         self.properties_by_time = dict()
         self.det_masks = dict()
+
+        # Build the pretrained feature extractor once, before the detection folder loop,
+        # so embeddings are not recomputed for each detection folder.
+        self.feature_extractor = None
+        self.pretrained_feat_dim = 0
+        self.aug_image_shapes = None
+        WRPretrainedFeatures = None
+        # self.augmenter is None exactly when augment=0, which is how the data module marks
+        # the validation split. Augmented copies would make validation non deterministic.
+        use_augs = (
+            self.features == "pretrained_feats_aug"
+            and self.pretrained_n_augs > 0
+            and self.augmenter is not None
+        )
+        if self.features in ("pretrained_feats", "pretrained_feats_aug"):
+            from trackastra_pretrained_feats import (
+                FeatureExtractor,
+                WRPretrainedFeatures,
+            )
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.feature_extractor = FeatureExtractor.from_model_name(
+                self.pretrained_feats_model,
+                self.imgs.shape[-2:],
+                save_path=self.root / "embeddings",
+                mode=self.pretrained_feats_mode,
+                device=device,
+                additional_features=self.pretrained_feats_additional_props,
+            )
+            self.pretrained_feat_dim = self.feature_extractor.hidden_state_size
+            if not use_augs:
+                # The augmented path recomputes embeddings per augmented copy itself.
+                imgs_for_extractor = raw_imgs if raw_imgs is not None else self.imgs
+                self.feature_extractor.precompute_image_embeddings(imgs_for_extractor)
+        raw_imgs_for_augs = raw_imgs if use_augs else None
+        raw_imgs = None
+
         logger.info("Loading detections")
         for _f in self.detection_folders:
             det_folder = self.root / _f
@@ -1107,13 +1169,40 @@ class CTCData(Dataset):
             self.det_masks[_f] = det_masks
 
             # build features
-
-            features = joblib.Parallel(n_jobs=8)(
-                joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
-                    mask=mask[None], img=img[None], t_start=t
+            if use_augs:
+                imgs_for_augs = (
+                    raw_imgs_for_augs if raw_imgs_for_augs is not None else self.imgs
                 )
-                for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
-            )
+                features_per_aug = self._build_augmented_features(
+                    imgs_for_augs, det_masks
+                )
+                features = features_per_aug[0]
+            elif self.features in ("pretrained_feats", "pretrained_feats_aug"):
+                features = [
+                    WRPretrainedFeatures.from_mask_img(
+                        img=img[None],
+                        mask=mask[None],
+                        feature_extractor=self.feature_extractor,
+                        t_start=t,
+                        additional_properties=self.feature_extractor.additional_features,
+                    )
+                    for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
+                ]
+                features_per_aug = [features]
+            else:
+                features = joblib.Parallel(n_jobs=8)(
+                    joblib.delayed(wrfeat.WRFeatures.from_mask_img)(
+                        mask=mask[None], img=img[None], t_start=t
+                    )
+                    for t, (mask, img) in enumerate(zip(det_masks, self.imgs))
+                )
+                features_per_aug = [features]
+
+            if self.features in ("pretrained_feats", "pretrained_feats_aug"):
+                # The shallow feature dim depends on pretrained_feats_additional_props,
+                # so read it off the features that were actually built.
+                stacked = features[0].features_stacked
+                self.feat_dim = 0 if stacked is None else stacked.shape[-1]
 
             properties_by_time = dict()
             for _t, _feats in enumerate(features):
@@ -1123,18 +1212,91 @@ class CTCData(Dataset):
             self.properties_by_time[_f] = properties_by_time
 
             _w = self._build_windows_wrfeat(
-                features,
+                features_per_aug,
                 det_masks,
                 det_gt_matching,
             )
 
             windows.extend(_w)
 
+        if self.feature_extractor is not None:
+            # The extractor holds the pretrained backbone and its precomputed embeddings.
+            # Neither is needed once the features are built, and keeping them around makes
+            # the dataset unpicklable for the on-disk cache (see cache_class).
+            # Drop the embeddings before clear_model(), whose empty_cache() would otherwise
+            # still see them referenced, so their GPU memory is never handed back and the
+            # next dataset of a multi-sequence run runs out of memory.
+            self.feature_extractor.embeddings = None
+            self.feature_extractor.clear_model()
+            self.feature_extractor = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         return windows
+
+    def _build_augmented_features(self, imgs: np.ndarray, det_masks: np.ndarray):
+        """Compute one set of per-timepoint features per augmented copy.
+
+        Returns a list of length pretrained_n_augs + 1, entry 0 being the unaugmented copy.
+        Detections that any copy lost, e.g. because augmentation moved them out of frame,
+        are dropped everywhere so that all copies share labels, timepoints and coords.
+        """
+        from trackastra_pretrained_feats.data.wrfeat import WRAugPretrainedFeatures
+        from trackastra_pretrained_feats.pretrained_augmentations import (
+            PretrainedAugmentations,
+        )
+        from trackastra_pretrained_feats.pretrained_features import (
+            FeatureExtractorAugWrapper,
+        )
+
+        wrapper = FeatureExtractorAugWrapper(
+            extractor=self.feature_extractor,
+            augmenter=PretrainedAugmentations(),
+            n_aug=self.pretrained_n_augs,
+        )
+        aug_dict = wrapper.compute_all_features(
+            torch.from_numpy(np.asarray(imgs)),
+            torch.from_numpy(np.asarray(det_masks).astype(np.int32)),
+        )
+        self.aug_image_shapes = wrapper.image_shape_reference
+
+        n_entries = self.pretrained_n_augs + 1
+        copies = [aug_dict[str(i)]["data"] for i in range(n_entries)]
+        # Keep only the detections that survived every augmentation
+        common = set.intersection(*[
+            {(t, lab) for t, per_t in copy.items() for lab in per_t} for copy in copies
+        ])
+
+        features_per_aug = []
+        for copy in copies:
+            per_timepoint = []
+            for t in sorted(copy):
+                labels = sorted(lab for lab in copy[t] if (t, lab) in common)
+                entries = [copy[t][lab] for lab in labels]
+                feats = OrderedDict()
+                for key in entries[0]["features"] if entries else ():
+                    feats[key] = np.stack([
+                        np.asarray(e["features"][key]) for e in entries
+                    ])
+                per_timepoint.append(
+                    WRAugPretrainedFeatures.from_window(
+                        features=feats,
+                        coords=np.stack([np.asarray(e["coords"]) for e in entries]),
+                        timepoints=np.full(len(entries), t, dtype=np.int32),
+                        labels=np.asarray(labels, dtype=np.int32),
+                    )
+                )
+            features_per_aug.append(per_timepoint)
+        n_total = sum(len(per_t) for per_t in copies[0].values())
+        logger.info(
+            f"Built {len(features_per_aug)} feature copies ({self.pretrained_n_augs}"
+            f" augmented), {len(common)} of {n_total} detections shared by all"
+        )
+        return features_per_aug
 
     def _build_windows_wrfeat(
         self,
-        features: Sequence[wrfeat.WRFeatures],
+        features_per_aug: Sequence[Sequence[wrfeat.WRFeatures]],
         det_masks: np.ndarray,
         matching: tuple[dict],
     ):
@@ -1152,7 +1314,11 @@ class CTCData(Dataset):
         ):
             img = self.imgs[t1:t2]
             mask = det_masks[t1:t2]
-            feat = wrfeat.WRFeatures.concat(features[t1:t2])
+            feats = [
+                wrfeat.WRFeatures.concat(per_aug[t1:t2]) for per_aug in features_per_aug
+            ]
+            # All copies share labels, timepoints and the association matrix
+            feat = feats[0]
 
             labels = feat.labels
             timepoints = feat.timepoints
@@ -1162,7 +1328,8 @@ class CTCData(Dataset):
                 A = np.zeros((0, 0), dtype=bool)
                 coords = np.zeros((0, feat.ndim), dtype=int)
             else:
-                # build matrix from incomplete labels, but full lineage graph. If a label is missing, I should skip over it.
+                # build matrix from incomplete labels, but full lineage graph.
+                # If a label is missing, I should skip over it.
                 A = _ctc_assoc_matrix(
                     labels,
                     timepoints,
@@ -1178,7 +1345,7 @@ class CTCData(Dataset):
                 assoc_matrix=A,
                 labels=labels,
                 timepoints=timepoints,
-                wrfeat=feat,
+                wrfeat=feats,
             )
             windows.append(w)
 
@@ -1199,7 +1366,11 @@ class CTCData(Dataset):
         mask = track["mask"]
         timepoints = track["timepoints"]
         # track["t1"]
-        feat = track["wrfeat"]
+        feats = track["wrfeat"]
+        # Draw one of the augmented copies. Index 0 is the unaugmented one, which is all
+        # there is unless pretrained_feats_aug generated more.
+        aug_choice = 0 if len(feats) == 1 else np.random.randint(len(feats))
+        feat = feats[aug_choice]
 
         if return_dense and isinstance(mask, _CompressedArray):
             mask = mask.decompress()
@@ -1228,7 +1399,17 @@ class CTCData(Dataset):
         coords0 = np.concatenate((feat.timepoints[:, None], feat.coords), axis=-1)
         coords0 = torch.from_numpy(coords0).float()
         assoc_matrix = torch.from_numpy(assoc_matrix.astype(np.float32))
-        features = torch.from_numpy(feat.features_stacked).float()
+        stacked = feat.features_stacked
+        features = (
+            torch.from_numpy(stacked).float()
+            if stacked is not None
+            else torch.zeros(len(feat), 0)
+        )
+        pretrained_feats = feat.pretrained_feats
+        if pretrained_feats is not None:
+            # WRPretrainedFeatures stores these as a torch tensor, but WRFeatures.concat
+            # turns them into an array, so accept either.
+            pretrained_feats = torch.as_tensor(pretrained_feats).float()
         labels = torch.from_numpy(feat.labels).long()
         timepoints = torch.from_numpy(feat.timepoints).long()
 
@@ -1240,6 +1421,8 @@ class CTCData(Dataset):
             coords0 = coords0[:n_elems]
             features = features[:n_elems]
             assoc_matrix = assoc_matrix[:n_elems, :n_elems]
+            if pretrained_feats is not None:
+                pretrained_feats = pretrained_feats[:n_elems]
             logger.debug(
                 f"Clipped window of size {timepoints[n_elems - 1] - timepoints.min()}"
             )
@@ -1249,8 +1432,20 @@ class CTCData(Dataset):
             coords[:, 1:] += torch.randint(0, 512, (1, self.ndim))
         else:
             coords = coords0.clone()
+
+        if self.rotate_features and pretrained_feats is not None:
+            # Augmentation can resize the images, so normalize against the shape the
+            # chosen copy was extracted at rather than the original one.
+            image_shape = img.shape
+            if self.aug_image_shapes is not None:
+                image_shape = self.aug_image_shapes.get(aug_choice, image_shape)
+            pretrained_feats = rotate_features_by_coords(
+                pretrained_feats, coords, image_shape, axes=self.rotate_feature_axes
+            )
+
         res = dict(
             features=features,
+            pretrained_feats=pretrained_feats,
             coords0=coords0,
             coords=coords,
             assoc_matrix=assoc_matrix,
@@ -1449,6 +1644,54 @@ def pad_tensor(x, n_max: int, dim=0, value=0):
     # pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype).to(x.device)
     pad = torch.full(pad_shape, fill_value=value, dtype=x.dtype)
     return torch.cat((x, pad), dim=dim)
+
+
+def rotate_features_by_coords(
+    features: torch.Tensor,
+    coords: torch.Tensor,
+    image_shape: tuple[int, ...],
+    axes: Literal["y", "x", "both"] = "y",
+) -> torch.Tensor:
+    """Apply a RoPE-style rotation to each feature vector based on its spatial coordinates.
+
+    Disambiguates the pretrained features of nearby detections, which are otherwise nearly
+    identical for patch-pooled embeddings, and mitigates overfitting.
+
+    Args:
+        features (torch.Tensor): Features of shape (n_objects, d). d must be even.
+        coords (torch.Tensor): Coordinates of shape (n_objects, 1 + ndim), where the first
+            column is the timepoint.
+        image_shape (tuple): Shape of the window images, whose last two entries are taken
+            as (height, width) to normalize the coordinates with.
+        axes (str): Which spatial coordinates drive the rotation angle. "y" and "x" derive
+            a single angle from that coordinate alone, "both" alternates between the two
+            across feature pairs. Defaults to "y", which is what the released
+            general_2d_w_SAM2_features model was trained with, so that finetuning it sees
+            the feature distribution it expects.
+
+    Returns:
+        torch.Tensor: Rotated features of shape (n_objects, d).
+    """
+    n_objects, d = features.shape
+    if d % 2 != 0:
+        raise ValueError(f"Feature dimension must be even for rotation, got {d}")
+    if axes not in ("y", "x", "both"):
+        raise ValueError(f"axes must be one of 'y', 'x', 'both', got '{axes}'")
+
+    extent = torch.tensor(image_shape[-2:], dtype=features.dtype)
+    spatial_angles = 2 * math.pi * coords[:, 1:3].to(features.dtype) / extent
+    n_pairs = d // 2
+    if axes == "both":
+        angles = spatial_angles.repeat(1, math.ceil(n_pairs / 2))[:, :n_pairs]
+    else:
+        angles = spatial_angles[:, 0 if axes == "y" else 1, None].expand(-1, n_pairs)
+    cos, sin = torch.cos(angles), torch.sin(angles)
+
+    pairs = features.view(n_objects, -1, 2)
+    x_feat, y_feat = pairs[..., 0], pairs[..., 1]
+    x_rot = x_feat * cos - y_feat * sin
+    y_rot = x_feat * sin + y_feat * cos
+    return torch.stack([x_rot, y_rot], dim=-1).reshape(n_objects, d)
 
 
 def collate_sequence_padding(batch):

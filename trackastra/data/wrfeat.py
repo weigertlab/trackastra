@@ -7,7 +7,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from functools import reduce
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, ClassVar, Literal, Optional
 
 import joblib
 import numpy as np
@@ -114,6 +114,16 @@ def _border_dist_fast(mask: np.ndarray, cutoff: float = 5):
 
 class WRFeatures:
     """regionprops features for a windowed track region."""
+
+    # Stacked feature dim per property set and number of spatial dimensions. Used to size
+    # the model input before any data is loaded, and looked up by
+    # trackastra_pretrained_feats to size its additional region props.
+    # regionprops_small is not in _PROPERTIES, it is defined by trackastra_pretrained_feats.
+    PROPERTIES_DIMS: ClassVar = {
+        "regionprops": {2: 8, 3: 13},
+        "regionprops2": {2: 7, 3: 12},
+        "regionprops_small": {2: 5, 3: 10},
+    }
 
     def __init__(
         self,
@@ -403,6 +413,7 @@ def _transform_affine(k: str, v: np.ndarray, M: np.ndarray):
         "intensity_max",
         "intensity_min",
         "border_dist",
+        "pretrained_feats",
     ):
         pass
     else:

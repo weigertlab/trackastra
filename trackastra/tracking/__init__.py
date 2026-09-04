@@ -1,5 +1,3 @@
-# ruff: noqa: F401
-
 from .track_graph import TrackGraph
 from .tracking import (
     build_graph,

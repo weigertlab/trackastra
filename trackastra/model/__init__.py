@@ -1,5 +1,3 @@
-# ruff: noqa: F401
-
 import os
 
 from .model import TrackingTransformer
