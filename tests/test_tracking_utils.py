@@ -1,3 +1,6 @@
+import runpy
+import sys
+
 import dask.array as da
 import networkx as nx
 import numpy as np
@@ -11,6 +14,44 @@ from trackastra.tracking import (
     graph_to_ctc,
     write_to_geff,
 )
+
+pytestmark = pytest.mark.core
+
+
+@pytest.fixture(autouse=True, params=["numpy", "fastremap"])
+def remapping_backend(request, monkeypatch):
+    if request.param == "numpy":
+        monkeypatch.setattr(tracking_utils, "fastremap", None)
+    else:
+        monkeypatch.setattr(
+            tracking_utils, "fastremap", pytest.importorskip("fastremap")
+        )
+
+
+def test_tracking_utils_import_without_fastremap(monkeypatch):
+    monkeypatch.setitem(sys.modules, "fastremap", None)
+    namespace = runpy.run_path(tracking_utils.__file__)
+    assert namespace["fastremap"] is None
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_relabel_masks_preserves_mapping_and_dtype(lazy):
+    masks = np.array(
+        [[[0, 1, 2, 3]], [[0, 10, 1000000, 10]], [[0, 1, 2, 1]]], dtype=np.uint32
+    )
+    original = masks.copy()
+    mappings = [{1: 2, 2: 1}, {1000000: 7}, {1: 2, 2: 1}]
+    source = da.from_array(masks, chunks=(1, 1, 2)) if lazy else masks
+
+    result = tracking_utils._relabel_masks(source, mappings)
+    if lazy:
+        result = result.compute()
+
+    assert result.dtype == masks.dtype
+    np.testing.assert_array_equal(
+        result, [[[0, 2, 1, 0]], [[0, 0, 7, 0]], [[0, 2, 1, 2]]]
+    )
+    np.testing.assert_array_equal(masks, original)
 
 
 def test_apply_solution_graph_to_numpy_masks():

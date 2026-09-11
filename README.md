@@ -51,6 +51,8 @@ or from [conda-forge](https://anaconda.org/conda-forge/trackastra):
 conda install -c conda-forge trackastra
 ```
 
+For optional `fastremap` acceleration, use `pip install "trackastra[fast]"`.
+
 ### 🆕😎 With pretrained features
 
 For our [new model variant](https://github.com/C-Achard/Trackastra-et-Ultra) that uses SAM2 features for improved tracking performance on certain data, for example for tracking bacteria:

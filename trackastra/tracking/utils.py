@@ -3,7 +3,6 @@ from collections import deque
 from pathlib import Path
 
 import dask.array as da
-import fastremap
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -14,6 +13,11 @@ from geff_spec import DisplayHint, GeffMetadata
 from skimage.measure import regionprops
 from skimage.util import map_array
 from tqdm import tqdm
+
+try:
+    import fastremap
+except ImportError:
+    fastremap = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,7 +39,7 @@ def _relabel_masks(
     def relabel_frame(frame, input_vals, output_vals):
         if len(input_vals) == 0:
             return np.zeros_like(frame)
-        if np.array_equal(
+        if fastremap is not None and np.array_equal(
             input_vals, np.arange(1, len(input_vals) + 1, dtype=masks.dtype)
         ):
             mapping = {0: 0}
@@ -278,7 +282,8 @@ def _check_ctc_frame(df: pd.DataFrame, mask: np.ndarray, t: int) -> bool:
     sub = df[(df.t1 <= t) & (df.t2 >= t)]
     sub_lab = set(sub.label)
     # Find present labels without allocating an array up to the maximum label value.
-    masks_lab = set(fastremap.unique(mask).tolist()) - {0}
+    labels = fastremap.unique(mask) if fastremap is not None else np.unique(mask)
+    masks_lab = set(labels.tolist()) - {0}
     if not sub_lab.issubset(masks_lab):
         print(f"Missing labels in masks at t={t}: {sub_lab - masks_lab}")
         return False
